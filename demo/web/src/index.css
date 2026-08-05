@@ -1,0 +1,751 @@
+:root {
+  color-scheme: light;
+  font: 14px/1.4 "Courier New", Courier, monospace;
+
+  /* One slot's box and the space between two of them. Shared so .node-queue can compute its own width in a calc()
+     from a slot *count* — see its transition — instead of the number being duplicated there. */
+  --slot-w: 30px;
+  --slot-gap: 4px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* --- toolbar --- */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #ddd;
+  background: #fafafa;
+}
+
+/* --- toolbar item census: one progress bar per item currently in the conveyor (see ConveyorItems) ---
+   Doubles as the bar's flexible gap, which is all it is in build mode: it takes every pixel the two groups of
+   controls leave, and centers its row in them. Taller than the 18px row so the hover ring below has somewhere to go,
+   with overflow clipping anything that outgrows the space rather than letting it collide with the buttons. */
+
+.toolbar-items {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  overflow: hidden;
+}
+
+/* Width is set inline, from the row's own arithmetic; right:50% + a translate of half that width is what centers it,
+   and transitioning the transform is what makes the row glide sideways as items come and go instead of jumping. */
+.toolbar-items-row {
+  position: absolute;
+  top: 50%;
+  right: 50%;
+  height: 18px;
+  transition: transform 200ms ease;
+}
+
+/* Every bar is positioned from the row's right edge — the earliest item sits at index 0, i.e. furthest right — so an
+   item leaving shifts the ones behind it by exactly one slot, animated by this same transition. */
+.toolbar-item {
+  position: absolute;
+  top: 0;
+  right: 0;
+  /* Wider than the .item-badge it stands for, so a 3-digit item number keeps clear air either side of it — the
+     in-slot badges are pinned to their 30px slots and cannot, but nothing constrains this one. Kept in sync with
+     ConveyorItems' ITEM_W, which does the row's layout arithmetic. */
+  width: 34px;
+  height: 18px;
+  border: 1.5px solid var(--item-color, #2563eb);
+  border-radius: 4px;
+  background: #fff;
+  overflow: hidden;
+  transition:
+    transform 200ms ease,
+    opacity 200ms ease;
+  animation: toolbar-item-in 200ms ease;
+}
+
+/* Fading in needs a keyframe rather than the transition above: there is no previous value for a just-mounted element
+   to transition away from. */
+@keyframes toolbar-item-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Kept mounted for one fade after leaving the conveyor, and inert for it — there is nothing left to fail. */
+.toolbar-item.exiting {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* clip-path rather than a width, so this layer stays exactly the size of the bar: its own copy of the label can then
+   sit dead centre like the one underneath and line up with it automatically, at any fill level. */
+.toolbar-item-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--item-color, #2563eb);
+  clip-path: inset(0 var(--fill-clip, 100%) 0 0);
+  transition: clip-path 200ms ease;
+}
+
+/* Drawn twice, once under the fill and once clipped along with it: #111 reads against the white background, and
+   --item-text is already the contrast color chosen for this item's accent (see pipeline/colors). */
+.toolbar-item-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  color: #111;
+}
+
+.toolbar-item-fill .toolbar-item-label {
+  color: var(--item-text, #fff);
+}
+
+/* Stands in for the items that did not fit, which are always the later ones — so this sits at the left-hand end, past
+   the oldest item still shown. Right-aligned inside its fixed slot so it hugs them. */
+.toolbar-items-more {
+  position: absolute;
+  top: 0;
+  height: 18px;
+  width: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  font-size: 11px;
+  white-space: nowrap;
+  color: #52514e;
+}
+
+/* min-width holds the widest count this can ever show, so the number changing never resizes this element. That is not
+   cosmetic: the item census beside it is flex:1, so any width this gives up or takes back changes how many items fit
+   (see ConveyorItems' fit) and could add or drop one on a tick where nothing about the items themselves changed. */
+.toolbar-workers {
+  font-size: 12px;
+  color: #52514e;
+  font-variant-numeric: tabular-nums;
+  min-width: 96px;
+  text-align: right;
+}
+
+.toolbar-error {
+  color: #b91c1c;
+  font-size: 13px;
+}
+
+.run-button,
+.stop-button,
+.cancel-ctx-button {
+  border-radius: 6px;
+  padding: 8px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.run-button,
+.stop-button {
+  border: none;
+  color: #fff;
+}
+
+.run-button {
+  background: #16a34a;
+}
+
+.run-button:disabled {
+  background: #9ca3af;
+  cursor: not-allowed;
+}
+
+.stop-button {
+  background: #dc2626;
+}
+
+.stop-button:disabled {
+  background: #f3a3a3;
+  cursor: default;
+}
+
+/* Same destructive action as Stop (both send the run's context a cancellation signal — see Manager.Stop), styled
+   as the secondary control: an outline instead of a solid fill, so the two don't read as equally weighted. */
+.cancel-ctx-button {
+  border: 1px solid #dc2626;
+  background: #fff;
+  color: #dc2626;
+}
+
+.cancel-ctx-button:disabled {
+  border-color: #f3a3a3;
+  color: #f3a3a3;
+  cursor: default;
+}
+
+/* Shared by every toolbar toggle button (Show code, Legend): aria-pressed reflects whether its panel is open. */
+.panel-toggle-button {
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  color: #222;
+}
+
+.panel-toggle-button:hover {
+  background: #eef2ff;
+}
+
+.panel-toggle-button[aria-pressed="true"] {
+  background: #eef2ff;
+  border-color: #6366f1;
+}
+
+/* --- canvas --- */
+
+.main-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.pipeline-canvas {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* --- code panel: a sliding drawer to the left of the canvas, animated via width (not transform) so it pushes the
+   canvas aside instead of overlapping it; the inner element keeps its full width so the content doesn't reflow
+   while the outer wrapper's overflow:hidden clips it during the transition. */
+
+.code-panel {
+  width: 0;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-right: 1px solid #ddd;
+  background: #fafafa;
+  transition: width 200ms ease;
+}
+
+/* Actual width is set inline per the widest generated code line (see CodePanel.tsx); these just keep it from
+   getting cramped (short snippets) or from swallowing the whole window (pathologically long lines). */
+.code-panel-open {
+  min-width: 320px;
+  max-width: min(720px, 80vw);
+}
+
+.code-panel-inner {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.code-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #ddd;
+}
+
+.code-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0;
+  flex: 1;
+}
+
+.code-panel-button {
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background: #fff;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: #222;
+}
+
+.code-panel-button:hover {
+  background: #eef2ff;
+}
+
+.code-panel-body {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+}
+
+/* --- legend panel: same sliding-drawer mechanism as the code panel, but a fixed width — its content (unlike the
+   generated code) never changes size, so there's nothing to measure. */
+
+.legend-panel {
+  width: 0;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-right: 1px solid #ddd;
+  background: #fafafa;
+  transition: width 200ms ease;
+}
+
+.legend-panel-open {
+  width: 340px;
+}
+
+.legend-panel-inner {
+  width: 340px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.legend-panel-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid #ddd;
+}
+
+.legend-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.legend-panel-body {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+}
+
+.legend-list,
+.legend-sublist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.legend-sublist {
+  margin: 10px 0 0 20px;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.legend-item-heading {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+
+.legend-item-heading > .legend-label {
+  font-weight: 600;
+}
+
+.legend-label {
+  font-size: 12px;
+  color: #333;
+  flex: 1;
+}
+
+.legend-preview {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+}
+
+/* --- nodes ---
+   Every node's DOM lives inside a React Flow node wrapper that React Flow itself may mark pointer-events:none
+   (and treats mousedown as a potential drag) when a node has no drag/select/connect handlers of its own — which
+   ours deliberately don't, since the whole graph is laid out automatically, not dragged. pointer-events: auto
+   restores normal interaction for our content regardless; "nodrag nopan" on top additionally tells React Flow's
+   own listeners not to intercept these elements at all (see the official docs on interactive node content) — the
+   slider in particular needs it since a mousedown-drag is exactly what a <input type="range"> thumb also uses. */
+
+.node-shell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.node-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 180px;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1.5px solid #333;
+  border-radius: 8px;
+}
+
+.node-start {
+  border-style: dashed;
+}
+
+.node-fanout {
+  min-width: 220px;
+}
+
+.node-name {
+  font-weight: 600;
+  text-align: center;
+  font-size: 13px;
+  cursor: text;
+  border-radius: 4px;
+}
+
+.node-name:hover {
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.node-name-input {
+  font-weight: 600;
+  text-align: center;
+  font-size: 13px;
+  font-family: inherit;
+  width: 100%;
+  border: 1px solid #2563eb;
+  border-radius: 4px;
+  padding: 0;
+  background: #fff;
+}
+
+/* --- labeled dial: Limit / Queue / Delay / Tasks per item, all rendered the same way, inside the box above the
+   slot strip. Blue is a topology dial (Limit, Queue — shapes the pipeline itself); orange (.labeled-slider-sim) is
+   a simulated-processing dial (Delay, Tasks per item — only shapes how long/how much work a step's own code
+   simulates doing), so the two kinds are distinguishable at a glance — see LabeledSlider's variant prop. --- */
+
+.labeled-slider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #444;
+}
+
+.labeled-slider-label {
+  width: 34px;
+  flex-shrink: 0;
+}
+
+/* Fixed rather than flex: 1 — this row lives inside a column-flex box (.node-box, .branch-box, .lane-head) that
+   stretches its children to its own width, and that width grows with unrelated content (a lane's interior chain, a
+   fan-out's branches, a long node name). A flex slider would grow right along with it; fixing its width keeps every
+   dial the same size regardless of how wide its box ends up. */
+.labeled-slider input[type="range"] {
+  flex: 0 0 74px;
+  accent-color: #2563eb;
+}
+
+.labeled-slider-sim input[type="range"] {
+  accent-color: #f97316;
+}
+
+.labeled-slider-value {
+  min-width: 32px;
+  text-align: right;
+  padding: 1px 3px;
+}
+
+/* --- slots (body occupancy / queue) ---
+   Slots here are empty placeholders only; the item rectangles that appear to occupy them are a separate global
+   layer (see ItemsOverlay) positioned by measuring these placeholders' real DOM rects, which is what lets an item
+   glide smoothly from a slot in one node to a slot in a completely different one. */
+
+.slot-strip {
+  display: flex;
+  gap: var(--slot-gap);
+  flex-wrap: wrap;
+}
+
+/* A queue strip must not wrap: its container's width is animated (see .node-queue), and a strip narrower than its
+   content for one frame would reflow onto a second row and jolt the whole node's height. Clipped instead, by the
+   container's overflow:hidden. */
+.slot-strip-queue {
+  flex-wrap: nowrap;
+}
+
+.slot {
+  width: var(--slot-w);
+  height: 20px;
+  border: 1px solid #bbb;
+  border-radius: 4px;
+  background: #f5f5f5;
+}
+
+/* Reserved-but-unused capacity (see SlotStrip/TaskStrip's `reserve` prop): kept in the layout, at a fixed count, so
+   a strip's width never changes as live limit/occupancy does — only visibility toggles, never box size. */
+.slot-reserved {
+  visibility: hidden;
+}
+
+/* The shared item/task visual (see components/shared/ItemBadge) — a rectangle, not a square: the extra width is
+   what a lane sub-item's ".1"/".2" suffix (see pipeline/itemPositions.ts) needs room for. Positioning is deliberately
+   not part of this class — see .item-rect-overlay / .task-badge below, and ItemBadge's own doc. */
+.item-badge {
+  width: 27px;
+  height: 18px;
+  border-radius: 4px;
+  background: var(--item-color, #2563eb);
+  color: var(--item-text, #fff);
+  font-size: 9px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+/* Fill variants layered on the default solid fill above (see pipeline/itemPositions.ts's ItemFill): "pending" (a
+   fan-out entry slot, not all branch tasks started yet) is dashed; "blocked" (finished this node's own work, trying
+   to advance into the next one) is solid-bordered — the two share the same no-fill/colored-text look otherwise, so
+   the border alone tells apart "hasn't started" from "already done" at a glance. */
+.item-badge.pending,
+.item-badge.blocked {
+  background: transparent;
+  border: 2px solid var(--item-color, #2563eb);
+  color: var(--item-color, #2563eb);
+}
+
+.item-badge.pending {
+  border-style: dashed;
+}
+
+.items-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+}
+
+/* pointer-events overrides .item-badge's own none, which is what the in-slot look and the legend previews want:
+   only the live overlay copy is interactive, because Ctrl/⌘-clicking it injects a failure for that item (see
+   ItemsOverlay). No cursor or hover styling at rest — an unmodified click does nothing, so promising otherwise would
+   be a lie; both appear only under .fail-modifier below. */
+.item-rect-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: auto;
+  transition:
+    transform 200ms linear,
+    opacity 200ms linear;
+}
+
+/* Leaving the last stage: keeps sliding right (see ItemsOverlay's EXIT_OFFSET_X) and fades rather than vanishing. It
+   also stops being clickable — an item on its way out of the system has nothing left to fail. */
+.item-rect-overlay.exiting {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* The waiting room, drawn to the left of the node it fronts. Its width is computed from a slot *count*
+   (--queue-slots, set inline by StageBox/FanOutBox) rather than left to the content, which is what lets it be
+   transitioned: an `auto` width has nothing to interpolate between. So the room glides open and closed as the Queue
+   slider moves, and — because lowering the dial never evicts whoever is already waiting (see
+   conveyor.Stage.SetQueueSize, and queueSlotCount) — it also glides *shut one slot at a time* as a shrunken queue
+   drains, instead of snapping.
+
+   Two notes on the arithmetic. The count is a plain number, so the slot geometry has to come from the same vars
+   .slot/.slot-strip use, or the box would stop matching its contents the moment either changed. And box-sizing is
+   border-box globally, so the padding and border are inside this width and have to be added back. */
+.node-queue {
+  --queue-pad: 6px;
+  --queue-border: 1px;
+
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  overflow: hidden;
+  width: calc(
+    var(--queue-slots) * var(--slot-w) + (var(--queue-slots) - 1) * var(--slot-gap) + 2 *
+      (var(--queue-pad) + var(--queue-border))
+  );
+  padding: var(--queue-pad);
+  border: var(--queue-border) dashed #bbb;
+  border-radius: 6px;
+  background: #fbfbfb;
+  transition: width 200ms ease;
+}
+
+/* --- fan-out branches (pools and lanes) --- */
+
+.fanout-branches {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.branch-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid #999;
+  border-radius: 6px;
+  background: #f8f9ff;
+}
+
+.branch-name {
+  font-size: 11px;
+}
+
+/* A lane with interior nodes shows its head (name + Tasks dial, no Limit/Delay of its own — see LaneBox) above a
+   row starting with its own implicit Entrance gate (see StartBox) and continuing through its interior
+   stage/fan-out boxes, still inside this one branch-box border so it reads as contained within the fan-out. */
+.branch-box-lane-open {
+  background: #fff;
+}
+
+.lane-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lane-interior {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+.lane-interior-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lane-connector {
+  width: 14px;
+  height: 2px;
+  flex-shrink: 0;
+  background: #999;
+}
+
+/* --- pool tasks: a colored badge (see components/shared/ItemBadge) per occupant, fading in/out in place (never
+   moving) — see TaskStrip. Also used by an empty lane, which behaves the same way (see nodes/LaneBox). Positioned
+   the same way a moving item is: an absolute layer over plain slot placeholders. */
+
+.task-strip {
+  position: relative;
+  height: 20px;
+}
+
+.task-slot {
+  position: absolute;
+  top: 0;
+}
+
+.task-badge {
+  position: absolute;
+  top: 1px;
+  opacity: 0;
+  pointer-events: auto; /* overrides .item-badge's own none — see .item-rect-overlay's identical override */
+  /* transform is never set via the React style prop (see TaskStrip's own TaskBadge) — it's driven imperatively for
+     the one-off fly-in from the fan-out, and this transition is what turns clearing that offset into a visible
+     glide instead of a snap. */
+  transition:
+    opacity 200ms ease,
+    transform 220ms ease;
+}
+
+.task-badge-visible {
+  opacity: 1;
+}
+
+/* Not a click target while fading in or out, matching .item-rect-overlay.exiting: a task mid-fade has already run, so
+   there is nothing left to fail — and without this it would still light up and offer a pointer cursor under
+   .fail-modifier below. TaskStrip's own phase check stays the authoritative guard. */
+.task-badge:not(.task-badge-visible) {
+  pointer-events: none;
+}
+
+/* --- fail-on-click affordance ---
+   Held Ctrl/⌘ turns an item's rectangle and a pool task's badge into "fail this one" targets (see
+   components/shared/failModifier). The class is mirrored onto <body> for exactly as long as the key is down — see
+   hooks/useFailModifierClass — so the whole affordance appears and disappears with it, and none of it is offered
+   while a plain click would do nothing.
+
+   Scoped to .task-strip so the legend's own preview badge, which shares these classes but is not a click target, is
+   left alone (the item preview needs no such guard: it never gets .item-rect-overlay). z-index lifts the hovered one
+   above its absolutely-positioned neighbours so the ring is never clipped by the next item along. */
+.fail-modifier .item-rect-overlay:hover,
+.fail-modifier .task-strip .task-badge:hover,
+.fail-modifier .toolbar-item:hover {
+  cursor: pointer;
+  filter: contrast(1.5) saturate(1.6);
+  box-shadow: 0 0 0 2px #111;
+  z-index: 1;
+}
+
+.repo-link {
+  position: fixed;
+  right: 12px;
+  bottom: 8px;
+  color: #000;
+  text-decoration: underline;
+  font-size: 14px;
+}
+
+/* --- context menu --- */
+
+.context-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+}
+
+.context-menu {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+  overflow: hidden;
+  padding: 4px;
+}
+
+.context-menu-item {
+  border: none;
+  background: none;
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.context-menu-item:hover {
+  background: #eef2ff;
+}
