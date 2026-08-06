@@ -5,10 +5,12 @@
 import {
   clamp,
   MAX_DELAY_MS,
+  MAX_ITEMS_LIMIT,
   MAX_LIMIT,
   MAX_QUEUE_SIZE,
   MAX_TASKS_PER_ITEM,
   MIN_DELAY_MS,
+  MIN_ITEMS_LIMIT,
   MIN_LIMIT,
   MIN_QUEUE_SIZE,
   MIN_TASKS_PER_ITEM,
@@ -71,6 +73,7 @@ interface UrlPayload {
   /** Present only when the user renamed the implicit start stage — same convention as a node's own name (see
    * nodeToUrl). */
   startName?: string;
+  itemsLimit: number;
   nodes: UrlNode[];
   mode: UrlMode;
   showCode: boolean;
@@ -172,6 +175,7 @@ export function encodeUrlState(state: UrlAppState): string {
     v: HASH_VERSION,
     startDelayMs: state.pipeline.startDelayMs,
     ...(state.pipeline.startName ? { startName: state.pipeline.startName } : {}),
+    itemsLimit: state.pipeline.itemsLimit,
     nodes: state.pipeline.nodes.map(nodeToUrl),
     mode: state.mode,
     showCode: state.showCode,
@@ -194,6 +198,9 @@ export function decodeUrlState(hash: string): UrlAppState | null {
         nodes: payload.nodes.map(urlToNode),
         startDelayMs: clamp(Number(payload.startDelayMs), MIN_DELAY_MS, MAX_DELAY_MS),
         startName: typeof payload.startName === "string" ? payload.startName : "",
+        // clamp() folds a missing field (NaN) down to MIN_ITEMS_LIMIT (0, unlimited) — a link saved before this
+        // field existed comes back with the behavior it actually had.
+        itemsLimit: clamp(Number(payload.itemsLimit), MIN_ITEMS_LIMIT, MAX_ITEMS_LIMIT),
       },
       mode: payload.mode === "run" ? "run" : "build",
       showCode: payload.showCode === true,

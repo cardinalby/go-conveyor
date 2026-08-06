@@ -85,7 +85,7 @@
         <mxCell id="0tfmDrOFXvbelfvf-XMY-179" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="" vertex="1">
           <mxGeometry height="43.5" width="522" x="133" y="643" as="geometry" />
         </mxCell>
-        <mxCell id="0tfmDrOFXvbelfvf-XMY-180" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="dynamic goroutines pull" vertex="1">
+        <mxCell id="0tfmDrOFXvbelfvf-XMY-180" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="dynamic goroutines pool" vertex="1">
           <mxGeometry height="30" width="132.48" x="334.21000000000004" y="613" as="geometry" />
         </mxCell>
         <mxCell id="0tfmDrOFXvbelfvf-XMY-181" connectable="0" parent="1" style="group;strokeOpacity=70;" value="" vertex="1">

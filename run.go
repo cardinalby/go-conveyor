@@ -225,11 +225,12 @@ func (r *run) worker() {
 	}
 }
 
-// acquireItem blocks until this worker may create the next root item (the start stage has room) and returns it, or
-// returns nil when the worker should exit: the conveyor has stopped creating items, or another worker is already
-// standing by. At most one worker waits idle — extra workers retire, so the pool shrinks back after a burst instead
-// of keeping a herd of idle waiters that every cond.Broadcast wakes. When creating an item leaves nobody standing
-// by, it spawns a replacement so a worker is always ready for the following item.
+// acquireItem blocks until this worker may create the next root item — the start stage has room and the
+// items-in-flight cap (SetItemsLimit), if any, allows it — and returns it, or returns nil when the worker should
+// exit: the conveyor has stopped creating items, or another worker is already standing by. At most one worker
+// waits idle — extra workers retire, so the pool shrinks back after a burst instead of keeping a herd of idle
+// waiters that every cond.Broadcast wakes. When creating an item leaves nobody standing by, it spawns a
+// replacement so a worker is always ready for the following item.
 //
 // "Standing by" means idle+spawning: a worker that has been spawned but not yet scheduled is already on its way
 // here and must not be duplicated (see run.spawning). arrived is set by a worker's first call, which is where its
@@ -244,7 +245,7 @@ func (r *run) acquireItem(arrived bool) *item {
 		if r.stopCreating {
 			return nil
 		}
-		if r.unitHasFreeSlot(0) { // start stage has room -> create the next item
+		if r.unitHasFreeSlot(0) && r.hasItemsRoom() { // room at the start stage, and under the items cap -> create
 			it := r.newRootItem()
 			if r.idle+r.spawning == 0 {
 				r.spawnWorker()

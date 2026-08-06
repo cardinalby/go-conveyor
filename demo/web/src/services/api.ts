@@ -7,6 +7,11 @@ interface NodeValueRequest {
   value: number;
 }
 
+// Body shape of setItemsLimit (see wasmapi.itemsLimitRequest) — global, so unlike NodeValueRequest it names no node.
+interface ItemsLimitRequest {
+  value: number;
+}
+
 // Shared body shape of failItem / failTask (see wasmapi.failureRequest): laneId is read by failTask only, since
 // failing an item targets the item wherever it happens to be, not a particular node.
 interface FailureRequest {
@@ -27,6 +32,10 @@ export const api = {
   },
   state(): RunState {
     return callWasmMethod<RunState>("state");
+  },
+  /** Adjusts the running conveyor's global items-in-flight cap — see runtime.Manager.SetItemsLimit. */
+  setItemsLimit(value: number): RunState {
+    return callWasmMethod<RunState>("setItemsLimit", { value } satisfies ItemsLimitRequest);
   },
   setLimit(id: string, value: number): RunState {
     return callWasmMethod<RunState>("setLimit", { id, value } satisfies NodeValueRequest);

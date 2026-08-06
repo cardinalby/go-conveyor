@@ -41,6 +41,12 @@ type Conveyor struct {
 	// lets a unit reach the live run (e.g. to wake waiters after a SetLimit). It is an atomic pointer so
 	// concurrent readers never see a torn value.
 	currentRun atomic.Pointer[run]
+
+	// itemsLimit caps how many items may be in flight across the whole conveyor at once — the root items a
+	// worker drives from creation to completion (see run.worker), so this is also a cap on live workers. 0 means
+	// unlimited, the default. Atomic because SetItemsLimit may change it from any goroutine while a run is
+	// active; every read otherwise happens under run.mu (see run.hasItemsRoom).
+	itemsLimit atomic.Int64
 }
 
 // Option configures a Conveyor at creation. See NewConveyor.
@@ -81,6 +87,33 @@ func NewConveyor(options ...Option) *Conveyor {
 	}
 	return c
 }
+
+// SetItemsLimit caps how many items may be in flight across the whole conveyor at once, which in effect bounds how
+// many workers run concurrently: one worker drives one root item for its whole journey, from creation to
+// completion (see Run). A limit <= 0 means unlimited, the default.
+//
+// Unlike a node's SetLimit, this bounds the conveyor globally, on top of whatever capacity the nodes themselves
+// admit — it does not replace per-node limits, and setting it does not change any of them.
+//
+// Safe to call at any time, from any goroutine, including on a running conveyor: raising it wakes the standby
+// worker so waiting to create the next item is picked up at once; lowering it never evicts an item already in
+// flight — it only stops new items from being created until the in-flight count has fallen below the new limit.
+func (c *Conveyor) SetItemsLimit(n int) *Conveyor {
+	if n < 0 {
+		n = 0
+	}
+	c.itemsLimit.Store(int64(n))
+	if r := c.currentRun.Load(); r != nil {
+		r.mu.Lock()
+		r.cond.Broadcast() // wake the standby worker so a raise is picked up at once
+		r.mu.Unlock()
+	}
+	return c
+}
+
+// ItemsLimit returns the current cap on items in flight across the whole conveyor, or 0 if unlimited (the
+// default).
+func (c *Conveyor) ItemsLimit() int { return int(c.itemsLimit.Load()) }
 
 // startOwner names the implicit start stage in Stats and error messages.
 type startOwner struct{}

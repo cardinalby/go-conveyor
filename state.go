@@ -195,6 +195,14 @@ func (r *run) unitHasFreeSlot(j int) bool {
 	return r.occupancy[j].val < int(r.conveyor.units[j].limit.Load())
 }
 
+// hasItemsRoom reports whether the conveyor's items-in-flight cap (SetItemsLimit) allows another root item to be
+// created right now; a limit <= 0 means unlimited. It is the sole gate acquireItem adds on top of the start
+// stage's own admission, so a live SetItemsLimit is observed the same way a live SetLimit is. Caller holds mu.
+func (r *run) hasItemsRoom() bool {
+	limit := r.conveyor.itemsLimit.Load()
+	return limit <= 0 || int64(r.inFlight.val) < limit
+}
+
 // canEnterQueue reports whether it may step into the waiting room in front of unit u right now: room there, and
 // the same ordering rule as any other move, applied to the waiting room's own (lower) rank. Its counterpart for
 // the node itself is canEnter; the two differ only in which counter and which rank they read, which is what keeps

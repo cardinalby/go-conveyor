@@ -29,5 +29,5 @@ export function newFanOut(branches: BranchNode[]): FanOutNode {
  * stage's does (defaultStageDelayMs(1)) rather than 0 — MIN_DELAY_MS is a real floor now, not just an unused
  * lower bound. */
 export function defaultPipeline(): Pipeline {
-  return { nodes: [newStage(), newStage()], startDelayMs: defaultStageDelayMs(1), startName: "" };
+  return { nodes: [newStage(), newStage()], startDelayMs: defaultStageDelayMs(1), startName: "", itemsLimit: 0 };
 }

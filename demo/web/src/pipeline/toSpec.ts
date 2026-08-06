@@ -37,5 +37,5 @@ function nodesToSpec(nodes: PipelineNode[]): NodeSpec[] {
  * branch's own nodes exactly like the top level, since NodeSpec/BranchSpec are the same mutually-recursive shape a
  * lane's interior chain uses (see ../types/topology). */
 export function toSpec(pipeline: Pipeline): Spec {
-  return { nodes: nodesToSpec(pipeline.nodes), startDelayMs: pipeline.startDelayMs };
+  return { nodes: nodesToSpec(pipeline.nodes), startDelayMs: pipeline.startDelayMs, itemsLimit: pipeline.itemsLimit };
 }

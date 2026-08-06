@@ -34,7 +34,7 @@ type nodeHost interface {
 // It returns an error for a malformed spec (a blank, reserved or duplicate id, an unknown Kind) rather than letting
 // the conveyor package panic on a handle mix-up later, in ItemProcessor.
 func Build(spec Spec, options ...conveyor.Option) (*Built, error) {
-	c := conveyor.NewConveyor(options...)
+	c := conveyor.NewConveyor(options...).SetItemsLimit(spec.ItemsLimit)
 	built := &Built{
 		Conveyor: c,
 		Handles:  map[string]conveyor.Unit{StartID: c.StartUnit()},

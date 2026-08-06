@@ -32,6 +32,11 @@ type nodeValueRequest struct {
 	Value int    `json:"value"`
 }
 
+// itemsLimitRequest is the body shape of setItemsLimit — global, so unlike nodeValueRequest it names no node.
+type itemsLimitRequest struct {
+	Value int `json:"value"`
+}
+
 // failureRequest is the body shape shared by failItem / failTask. LaneID is read by failTask only — failItem targets
 // the item wherever it currently is, not at a particular node.
 type failureRequest struct {
@@ -92,6 +97,8 @@ func (h *handler) dispatch(req methodRequest) (any, error) {
 		return h.manager.State(), nil
 	case "state":
 		return h.manager.State(), nil
+	case "setItemsLimit":
+		return h.applyItemsLimit(req.Body)
 	case "setLimit":
 		return h.applyNodeValue(req.Body, h.manager.SetLimit)
 	case "setQueueSize":
@@ -115,6 +122,17 @@ func (h *handler) applyNodeValue(body json.RawMessage, apply func(id string, val
 		return nil, err
 	}
 	if err := apply(req.ID, req.Value); err != nil {
+		return nil, err
+	}
+	return h.manager.State(), nil
+}
+
+func (h *handler) applyItemsLimit(body json.RawMessage) (any, error) {
+	var req itemsLimitRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, err
+	}
+	if err := h.manager.SetItemsLimit(req.Value); err != nil {
 		return nil, err
 	}
 	return h.manager.State(), nil

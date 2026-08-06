@@ -20,6 +20,7 @@ import {
   rewriteBranchLists,
   rewriteNodeLists,
 } from "./pipeline/mutations";
+import { clamp, MAX_ITEMS_LIMIT, MIN_ITEMS_LIMIT } from "./pipeline/defaults";
 import { useFailModifierClass } from "./hooks/useFailModifierClass";
 import { computeItemPositions, NO_ITEM_POSITIONS } from "./pipeline/itemPositions";
 import { resolvePipeline, resolveStart } from "./pipeline/resolve";
@@ -215,6 +216,19 @@ function App() {
       setPipeline((p) => ({ ...p, startDelayMs: value }));
       if (mode !== "run") return;
       api.setDelay(START_ID, value);
+      setRunState(api.state());
+    },
+    [mode],
+  );
+
+  // Global, unlike every other numeric edit above — it caps items in flight across the whole conveyor rather than
+  // belonging to one node (see conveyor.Conveyor.SetItemsLimit), which is why it is a standalone corner control
+  // rather than a dial on some node's box.
+  const handleEditItemsLimit = useCallback(
+    (value: number) => {
+      setPipeline((p) => ({ ...p, itemsLimit: value }));
+      if (mode !== "run") return;
+      api.setItemsLimit(value);
       setRunState(api.state());
     },
     [mode],
@@ -416,6 +430,17 @@ function App() {
           onClose={closeMenu}
         />
       )}
+      <div className="items-limit-control" title="Caps how many items may be in flight across the whole conveyor at once (0 = unlimited)">
+        <label htmlFor="items-limit-input">ItemsLimit</label>
+        <input
+          id="items-limit-input"
+          type="number"
+          min={MIN_ITEMS_LIMIT}
+          max={MAX_ITEMS_LIMIT}
+          value={pipeline.itemsLimit}
+          onChange={(e) => handleEditItemsLimit(clamp(Number(e.target.value), MIN_ITEMS_LIMIT, MAX_ITEMS_LIMIT))}
+        />
+      </div>
       <a className="repo-link" href="https://github.com/cardinalby/go-conveyor" target="_blank" rel="noopener noreferrer">
         go-conveyor
       </a>

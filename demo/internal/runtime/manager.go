@@ -357,6 +357,19 @@ func (m *Manager) FailTask(poolID string, itemNo int64) error {
 	return nil
 }
 
+// SetItemsLimit adjusts the active run's items-in-flight cap immediately (see conveyor.Conveyor.SetItemsLimit —
+// safe on a live conveyor by design). Unlike SetLimit/SetQueueSize/SetDelay it names no node: the cap is global to
+// the conveyor. It errors if nothing is running.
+func (m *Manager) SetItemsLimit(value int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.running || m.built == nil {
+		return errors.New("not running")
+	}
+	m.built.Conveyor.SetItemsLimit(value)
+	return nil
+}
+
 // SetDelay adjusts a running node's simulated processing time immediately: the next item to reach it reads the new
 // value (see topology.Delays).
 func (m *Manager) SetDelay(id string, ms int) error {

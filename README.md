@@ -103,9 +103,12 @@ shutdownErr := c.Run(ctx, itemProcessor)
 
 ![simple 3-step conveyor](docs/res/readme/conv_simple.svg)
 
-You still have a single function that processes a single batch, but the conveyor takes care of:
-- dispatching new items (batches) to the next available goroutine
-- managing the goroutines pool
+**Stages** are smart **locks** with ordered admission:
+- `MoveTo` is atomic: it waits for the stage to be available and releases the previous stage providing backpressure
+- Deadlock-free: you can move only forward to the next stage, not backward
+
+You still have a **single function** that processes a single batch, but the Conveyor takes care of:
+- dispatching new items (batches) to the next available goroutine from the dynamic pool
 - graceful shutdown of the pipeline
 - observability, dynamic concurrency limits and queue sizes for stages, etc.
 

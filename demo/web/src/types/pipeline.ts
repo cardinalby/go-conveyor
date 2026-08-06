@@ -57,8 +57,12 @@ export type PipelineNode = StageNode | FanOutNode;
  * conveyor has exactly one automatically. startName is "" until the user renames it, exactly like a node's own name,
  * and is display-only: go-conveyor's start unit is always called "start" and takes no OptName, so unlike a node's
  * name this one never reaches the Spec or the generated code. */
+/** itemsLimit caps how many items may be in flight across the whole conveyor at once (see Go's
+ * conveyor.Conveyor.SetItemsLimit) — global, unlike every other dial here, which belongs to one node. 0 means
+ * unlimited, the default. */
 export interface Pipeline {
   nodes: PipelineNode[];
   startDelayMs: number;
   startName: string;
+  itemsLimit: number;
 }

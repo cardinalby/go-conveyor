@@ -715,6 +715,23 @@ body,
   font-size: 14px;
 }
 
+.items-limit-control {
+  position: fixed;
+  left: 12px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #52514e;
+}
+
+.items-limit-control input {
+  width: 60px;
+  font: inherit;
+  padding: 2px 4px;
+}
+
 /* --- context menu --- */
 
 .context-menu-backdrop {
