@@ -9,6 +9,11 @@ import { ItemBadge } from "./ItemBadge";
 import type { LanePathEntry } from "../../types/state";
 
 const SLOT_SIZE = 34; // must match .task-slot's width + gap in index.css
+// Half the gap between a slot's own width (--slot-w, 30px) and .item-badge's width (27px) — centers the badge
+// horizontally within its slot, the same way .task-badge's static `top: 1px` centers it vertically (20px slot,
+// 18px badge). Unlike the vertical case this can't be a static CSS rule: `left` already varies per badge with
+// its slot index below.
+const TASK_BADGE_X_OFFSET = (30 - 27) / 2;
 const EXIT_MS = 220;
 
 interface TaskEntry {
@@ -245,7 +250,7 @@ export function TaskStrip({ nodeId, limit, inBody, lanePaths, entrySlotByItemKey
             e.stopPropagation();
             onFail(nodeId, t.itemNo);
           }}
-          style={{ left: t.slot * SLOT_SIZE }}
+          style={{ left: t.slot * SLOT_SIZE + TASK_BADGE_X_OFFSET }}
         />
       ))}
     </div>

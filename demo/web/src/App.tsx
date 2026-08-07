@@ -103,6 +103,37 @@ function App() {
 
   useEffect(() => stopPolling, [stopPolling]);
 
+  // Keeps the app in sync with an out-of-band hash edit — the address bar, a bookmark, browser back/forward —
+  // the same way a fresh load already does. Never fires for the app's own writes above: those go through
+  // history.replaceState, which (unlike an assignment to location.hash) never dispatches 'hashchange'.
+  useEffect(() => {
+    function handleHashChange() {
+      const restored = readUrlState();
+      if (!restored) return;
+      setPipeline(restored.pipeline);
+      setShowCode(restored.showCode);
+      setShowLegend(restored.showLegend);
+      setMode((prevMode) => {
+        if (restored.mode === "run") {
+          if (!wasmReady) return prevMode; // ignore until the module is ready — same gate as the mount-time autostart below
+          if (prevMode !== "run") {
+            resetBodySlotAssignments();
+            setRunState(api.run(toSpec(restored.pipeline)));
+            startPolling();
+          }
+          return "run";
+        }
+        if (prevMode === "run") {
+          stopPolling();
+          setRunState(api.stop());
+        }
+        return "build";
+      });
+    }
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, [wasmReady, startPolling, stopPolling]);
+
   function handleRun() {
     resetBodySlotAssignments(); // a fresh run's item numbers restart from 1 — never inherit a stale slot
     const state = api.run(toSpec(pipeline));
