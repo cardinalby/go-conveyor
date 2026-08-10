@@ -1,7 +1,7 @@
 package conveyor
 
 // UnitOccupants is a point-in-time snapshot of exactly which items occupy one unit right now. See
-// DebugUnitOccupants.
+// Conveyor.DebugUnitOccupants.
 type UnitOccupants struct {
 	Unit Unit
 
@@ -13,11 +13,8 @@ type UnitOccupants struct {
 	InQueue []int64
 }
 
-// DebugUnitOccupants reports, for every unit, exactly which items occupy its body and its waiting room right now.
-// It exists for debugging and visualization; use Stats for production observability.
-//
-// Safe to call at any time, from any goroutine; outside a run it reports nil.
-func (c *Conveyor) DebugUnitOccupants() []UnitOccupants {
+// DebugUnitOccupants reports who occupies every unit right now (see the Conveyor interface).
+func (c *conveyor) DebugUnitOccupants() []UnitOccupants {
 	r := c.currentRun.Load()
 	if r == nil {
 		return nil

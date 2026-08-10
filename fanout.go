@@ -225,7 +225,7 @@ func (r *run) scheduleWave(it *item, f *fanOut, tasks Tasks) *wave {
 
 // assignRank reserves rank r for the waiting room and gives the node unit the next one, whether or not a queue is
 // configured (see the rank discussion in builder.go). The branches' interior series are ranked independently (each is
-// its own scope; see Conveyor.finalize).
+// its own scope; see conveyor.finalize).
 func (f *fanOut) assignRank(scope, r int) int {
 	f.node.scope, f.node.rank = scope, r+1
 	return r + 2

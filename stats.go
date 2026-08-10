@@ -58,9 +58,8 @@ type UnitStat struct {
 	Queued   Gauge // work waiting in front of the node since the previous Stats read
 }
 
-// Stats returns a snapshot of the active run's state and resets the gauge windows. Safe to call at any time, from
-// any goroutine; outside a run it reports the zero Stats.
-func (c *Conveyor) Stats() Stats {
+// Stats snapshots the active run and resets the gauge windows (see the Conveyor interface).
+func (c *conveyor) Stats() Stats {
 	r := c.currentRun.Load()
 	if r == nil {
 		return Stats{}

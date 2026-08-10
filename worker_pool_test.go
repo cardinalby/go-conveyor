@@ -11,7 +11,7 @@ import (
 
 // liveWorkers samples the current size of the worker pool. Stats resets its window on every read, so only Last is
 // meaningful to a repeated sampler.
-func liveWorkers(c *Conveyor) int { return c.Stats().LiveWorkers.Last }
+func liveWorkers(c Conveyor) int { return c.Stats().LiveWorkers.Last }
 
 // recordMax raises dst to v if v is larger, for lock-free peak tracking.
 func recordMax(dst *atomic.Int64, v int64) {

@@ -9,7 +9,7 @@ import (
 // between invocations. All fields below mu are guarded by mu; the state transitions and gate logic that operate on
 // them live in state.go.
 type run struct {
-	conveyor    *Conveyor
+	conveyor    *conveyor
 	proc        ItemProcessor
 	itemsCtx    context.Context         // parent of every root item context; canceled when Run returns
 	cancelItems context.CancelCauseFunc // cancels itemsCtx (and thus every item context) with a cause
@@ -54,13 +54,8 @@ type run struct {
 // are allowed to finish.
 type ItemProcessor func(ctx context.Context) error
 
-// Run starts the conveyor, creating one item per itemProcessor invocation until ctx is canceled or an item fails.
-// It blocks until every in-flight item has finished, then returns the first item error, or else ctx's cancellation
-// cause.
-//
-// Build all nodes before calling Run; the topology is frozen from the first Run on. Run may be called again after
-// it returns, but a concurrent second call returns ErrConveyorAlreadyRunning.
-func (c *Conveyor) Run(ctx context.Context, itemProcessor ItemProcessor) error {
+// Run drives items through the conveyor until ctx is canceled or an item fails (see the Conveyor interface).
+func (c *conveyor) Run(ctx context.Context, itemProcessor ItemProcessor) error {
 	if err := c.tryRun(); err != nil {
 		return err
 	}
@@ -96,7 +91,7 @@ func (c *Conveyor) Run(ctx context.Context, itemProcessor ItemProcessor) error {
 	return context.Cause(ctx)
 }
 
-func (c *Conveyor) tryRun() error {
+func (c *conveyor) tryRun() error {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
 	if c.isRunning {
@@ -107,7 +102,7 @@ func (c *Conveyor) tryRun() error {
 	return nil
 }
 
-func (c *Conveyor) stopRun() {
+func (c *conveyor) stopRun() {
 	c.runMu.Lock()
 	c.isRunning = false
 	c.runMu.Unlock()

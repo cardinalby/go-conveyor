@@ -24,16 +24,17 @@ func TestUnitIndexesFollowCreationOrder(t *testing.T) {
 	if start.index != 0 || start.kind != kindStart {
 		t.Fatalf("start unit: index=%d kind=%d, want index 0 and the start kind", start.index, start.kind)
 	}
+	units := implOf(c).units
 	want := []*unit{start, s1.unit(), fo.unit(), l1.unit(), l2.unit(), s2.unit(), in.unit()}
-	if len(c.units) != len(want) {
-		t.Fatalf("conveyor has %d units, want %d", len(c.units), len(want))
+	if len(units) != len(want) {
+		t.Fatalf("conveyor has %d units, want %d", len(units), len(want))
 	}
 	for i, u := range want {
 		if u.index != i {
 			t.Fatalf("%s has index %d, want %d", u, u.index, i)
 		}
-		if c.units[i] != u {
-			t.Fatalf("units[%d] = %s, want %s", i, c.units[i], u)
+		if units[i] != u {
+			t.Fatalf("units[%d] = %s, want %s", i, units[i], u)
 		}
 	}
 }
@@ -48,7 +49,8 @@ func TestRanksReserveTwoForEveryNode(t *testing.T) {
 	b := c.AddStage(OptName("b")).SetQueueSize(2)
 	fo := c.AddFanOut(OptName("fo")).SetQueueSize(3)
 	d := c.AddStage(OptName("d"))
-	c.finalize()
+	ci := implOf(c)
+	ci.finalize()
 
 	for _, tc := range []struct {
 		u    *unit
@@ -69,7 +71,7 @@ func TestRanksReserveTwoForEveryNode(t *testing.T) {
 	}
 	// Every node owns the rank below its own, queue or no queue, and no other unit may hold it.
 	for _, u := range []*unit{a.unit(), b.unit(), fo.unit(), d.unit()} {
-		if got := c.describeRank(0, u.queueRank()); got != u.queueName() {
+		if got := ci.describeRank(0, u.queueRank()); got != u.queueName() {
 			t.Fatalf("rank %d of %s is named %q, want it reserved for the waiting room", u.queueRank(), u, got)
 		}
 	}
@@ -88,7 +90,7 @@ func TestBranchIsItsOwnRankSpace(t *testing.T) {
 	inner := l1.AddFanOut(OptName("inner")).SetQueueSize(2)
 	il := inner.AddLane(OptName("il"))
 	ii := il.AddStage(OptName("ii"))
-	c.finalize()
+	implOf(c).finalize()
 
 	rootScope := c.StartUnit().unit().scope
 	for _, tc := range []struct {
@@ -134,7 +136,7 @@ func TestPositionalNames(t *testing.T) {
 	s2 := c.AddStage(OptName("s")).SetQueueSize(2)
 	s3 := c.AddStage().SetQueueSize(2) // 4th node, queued
 	fo2 := c.AddFanOut()               // 5th node
-	c.finalize()
+	implOf(c).finalize()
 
 	for _, tc := range []struct{ got, want string }{
 		{fmt.Sprint(c.StartUnit()), "start"},

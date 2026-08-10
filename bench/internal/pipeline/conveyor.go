@@ -23,7 +23,7 @@ type conveyorNode struct {
 // (or as fan-out tasks). The conveyor supplies ordering and per-node concurrency
 // limits; this type only wires the Spec onto it.
 type conveyorPipeline struct {
-	c     *conveyor.Conveyor
+	c     conveyor.Conveyor
 	obs   *Observer
 	nodes []conveyorNode
 }

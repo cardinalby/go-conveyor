@@ -46,7 +46,7 @@ func ItemNoFromContext(ctx context.Context) (no int64, ok bool) {
 // itemFromContext resolves the item a node method is being called for. It returns ErrForeignContext if the context
 // does not carry an item handle (it was never derived from an item's ctx).
 //
-// It intentionally does not check here that the item belongs to the currently active run: Conveyor cancels an
+// It intentionally does not check here that the item belongs to the currently active run: the conveyor cancels an
 // item's context when the item finishes and when Run returns, so a context left over from a finished item or a
 // previous run is normally already canceled and the caller's cancellation check neutralizes it. The remaining
 // case — a stale context decoupled from cancellation (e.g. context.WithoutCancel) — is caught by the callers'
@@ -69,7 +69,7 @@ func itemFromContext(ctx context.Context) (*item, error) {
 //     be used with one of its own items.
 //
 // Callers still hold their own it.finished / cancellation handling.
-func (c *Conveyor) resolveItem(ctx context.Context) (*item, error) {
+func (c *conveyor) resolveItem(ctx context.Context) (*item, error) {
 	if m, ok := ctx.Value(poolWorkCtxKey).(poolWorkMarker); ok {
 		panic(fmt.Errorf("this context belongs to work on %s, which has no nodes of its own to move through "+
 			"(use AddLane for a branch whose work travels): %w", m.pool, errCannotMove))
@@ -96,7 +96,7 @@ func (c *Conveyor) resolveItem(ctx context.Context) (*item, error) {
 // It panics on the same static misuse the individual methods used to check inline: a foreign handle (errInvalidUnit),
 // a context belonging to a pool's non-movable work (errCannotMove), or a node outside the item's series (errWrongScope).
 // Errors — a foreign or stale context — are returned for the caller to wrap with its own operation prefix.
-func (c *Conveyor) actingItem(ctx context.Context, u *unit, checkCancel bool) (*item, *run, error) {
+func (c *conveyor) actingItem(ctx context.Context, u *unit, checkCancel bool) (*item, *run, error) {
 	c.validateUnit(u)
 	it, err := c.resolveItem(ctx)
 	if err != nil {

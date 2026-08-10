@@ -13,7 +13,7 @@ import (
 
 // panicsInItem runs one item through c and asserts that misuse, called with the item's context, panics with want.
 // It is the shape most panic tests need: no setup moves, one misused call.
-func panicsInItem(t *testing.T, c *Conveyor, want error, misuse func(ctx context.Context)) {
+func panicsInItem(t *testing.T, c Conveyor, want error, misuse func(ctx context.Context)) {
 	t.Helper()
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -627,7 +627,7 @@ func TestErrWrongScopeItemMovingIntoLane(t *testing.T) {
 }
 
 // TestErrWrongScopeIsCheckedOnEveryEntryPoint: the scope guard is not a per-method check that a new entry point could
-// forget — every one of them resolves its acting item through Conveyor.actingItem, which validates the scope before it
+// forget — every one of them resolves its acting item through conveyor.actingItem, which validates the scope before it
 // even takes the run lock. An item of the conveyor therefore cannot reach a lane's interior by any route: not by
 // moving, not by trying, not by retaining, and not through an interior fan-out.
 func TestErrWrongScopeIsCheckedOnEveryEntryPoint(t *testing.T) {

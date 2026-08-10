@@ -58,7 +58,7 @@ type unitOwner interface {
 // invocations — all mutable, per-run state (occupancy, sync) lives on run — except its two capacities, which
 // SetLimit and SetQueueSize may change at any time.
 type unit struct {
-	conveyor *Conveyor
+	conveyor *conveyor
 	owner    unitOwner
 	kind     unitKind
 

@@ -55,7 +55,7 @@ as the conveyor's start paces items; a pool's is the dial `SetLimit` turns.
 
 Three numbers describe a node:
 
-- **`index`** — unique across the conveyor, assigned in creation order (`Conveyor.newUnit`). Indexes the per-run
+- **`index`** — unique across the conveyor, assigned in creation order (`conveyor.newUnit`). Indexes the per-run
   arrays (`occupancy`, `queued`, `taskQueues`) and the per-item arrays (`occupied`, `entered`). The implicit start
   stage is always index 0.
 - **`rank`** — position within its series (scope). Assigned at `finalize`, and only ever compared between units of
@@ -70,14 +70,15 @@ conveyor. The two ranks are also what keep a queue honest: an item waiting in fr
 rank, so the ordering gate still holds the item behind it out of the node, and a `TryMoveTo` cannot take a slot
 from under it.
 
-`Conveyor.finalize` walks every series once, assigns scopes and ranks (start gate = rank 0, then `+2` per node),
+`conveyor.finalize` walks every series once, assigns scopes and ranks (start gate = rank 0, then `+2` per node),
 caches `scopeUnits` for the release path, and freezes the topology. It runs under `runMu` from `tryRun` on the
 first `Run`, and idempotently from `newRun`.
 
 ## 3. Per-run state
 
-`Conveyor` is immutable topology shared across `Run` invocations — except the two atomic capacities. All mutable
-state lives on `run`, allocated fresh per `Run`, so nothing leaks between invocations. `Conveyor.currentRun` is an
+`conveyor` (the unexported implementation behind the `Conveyor` interface) is immutable topology shared across
+`Run` invocations — except the two atomic capacities. All mutable
+state lives on `run`, allocated fresh per `Run`, so nothing leaks between invocations. `conveyor.currentRun` is an
 atomic pointer to the active run (nil outside a run); it backs `Stats` and lets `SetLimit` / `SetQueueSize` reach a
 live run.
 

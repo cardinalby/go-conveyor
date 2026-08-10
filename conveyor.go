@@ -7,16 +7,71 @@ import (
 	"sync/atomic"
 )
 
-// Conveyor moves items through an ordered series of nodes, preserving their relative order. Build the nodes, then
-// call Run with an ItemProcessor: the conveyor runs one ItemProcessor per item, each on its own goroutine, and
-// handles ordering, capacity and backpressure between nodes.
+// Conveyor moves items through an ordered series of nodes, preserving their relative order. Create one with
+// NewConveyor, build the nodes, then call Run with an ItemProcessor: the conveyor runs one ItemProcessor per item,
+// each on its own goroutine, and handles ordering, capacity and backpressure between nodes.
 //
 // A node is either a Stage (AddStage), whose code runs inline in the ItemProcessor, or a FanOut (AddFanOut), which
 // schedules work onto branches (Pool or Lane) that run it in parallel. An item advances between nodes with MoveTo.
 //
 // Background work started with Stage.Retain or FanOut.Detach is represented by a Wave, joined with a later MoveTo.
-type Conveyor struct {
-	// series is the root series; it provides AddStage / AddFanOut on the conveyor itself (see builder.go).
+type Conveyor interface {
+	// AddStage adds a Stage to the end of the conveyor, admitting one item at a time by default. Chain SetLimit and
+	// SetQueueSize to adjust its capacity, and pass OptName to name it.
+	//
+	// It panics if the conveyor is running or has already run.
+	AddStage(opts ...AnyUnitOption) Stage
+
+	// AddFanOut adds a FanOut to the end of the conveyor: a node whose work runs in parallel on branches added with
+	// AddPool or AddLane. It admits one item at a time by default; chain SetLimit and SetQueueSize to adjust its
+	// capacity, and pass OptName to name it.
+	//
+	// It panics if the conveyor is running or has already run.
+	AddFanOut(opts ...AnyUnitOption) FanOut
+
+	// Run starts the conveyor, creating one item per itemProcessor invocation until ctx is canceled or an item
+	// fails. It blocks until every in-flight item has finished, then returns the first item error, or else ctx's
+	// cancellation cause.
+	//
+	// Build all nodes before calling Run; the topology is frozen from the first Run on. Run may be called again
+	// after it returns, but a concurrent second call returns ErrConveyorAlreadyRunning.
+	Run(ctx context.Context, itemProcessor ItemProcessor) error
+
+	// SetItemsLimit caps how many items may be in flight across the whole conveyor at once, which in effect bounds
+	// how many workers run concurrently: one worker drives one root item for its whole journey, from creation to
+	// completion (see Run). A limit <= 0 means unlimited, the default. It returns the conveyor for chaining.
+	//
+	// Unlike a node's SetLimit, this bounds the conveyor globally, on top of whatever capacity the nodes themselves
+	// admit — it does not replace per-node limits, and setting it does not change any of them.
+	//
+	// Safe to call at any time, from any goroutine, including on a running conveyor: raising it wakes the standby
+	// worker so waiting to create the next item is picked up at once; lowering it never evicts an item already in
+	// flight — it only stops new items from being created until the in-flight count has fallen below the new limit.
+	SetItemsLimit(n int) Conveyor
+
+	// ItemsLimit returns the current cap on items in flight across the whole conveyor, or 0 if unlimited (the
+	// default).
+	ItemsLimit() int
+
+	// StartUnit returns the handle of the implicit start stage that paces item creation, for matching it in Stats.
+	// It is not a Stage; there is nothing to move to.
+	StartUnit() Unit
+
+	// Stats returns a snapshot of the active run's state and resets the gauge windows. Safe to call at any time,
+	// from any goroutine; outside a run it reports the zero Stats.
+	Stats() Stats
+
+	// DebugUnitOccupants reports, for every unit, exactly which items occupy its body and its waiting room right
+	// now. It exists for debugging and visualization; use Stats for production observability.
+	//
+	// Safe to call at any time, from any goroutine; outside a run it reports nil.
+	DebugUnitOccupants() []UnitOccupants
+}
+
+// conveyor is the Conveyor implementation. It is the root series (see builder.go) plus the whole-conveyor state:
+// the flat unit list a run is sized from, the scope bookkeeping finalize walks, and the run currently using them.
+type conveyor struct {
+	// series is the root series; its AddStage / AddFanOut are promoted, satisfying that part of Conveyor.
 	*series
 
 	// shutdownCtxFactory is asked for the context that bounds a shutdown, once one begins (see
@@ -49,8 +104,8 @@ type Conveyor struct {
 	itemsLimit atomic.Int64
 }
 
-// Option configures a Conveyor at creation. See NewConveyor.
-type Option func(c *Conveyor)
+// Option configures a Conveyor at creation. See NewConveyor and OptShutdownContext.
+type Option func(c *conveyor)
 
 // ShutdownContextFactory produces the context that bounds a shutdown. cause is the first item error, or the Run
 // context's cancellation cause. See OptShutdownContext.
@@ -66,14 +121,14 @@ type ShutdownContextFactory func(cause error) (context.Context, context.CancelFu
 //
 // Without this option, items are left to finish on their own.
 func OptShutdownContext(factory ShutdownContextFactory) Option {
-	return func(c *Conveyor) {
+	return func(c *conveyor) {
 		c.shutdownCtxFactory = factory
 	}
 }
 
 // NewConveyor creates a conveyor with no nodes: add them with AddStage and AddFanOut, then call Run.
-func NewConveyor(options ...Option) *Conveyor {
-	c := &Conveyor{}
+func NewConveyor(options ...Option) Conveyor {
+	c := &conveyor{}
 	root := &series{conveyor: c, id: 0}
 	c.series = root
 	c.allSeries = []*series{root}
@@ -88,17 +143,8 @@ func NewConveyor(options ...Option) *Conveyor {
 	return c
 }
 
-// SetItemsLimit caps how many items may be in flight across the whole conveyor at once, which in effect bounds how
-// many workers run concurrently: one worker drives one root item for its whole journey, from creation to
-// completion (see Run). A limit <= 0 means unlimited, the default.
-//
-// Unlike a node's SetLimit, this bounds the conveyor globally, on top of whatever capacity the nodes themselves
-// admit — it does not replace per-node limits, and setting it does not change any of them.
-//
-// Safe to call at any time, from any goroutine, including on a running conveyor: raising it wakes the standby
-// worker so waiting to create the next item is picked up at once; lowering it never evicts an item already in
-// flight — it only stops new items from being created until the in-flight count has fallen below the new limit.
-func (c *Conveyor) SetItemsLimit(n int) *Conveyor {
+// SetItemsLimit caps the items in flight across the whole conveyor (see the Conveyor interface).
+func (c *conveyor) SetItemsLimit(n int) Conveyor {
 	if n < 0 {
 		n = 0
 	}
@@ -111,18 +157,15 @@ func (c *Conveyor) SetItemsLimit(n int) *Conveyor {
 	return c
 }
 
-// ItemsLimit returns the current cap on items in flight across the whole conveyor, or 0 if unlimited (the
-// default).
-func (c *Conveyor) ItemsLimit() int { return int(c.itemsLimit.Load()) }
+func (c *conveyor) ItemsLimit() int { return int(c.itemsLimit.Load()) }
 
 // startOwner names the implicit start stage in Stats and error messages.
 type startOwner struct{}
 
 func (startOwner) String() string { return "start" }
 
-// StartUnit returns the handle of the implicit start stage that paces item creation, for matching it in Stats. It
-// is not a Stage; there is nothing to move to.
-func (c *Conveyor) StartUnit() Unit { return startHandle{c.units[0]} }
+// StartUnit hands out the handle of the implicit start stage (see the Conveyor interface).
+func (c *conveyor) StartUnit() Unit { return startHandle{c.units[0]} }
 
 type startHandle struct{ u *unit }
 
@@ -130,7 +173,7 @@ func (h startHandle) String() string { return h.u.String() }
 func (h startHandle) unit() *unit    { return h.u }
 
 // validateUnit panics if u is not a unit of this conveyor — a handle from another conveyor, or a zero handle.
-func (c *Conveyor) validateUnit(u *unit) {
+func (c *conveyor) validateUnit(u *unit) {
 	if u == nil {
 		panic(fmt.Errorf("nil node handle: %w", errInvalidUnit))
 	}
@@ -143,7 +186,7 @@ func (c *Conveyor) validateUnit(u *unit) {
 // ItemProcessor context from a different conveyor. It must be called (before indexing the item by a unit's
 // index) whenever a handle from this conveyor is combined with an item resolved from a context, since
 // validateUnit only proves the handle belongs to its own conveyor, not that it matches the acting item.
-func (c *Conveyor) validateItemConveyor(it *item) {
+func (c *conveyor) validateItemConveyor(it *item) {
 	if it.run.conveyor != c {
 		panic(fmt.Errorf("node used with a context from a different conveyor: %w", errInvalidUnit))
 	}
@@ -152,7 +195,7 @@ func (c *Conveyor) validateItemConveyor(it *item) {
 // validateScope panics if the acting item cannot move to u because u lives in a different part of the topology:
 // a child item running inside a lane may only move through that lane's own nodes, and an item of the root series
 // may not reach into a lane. Both are wiring mistakes with no benign occurrence.
-func (c *Conveyor) validateScope(it *item, u *unit) {
+func (c *conveyor) validateScope(it *item, u *unit) {
 	if it.scope != u.scope {
 		panic(fmt.Errorf("cannot move to %s: it belongs to %s, but this item runs in %s: %w",
 			u, c.scopeName(u.scope), c.scopeName(it.scope), errWrongScope))
@@ -160,7 +203,7 @@ func (c *Conveyor) validateScope(it *item, u *unit) {
 }
 
 // scopeName describes a scope for error messages: the root series or the lane that owns it.
-func (c *Conveyor) scopeName(scope int) string {
+func (c *conveyor) scopeName(scope int) string {
 	if scope == 0 {
 		return "the conveyor"
 	}
@@ -174,7 +217,7 @@ func (c *Conveyor) scopeName(scope int) string {
 
 // describeRank names whatever occupies rank r in scope, for panic messages. Every node owns two ranks, so r may
 // also be a node's reserved waiting-room rank (see unit.queueRank).
-func (c *Conveyor) describeRank(scope, r int) string {
+func (c *conveyor) describeRank(scope, r int) string {
 	for _, u := range c.units {
 		if u.scope != scope {
 			continue

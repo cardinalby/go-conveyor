@@ -134,7 +134,7 @@ type propJitter struct {
 
 // propTopology is a generated conveyor plus everything the invariants are checked against.
 type propTopology struct {
-	c       *Conveyor
+	c       Conveyor
 	seed    int64
 	nodes   []propNode
 	commit  Stage

@@ -31,7 +31,7 @@ func statOf(t *testing.T, s Stats, u Unit) UnitStat {
 
 // queuedOf reports the live occupancy of a node's waiting room (0 when it has none), so a test can synchronize on
 // it without consuming a Stats window.
-func queuedOf(c *Conveyor, u Unit) int { return queueOccupancy(c, u) }
+func queuedOf(c Conveyor, u Unit) int { return queueOccupancy(c, u) }
 
 // TestStatsZeroOutsideRun: Stats reports runtime state, and outside a run — before the first one and after the last
 // has returned — there is none, so it is the zero value rather than a stale snapshot.

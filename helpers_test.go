@@ -34,7 +34,7 @@ func optShutdownGracePeriod(d time.Duration) Option {
 
 // runUntil runs c until `want` items have been created, then cancels the run context and returns Run's error.
 // proc receives the item's number, so a test can vary behavior per item.
-func runUntil(t *testing.T, c *Conveyor, want int64, proc func(ctx context.Context, no int64) error) error {
+func runUntil(t *testing.T, c Conveyor, want int64, proc func(ctx context.Context, no int64) error) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -60,7 +60,7 @@ func runUntil(t *testing.T, c *Conveyor, want int64, proc func(ctx context.Conte
 
 // runN runs c for exactly `want` items and fails the test unless Run ended with the expected shutdown cause
 // (context.Canceled), i.e. no item failed.
-func runNOK(t *testing.T, c *Conveyor, want int64, proc func(ctx context.Context, no int64) error) {
+func runNOK(t *testing.T, c Conveyor, want int64, proc func(ctx context.Context, no int64) error) {
 	t.Helper()
 	err := runUntil(t, c, want, proc)
 	if err != nil && !errors.Is(err, context.Canceled) {
@@ -70,7 +70,7 @@ func runNOK(t *testing.T, c *Conveyor, want int64, proc func(ctx context.Context
 
 // runOnce runs a single item through c and returns Run's error. Used for the many tests that only need one
 // journey.
-func runOnce(t *testing.T, c *Conveyor, proc func(ctx context.Context) error) error {
+func runOnce(t *testing.T, c Conveyor, proc func(ctx context.Context) error) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -297,9 +297,14 @@ func waitFor(t *testing.T, msg string, cond func() bool) bool {
 	return false
 }
 
+// implOf reaches the Conveyor implementation. Conveyor is an interface, so the white-box assertions below go
+// through here — which only an in-package test can do, and which is the point: the topology bookkeeping and the
+// live run they inspect are internals, not API.
+func implOf(c Conveyor) *conveyor { return c.(*conveyor) }
+
 // occupancyOf reports the live occupancy of a unit, for tests that assert on runtime state.
-func occupancyOf(c *Conveyor, u Unit) int {
-	r := c.currentRun.Load()
+func occupancyOf(c Conveyor, u Unit) int {
+	r := implOf(c).currentRun.Load()
 	if r == nil {
 		return 0
 	}
@@ -323,8 +328,8 @@ func sprintf(format string, args ...any) string { return fmt.Sprintf(format, arg
 
 // queueOccupancy reports how many items are waiting in front of a node right now — the waiting room's own counter,
 // which is capacity on the node rather than a unit of its own.
-func queueOccupancy(c *Conveyor, u Unit) int {
-	r := c.currentRun.Load()
+func queueOccupancy(c Conveyor, u Unit) int {
+	r := implOf(c).currentRun.Load()
 	if r == nil {
 		return 0
 	}

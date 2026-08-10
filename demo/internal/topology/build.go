@@ -12,7 +12,7 @@ import (
 // top-level node, 1 for a branch or a node inside it, 2 one lane deeper, and so on) — Manager.State's WorkerCount
 // needs it to know which occupants live outside the root scope (see its own doc).
 type Built struct {
-	Conveyor *conveyor.Conveyor
+	Conveyor conveyor.Conveyor
 	Handles  map[string]conveyor.Unit
 	Depth    map[string]int
 }

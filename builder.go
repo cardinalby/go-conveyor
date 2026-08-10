@@ -27,7 +27,7 @@ import "fmt"
 // The two ranks are what keep a queue honest: an item waiting in front of a node publishes the lower rank, so the
 // ordering gate still holds the item behind it back, and a TryMoveTo cannot take a slot from under it.
 //
-// index is assigned in creation order as units are built (Conveyor.newUnit); rank is assigned by walking each
+// index is assigned in creation order as units are built (conveyor.newUnit); rank is assigned by walking each
 // series in finalize.
 
 // node is a series element that can have ranks assigned at finalize. assignRank sets the ranks of the units the
@@ -39,16 +39,14 @@ type node interface {
 // series is one scope of the flow: a start gate plus the nodes built on it. The root series is the conveyor
 // (start gate = the implicit start stage); every branch is a series too (start gate = the branch's unit).
 type series struct {
-	conveyor *Conveyor
+	conveyor *conveyor
 	id       int    // scope id; 0 is the root series
 	start    *unit  // the series' start gate, always rank 0 of this scope
 	nodes    []node // stages and fan-outs, in creation order
 }
 
-// AddStage adds a new Stage to the topology, admitting one item at a time by default. Chain SetLimit and
-// SetQueueSize to adjust its capacity, and pass OptName to name it.
-//
-// It panics if the conveyor is running or has already run.
+// AddStage is the shared implementation behind Conveyor.AddStage and Lane.AddStage — those interfaces carry the
+// user-facing contract; a series does not care which of the two it is.
 func (s *series) AddStage(opts ...AnyUnitOption) Stage {
 	cfg := newAnyUnitConfig(opts)
 	st := &stage{series: s, name: cfg.name, ord: len(s.nodes) + 1}
@@ -57,11 +55,8 @@ func (s *series) AddStage(opts ...AnyUnitOption) Stage {
 	return st
 }
 
-// AddFanOut adds a new FanOut to the topology: a node whose work runs in parallel on branches added with AddPool
-// or AddLane. It admits one item at a time by default; chain SetLimit and SetQueueSize to adjust its capacity, and
-// pass OptName to name it.
-//
-// It panics if the conveyor is running or has already run.
+// AddFanOut is the shared implementation behind Conveyor.AddFanOut and Lane.AddFanOut — those interfaces carry the
+// user-facing contract.
 func (s *series) AddFanOut(opts ...AnyUnitOption) FanOut {
 	cfg := newAnyUnitConfig(opts)
 	f := &fanOut{series: s, name: cfg.name, ord: len(s.nodes) + 1}
@@ -95,7 +90,7 @@ func (s *series) positionalName(kind string, ord int) string {
 // newUnit creates a capacity unit owned by owner, assigns it the next index in creation order and appends it to
 // the flat, index-ordered units slice the per-run occupancy array is sized from. Its scope and rank are filled
 // in later, at finalize. It panics if the topology is no longer mutable.
-func (c *Conveyor) newUnit(owner unitOwner, kind unitKind) *unit {
+func (c *conveyor) newUnit(owner unitOwner, kind unitKind) *unit {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
 	if c.isRunning {
@@ -120,7 +115,7 @@ func (c *Conveyor) newUnit(owner unitOwner, kind unitKind) *unit {
 // finalize walks — and refuses to extend a conveyor that is running or has run. Its caller (fanOut.addBranch) reaches
 // newUnit first, so in practice that check has already fired; keeping it here means the guarantee belongs to the
 // function rather than to the order its callers happen to use.
-func (c *Conveyor) newSeries(start *unit) *series {
+func (c *conveyor) newSeries(start *unit) *series {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
 	if c.isRunning {
@@ -138,7 +133,7 @@ func (c *Conveyor) newSeries(start *unit) *series {
 // finalize assigns scopes and ranks over every series exactly once; after it, the topology is frozen. It also
 // caches the per-scope unit lists the release path walks. It is called under runMu from tryRun on the first
 // Run, and (idempotently) from newRun so tests that build a run directly still see ranks assigned.
-func (c *Conveyor) finalize() {
+func (c *conveyor) finalize() {
 	if c.finalized {
 		return
 	}

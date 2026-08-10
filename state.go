@@ -106,7 +106,7 @@ type scopeList struct {
 
 // newRun allocates a fresh run for one Run invocation. It finalizes the topology first (assigning ranks) so state
 // built directly in tests still sees ranks; on the real path finalize already ran under runMu in tryRun.
-func (c *Conveyor) newRun() *run {
+func (c *conveyor) newRun() *run {
 	c.finalize()
 	n := len(c.units)
 	r := &run{
