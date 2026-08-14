@@ -83,7 +83,14 @@ export function LabeledSlider({
           if (deferCommit) setLiveValue(v);
           else onChange(v);
         }}
+        // Without this, the browser's own implicit capture for a range thumb isn't guaranteed to survive a fast
+        // drag: on a fast enough drag the browser can decide the gesture is something else (e.g. an OS/browser
+        // swipe gesture) and revoke capture mid-drag without ever sending pointerup/pointercancel — only
+        // lostpointercapture, handled below. Explicit capture plus that handler is what makes the commit reliable.
+        onPointerDown={(e) => e.currentTarget.setPointerCapture(e.pointerId)}
         onPointerUp={deferCommit ? (e) => scheduleCommit(Number(e.currentTarget.value)) : undefined}
+        onPointerCancel={deferCommit ? (e) => scheduleCommit(Number(e.currentTarget.value)) : undefined}
+        onLostPointerCapture={deferCommit ? (e) => scheduleCommit(Number(e.currentTarget.value)) : undefined}
         onKeyUp={deferCommit ? (e) => scheduleCommit(Number(e.currentTarget.value)) : undefined}
       />
       <span className="labeled-slider-value">{formatValue ? formatValue(displayValue) : displayValue}</span>
