@@ -103,6 +103,6 @@ item 2, every interior stage is entered in the order `A, B0, B1, C0, C1`.
 
 ---
 
-| Prev                                       | Next                                              |
-|---------------------------------------------|------------------------------------------------------|
+| Prev                                        | Next                                              |
+|---------------------------------------------|---------------------------------------------------|
 | [⬅ Fan-out (scatter/gather)](4_fan-out.md) | [Conditional MoveTo ➡](6_conditional-move-to.md) |

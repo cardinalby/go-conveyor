@@ -136,6 +136,6 @@ that nobody ever joins is not lost — it fails the item when it completes.
 
 ---
 
-| Prev                                   | Next                       |
-|----------------------------------------|-----------------------------|
+| Prev                                   | Next                   |
+|----------------------------------------|------------------------|
 | [⬅ Shared Stages](3_shared-stages.md) | [Lanes ➡](5_lanes.md) |

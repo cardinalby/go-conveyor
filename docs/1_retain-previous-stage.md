@@ -46,6 +46,6 @@ c.Run(ctx, func(ctx context.Context) error {
 
 ---
 
-| Prev                 | Next                     |
-|----------------------|--------------------------|
+| Prev                  | Next                     |
+|-----------------------|--------------------------|
 | [⬅ Index](README.md) | [Queues ➡](2_queues.md) |

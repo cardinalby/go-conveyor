@@ -158,6 +158,7 @@ See the [docs](docs/README.md) for guides on these features:
 - [Lanes: when a branch is a pipeline](docs/5_lanes.md)
 - [Conditional MoveTo](docs/6_conditional-move-to.md)
 - [Observability](docs/7_observability.md)
+- [Design FAQ](docs/9_design_faq.md)
 
 ## [★ Interactive demo](https://cardinalby.github.io/go-conveyor/)
 

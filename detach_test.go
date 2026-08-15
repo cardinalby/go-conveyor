@@ -155,6 +155,47 @@ func TestDetachedErrorNobodyJoinedFailsTheItem(t *testing.T) {
 	}
 }
 
+// TestDetachAfterWorkAlreadyFinished: the task may finish before the ItemProcessor gets around to calling Detach —
+// nothing about a wave settling depends on Detach ever being called (see run.joinPending, which waits for it just
+// the same). Detaching such a fan-out must still succeed, handing back a wave that is already finished.
+func TestDetachAfterWorkAlreadyFinished(t *testing.T) {
+	c := NewConveyor()
+	fo := c.AddFanOut(OptName("fo"))
+	pool := fo.AddPool(OptName("pool"))
+	commit := c.AddStage(OptName("commit"))
+
+	taskRan := make(chan struct{})
+	err := runOnce(t, c, func(ctx context.Context) error {
+		if err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error {
+			close(taskRan)
+			return nil
+		})}); err != nil {
+			return err
+		}
+		// MoveTo does not return until the task's slot on the pool is taken (see run.startWork), so once the task
+		// itself has run — confirmed by the channel receive, a real happens-before edge, not a poll that could catch
+		// it either side of that instant — the slot going back to 0 can only mean runWork already released it and
+		// settled the wave under the same lock hold (see run.runWork). That is what guarantees the work, and the
+		// wave, are already done by the time Detach is called below.
+		<-taskRan
+		waitFor(t, "the task to finish", func() bool { return occupancyOf(c, pool) == 0 })
+
+		w := fo.Detach(ctx) // must not panic, even though there is nothing left to wait for
+		select {
+		case <-w.Finished():
+		default:
+			t.Fatalf("expected the handed-over wave to already be finished")
+		}
+		if err := w.Err(); err != nil {
+			t.Fatalf("wave err = %v, want nil", err)
+		}
+		return commit.MoveTo(ctx, w)
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("run failed: %v", err)
+	}
+}
+
 // TestDetachWithoutWorkPanics: there is nothing to hand over if the item never scheduled anything here.
 func TestDetachWithoutWorkPanics(t *testing.T) {
 	c := NewConveyor()

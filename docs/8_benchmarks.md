@@ -17,6 +17,6 @@ Graphs show throughput (items/sec) for different base delays.
 
 ---
 
-| Prev                                   |
-|----------------------------------------|
-| [⬅ Observability](7_observability.md) |
+| Prev                                   | Next                             |
+|----------------------------------------|----------------------------------|
+| [⬅ Observability](7_observability.md) | [Design FAQ ➡](9_design_faq.md) |
