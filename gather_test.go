@@ -90,9 +90,11 @@ func TestFanOutWaitingRoomStartsNoWork(t *testing.T) {
 	defer cancel()
 
 	go func() {
-		// Two items in the waiting room, one inside: the moment to look at how much work exists.
-		waitFor(t, "the fan-out's waiting room to fill", func() bool {
-			return queueOccupancy(c, fo) == 2 && occupancyOf(c, fo) == 1
+		// Two items in the waiting room, one inside, and the inside item's task running: the moment to look at how
+		// much work exists. The task's start is waited for, not asserted: it runs on a worker goroutine spawned
+		// under the lock that admitted the item, so it may not have started when the occupancy is first observed.
+		waitFor(t, "the fan-out's waiting room to fill and the inside item's task to start", func() bool {
+			return queueOccupancy(c, fo) == 2 && occupancyOf(c, fo) == 1 && live.Load() >= 1
 		})
 		if got := live.Load(); got != 1 {
 			t.Errorf("%d tasks in flight with two items queued, want 1 — a waiting room schedules nothing", got)
