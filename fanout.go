@@ -33,16 +33,18 @@ type FanOut interface {
 	// Build tasks with the branches' constructors (Pool.NewTask / Lane.NewTask and their siblings) and pass them
 	// as Tasks. Passing no tasks is legal.
 	//
-	// It returns ErrForeignContext, ErrStaleContext, or the item's cancellation cause on shutdown. It panics on
-	// misuse: a task from another fan-out, resubmitting a Task, moving backward, re-entering this node, a node
-	// outside the item's own series, or a wave from another item.
+	// It returns ErrForeignContext, ErrStaleContext, or the item's cancellation cause — whether the cancellation is
+	// visible on ctx or only on the item's own context (see ItemProcessor). It panics on misuse: a task from another
+	// fan-out, resubmitting a Task, moving backward, re-entering this node, a node outside the item's own series, or
+	// a wave from another item.
 	MoveTo(ctx context.Context, tasks Tasks, joins ...Wave) error
 
 	// TryMoveTo is MoveTo without waiting: it enters the node and schedules the tasks only if it can do so right
 	// now, and reports whether it did.
 	//
 	// When entered is false nothing happened: the tasks are left unclaimed, so the same Tasks value may be
-	// submitted later. It panics on the same misuse as MoveTo.
+	// submitted later. A canceled item returns (false, its cancellation cause), whether the cancellation is visible
+	// on ctx or only on the item's own context. It panics on the same misuse as MoveTo.
 	TryMoveTo(ctx context.Context, tasks Tasks, joins ...Wave) (entered bool, err error)
 
 	// Detach hands this fan-out's slot to the work already scheduled here, letting the item move on without

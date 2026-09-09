@@ -13,9 +13,9 @@ type Stage interface {
 	// MoveTo advances the item into this stage, releasing the previous node, and joins the listed waves before the
 	// stage's code runs. It blocks until the stage (or its waiting room) has room and it is the item's turn.
 	//
-	// It returns ErrForeignContext, ErrStaleContext, or the item's cancellation cause on shutdown. It panics on
-	// misuse: moving backward, re-entering an already-entered stage, a handle from another conveyor or series, or
-	// a wave from another item.
+	// It returns ErrForeignContext, ErrStaleContext, or the item's cancellation cause — whether the cancellation is
+	// visible on ctx or only on the item's own context (see ItemProcessor). It panics on misuse: moving backward,
+	// re-entering an already-entered stage, a handle from another conveyor or series, or a wave from another item.
 	MoveTo(ctx context.Context, joins ...Wave) error
 
 	// TryMoveTo is MoveTo without waiting: it enters the stage only if a slot is free right now, and reports
@@ -26,13 +26,17 @@ type Stage interface {
 	// may be tried again or entered later with a blocking MoveTo. It bypasses the stage's waiting room
 	// (SetQueueSize) and never jumps an item already waiting there.
 	//
-	// The joins are awaited only if the item entered. A canceled item returns (false, its cancellation cause). It
-	// panics on the same misuse as MoveTo.
+	// The joins are awaited only if the item entered. A canceled item returns (false, its cancellation cause),
+	// whether the cancellation is visible on ctx or only on the item's own context. It panics on the same misuse as
+	// MoveTo.
 	TryMoveTo(ctx context.Context, joins ...Wave) (entered bool, err error)
 
 	// Retain runs bgOp in the background while keeping this stage's slot held, letting the item move on without
 	// releasing the stage. The slot is freed once bgOp returns and the item has moved on. Join the returned Wave
 	// in a later MoveTo to wait for bgOp; an error from bgOp cancels the item.
+	//
+	// On a canceled item — canceled on ctx or on its own context — bgOp does not run and the returned wave is
+	// already finished, carrying the cancellation cause.
 	//
 	// It panics on misuse: a handle from another conveyor, or a stage the item does not currently occupy.
 	Retain(ctx context.Context, bgOp func() error) Wave
@@ -146,8 +150,8 @@ func (s *stage) Retain(ctx context.Context, bgOp func() error) Wave {
 		return standaloneWave(fmt.Errorf("retain %s: %w", s, err))
 	}
 	defer r.mu.Unlock()
-	if err := context.Cause(ctx); err != nil {
-		return finishedWave(r, it, err) // shutting down: do not run bgOp
+	if err := it.cancelCause(ctx); err != nil {
+		return finishedWave(r, it, err) // the item is canceled (on ctx or on its own context): do not run bgOp
 	}
 	if it.occupied[s.work.index] == 0 {
 		panic(fmt.Errorf("cannot retain %s: %w", s, errStageNotEntered))

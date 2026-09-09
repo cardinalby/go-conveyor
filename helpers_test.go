@@ -302,6 +302,11 @@ func waitFor(t *testing.T, msg string, cond func() bool) bool {
 // live run they inspect are internals, not API.
 func implOf(c Conveyor) *conveyor { return c.(*conveyor) }
 
+// itemOf reaches the item behind an ItemProcessor's context, for the few tests that must drive the item's own context
+// directly (cancel it with no other wake-up) to pin how the runtime reacts to it. Everything else goes through the
+// public API.
+func itemOf(ctx context.Context) *item { return ctx.Value(itemCtxKey).(*item) }
+
 // occupancyOf reports the live occupancy of a unit, for tests that assert on runtime state.
 func occupancyOf(c Conveyor, u Unit) int {
 	r := implOf(c).currentRun.Load()

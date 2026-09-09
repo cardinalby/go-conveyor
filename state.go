@@ -266,7 +266,7 @@ func (r *run) enterUnit(ctx context.Context, it *item, target *unit, publish boo
 	if err := r.joinPending(ctx, it); err != nil {
 		return err
 	}
-	if err := r.waitUntil(ctx, func() bool {
+	if err := r.waitUntil(ctx, it, func() bool {
 		return r.canEnter(it, target) || r.canEnterQueue(it, target)
 	}); err != nil {
 		return err
@@ -274,7 +274,7 @@ func (r *run) enterUnit(ctx context.Context, it *item, target *unit, publish boo
 	if !r.canEnter(it, target) {
 		// Only the waiting room is open: step aside (releasing the previous node) and wait for the node from there.
 		r.takeQueue(it, target)
-		if err := r.waitUntil(ctx, func() bool { return r.canEnter(it, target) }); err != nil {
+		if err := r.waitUntil(ctx, it, func() bool { return r.canEnter(it, target) }); err != nil {
 			return err
 		}
 	}
@@ -364,7 +364,7 @@ func (r *run) joinPending(ctx context.Context, it *item) error {
 	// question that distinguishes the two, and workDone poisons and settles under one lock hold, so re-asking it after
 	// the wake-up is decisive.
 	if !it.pending.isFinished() {
-		if err := r.waitUntil(ctx, it.pending.isFinished); err != nil {
+		if err := r.waitUntil(ctx, it, it.pending.isFinished); err != nil {
 			if !it.pending.isFinished() {
 				// Canceled by something other than this work: leave the wave pending, so completeItem accounts for it.
 				return err
@@ -819,28 +819,38 @@ func (u *unit) setQueueSize(size int) {
 	r.mu.Unlock()
 }
 
-// waitUntil blocks until admissible() reports true or ctx is canceled, whichever comes first. The caller must
-// hold r.mu; on a nil return the lock is still held and admissible() is true, so the caller may mutate before
-// releasing the lock.
-func (r *run) waitUntil(ctx context.Context, admissible func() bool) error {
-	if err := context.Cause(ctx); err != nil {
+// waitUntil blocks until admissible() reports true or the item may not go on — the call context or the item's own
+// context is canceled (see item.cancelCause) — whichever comes first. The caller must hold r.mu; on a nil return the
+// lock is still held and admissible() is true, so the caller may mutate before releasing the lock.
+//
+// Both contexts are watched because the call context may hide the item's cancellation (context.WithoutCancel), and a
+// canceled item must not be let into a node however it asks.
+func (r *run) waitUntil(ctx context.Context, it *item, admissible func() bool) error {
+	if err := it.cancelCause(ctx); err != nil {
 		return err
 	}
 	if admissible() {
 		return nil
 	}
-	// sync.Cond does not wake on context cancellation, so arrange a broadcast when ctx is done. AfterFunc runs
-	// the callback in its own goroutine (immediately if ctx is already done); it blocks on r.mu until we release
-	// it in cond.Wait, so the wake-up is never missed.
-	stop := context.AfterFunc(ctx, func() {
+	// sync.Cond does not wake on context cancellation, so arrange a broadcast when either context is done. AfterFunc
+	// runs the callback in its own goroutine (immediately if the context is already done); it blocks on r.mu until
+	// we release it in cond.Wait, so the wake-up is never missed. A call context that shares the item context's Done
+	// channel — the item's context itself, or a values-only derivation of it — is canceled exactly when the item is,
+	// so one watcher covers both; any other call context gets a second watcher on the item's own context.
+	wake := func() {
 		r.mu.Lock()
 		r.cond.Broadcast()
 		r.mu.Unlock()
-	})
+	}
+	stop := context.AfterFunc(ctx, wake)
 	defer stop()
+	if it.ctx.Done() != ctx.Done() {
+		stopItem := context.AfterFunc(it.ctx, wake)
+		defer stopItem()
+	}
 	for {
 		r.cond.Wait()
-		if err := context.Cause(ctx); err != nil {
+		if err := it.cancelCause(ctx); err != nil {
 			return err
 		}
 		if admissible() {

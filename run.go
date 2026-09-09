@@ -53,6 +53,13 @@ type run struct {
 //
 // Returning an error shuts the conveyor down: no new items are created, later items are canceled, and earlier ones
 // are allowed to finish.
+//
+// Cancellation is judged by the item, not by the context passed to a node method. Once the item's own context is
+// canceled — by a failed task or Retain, or by a shutdown — every node method declines it and returns the
+// cancellation cause, even when called with a context that hides the cancellation (context.WithoutCancel). A
+// derived context with its own deadline still works: it inherits the item's cancellation and adds its own. Code
+// that must run after cancellation (logging, a compensating action) can still run in plain Go once the node method
+// has returned the cause; it just cannot run inside a node.
 type ItemProcessor func(ctx context.Context) error
 
 // Run drives items through the conveyor until ctx is canceled or an item fails (see the Conveyor interface).

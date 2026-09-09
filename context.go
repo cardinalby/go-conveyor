@@ -88,11 +88,11 @@ func (c *conveyor) resolveItem(ctx context.Context) (*item, error) {
 // already returns under a held lock in run.join; the alternative, a closure, does not fit the four different return
 // shapes of the node methods).
 //
-// checkCancel additionally declines a canceled item. The blocking paths leave it false: they get the cancellation
-// check from waitUntil, which tests it before admissibility. The non-blocking ones (TryMoveTo) set it, having no
-// wait to piggyback on — without it a canceled item would be reported as "no room". Stage.Retain leaves it false
-// too, because it answers cancellation with a wave of its own rather than an error, which needs the item and the
-// lock this call has just obtained.
+// checkCancel additionally declines a canceled item — canceled on the call context or on its own context, see
+// item.cancelCause. The blocking paths leave it false: they get the cancellation check from waitUntil, which tests it
+// before admissibility. The non-blocking ones (TryMoveTo) set it, having no wait to piggyback on — without it a
+// canceled item would be reported as "no room". Stage.Retain leaves it false too, because it answers cancellation
+// with a wave of its own rather than an error, which needs the item and the lock this call has just obtained.
 //
 // It panics on the same static misuse the individual methods used to check inline: a foreign handle (errInvalidUnit),
 // a context belonging to a pool's non-movable work (errCannotMove), or a node outside the item's series (errWrongScope).
@@ -114,7 +114,7 @@ func (c *conveyor) actingItem(ctx context.Context, u *unit, checkCancel bool) (*
 		return nil, nil, ErrStaleContext
 	}
 	if checkCancel {
-		if err := context.Cause(ctx); err != nil {
+		if err := it.cancelCause(ctx); err != nil {
 			r.mu.Unlock()
 			return nil, nil, err
 		}

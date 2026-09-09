@@ -111,6 +111,18 @@ func (it *item) poison(cause error) {
 	}
 }
 
+// cancelCause is the reason this item may not go on, or nil: the cancellation cause of the item's own context first
+// — its true status, whatever the caller derived from it — else the cause of the call context, which may carry a
+// deadline the caller added. Every node method judges cancellation with it, so a call context with the cancellation
+// stripped (context.WithoutCancel) cannot move, schedule, wait or retain for a canceled item: if item 5 fails while
+// writing and item 6 hid its cancellation to reach commit, item 6 would commit past item 5's data. Needs no lock.
+func (it *item) cancelCause(ctx context.Context) error {
+	if err := context.Cause(it.ctx); err != nil {
+		return err
+	}
+	return context.Cause(ctx)
+}
+
 // hasLiveWaves reports whether any background work of this item is still outstanding. Caller holds run.mu.
 func (it *item) hasLiveWaves() bool {
 	for _, w := range it.waves {

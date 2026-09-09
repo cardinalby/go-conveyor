@@ -1068,23 +1068,29 @@ Phase 1 record: root suite green under `-race -cpu=1,4`; Codex review found no m
 
 Goal: §6.9, decided as option B. Behavior change, independent of the API change, with its own tests.
 
-- [ ] `state.go` (`waitUntil`): take the item, check `context.Cause` of both the call context and `it.ctx` before
+- [x] `state.go` (`waitUntil`): take the item, check `context.Cause` of both the call context and `it.ctx` before
       waiting and after every wake-up, and arrange the wake-up on both (an `AfterFunc` on `it.ctx` when it differs
       from the call context). Return whichever cause is set, the item's own first.
-- [ ] `context.go` (`actingItem`): when `checkCancel` is set, check both contexts.
-- [ ] `stage.go` (`Retain`): decide from both contexts whether to run the callback.
-- [ ] `errors.go` / godoc: document that a context with cancellation stripped cannot move, schedule, wait or retain for
+- [x] `context.go` (`actingItem`): when `checkCancel` is set, check both contexts.
+- [x] `stage.go` (`Retain`): decide from both contexts whether to run the callback.
+- [x] `errors.go` / godoc: document that a context with cancellation stripped cannot move, schedule, wait or retain for
       a canceled item.
-- [ ] Tests (`errors_test.go` or a new `cancel_test.go`): `MoveTo`, `TryMoveTo` and `Retain` called with
+- [x] Tests (`errors_test.go` or a new `cancel_test.go`): `MoveTo`, `TryMoveTo` and `Retain` called with
       `context.WithoutCancel(ctx)` on a poisoned item and on an item canceled by error-shutdown return or skip as
       specified; a child context with a shorter deadline still returns its own deadline error;
       `TestRetainOnCanceledItemSkipsBgOp` gets a stripped-context variant; `TestErrStaleContextFromFinishedItem`
       still passes (stale wins over canceled for a finished item).
-- [ ] Tests for cancellation **during** a wait, which exercise the second wake-up source: a stripped-context `MoveTo`
+- [x] Tests for cancellation **during** a wait, which exercise the second wake-up source: a stripped-context `MoveTo`
       blocked on admission, a stripped-context `MoveTo` blocked in a join of a listed wave (`wave.go` `join` calls
       `waitUntil` too), and later, in phase 4, a busy `Wait`; the item's own context is then canceled and the call
       must return the cause.
-- [ ] Run the root suite.
+- [x] Run the root suite.
+
+Phase 2 record: root suite green under `-race -cpu=1,4`. Tests live in `cancel_test.go`. The two wake-up tests are
+white-box on purpose: they park the call inside the wait (observable only after `cond.Wait` released the lock), cancel
+the item's own context directly with no broadcast, and fail after a bounded 5s if the call does not wake. A mutation
+check (second `AfterFunc` disabled) makes both fail; Codex confirmed no other broadcast source remains in that state.
+The `Wait` variant follows in phase 4.
 
 ### 11.5 Phase 3: body state, sealing, leave rules (old API still in place)
 

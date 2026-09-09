@@ -270,7 +270,7 @@ func (r *run) join(ctx context.Context, it *item, waves []Wave) error {
 		if w.it != nil && w.it != it {
 			panic(errForeignWave)
 		}
-		if err := r.waitUntil(ctx, w.isFinished); err != nil {
+		if err := r.waitUntil(ctx, it, w.isFinished); err != nil {
 			return err
 		}
 		w.acked = true
