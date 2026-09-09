@@ -971,6 +971,10 @@ Documentation and examples to revise:
 
 ## 11. Implementation plan
 
+**Progress (2026-09-10):** phases 0 to 3 are done and committed on branch `fanout-schedule` (one commit each).
+Next: phase 4 (§11.6). Process notes: from phase 3 on the phases are self-reviewed, not sent to Codex; nothing is
+pushed. Each phase's record sits under its checklist.
+
 ### 11.1 Ground rules
 
 - Work on a branch. One commit per phase below, so a regression can be bisected to a phase.
@@ -1097,30 +1101,40 @@ The `Wait` variant follows in phase 4.
 Goal: §6.4 to §6.7 without touching the public signatures. `MoveTo(ctx, tasks, joins...)` still creates and fills
 the body in one step.
 
-- [ ] `fanout.go`: split `scheduleWave` into `newBody(it, f)` (unsealed wave, `atNode`, `pending`, state `open`) and
+- [x] `fanout.go`: split `scheduleWave` into `newBody(it, f)` (unsealed wave, `atNode`, `pending`, state `open`) and
       `addToBody(w, f, tasks, root)` (claim, group, insert, register, publish, pump). `MoveTo` calls both; the
       publish stays where it is for now.
-- [ ] `state.go` (`joinPending`): wait for `idle` instead of `isFinished`; on idle, seal, set state `closed`, clear
+- [x] `state.go` (`joinPending`): wait for `idle` instead of `isFinished`; on idle, seal, set state `closed`, clear
       `pending`, acknowledge, return the node-qualified error if any. On a cancellation wake-up apply §6.4 step 1:
       busy body returns the cause and stays open; idle body is sealed and closed, then the body error wins over the
       cause if there is one. Today's code returns nil for an idle clean body after a cancellation; under option B it
       must return the cause.
-- [ ] `state.go` (`enterUnit`): if the item already stands in the target's waiting room (`it.queuedAt ==
+- [x] `state.go` (`enterUnit`): if the item already stands in the target's waiting room (`it.queuedAt ==
       target.index`), skip the admission-or-queue wait and `takeQueue`, and resume waiting for the node. This closes
       the double-count on a retried move (§6.4 step 4) that exists today whenever a derived call context expires
       while the item waits in a queue.
-- [ ] `state.go` (`tryEnterUnit`): new order per §6.4: busy body returns false untouched; idle body with no room
+- [x] `state.go` (`tryEnterUnit`): new order per §6.4: busy body returns false untouched; idle body with no room
       returns false untouched; otherwise seal, set `closed`, take, publish, join. Remove the consume-before-check.
-- [ ] `fanout.go` (`Detach`): require state `open`; seal; set state `detached`; clear `pending`. `errNothingToDetach`
+- [x] `fanout.go` (`Detach`): require state `open`; seal; set state `detached`; clear `pending`. `errNothingToDetach`
       for `closed` and `detached`.
-- [ ] `run.go` (`completeItem`): before the `hasLiveWaves` loop, seal the open body if any and set it `closed`.
-- [ ] `errors.go`: add `errBodyClosed` and `errWorkDetached` (unused by the public API until phase 4, but wired into
+- [x] `run.go` (`completeItem`): before the `hasLiveWaves` loop, seal the open body if any and set it `closed`.
+- [x] `errors.go`: add `errBodyClosed` and `errWorkDetached` (unused by the public API until phase 4, but wired into
       `Detach` diagnostics now).
-- [ ] Re-check the tests that observe these paths and adjust only where today's behavior was an artifact of
+- [x] Re-check the tests that observe these paths and adjust only where today's behavior was an artifact of
       consume-before-check: `TestTryMoveToReportsFinishedFanOutFailure` (`gather_test.go`), `TestDetachAfterWorkAlreadyFinished`,
       `TestDetachWithoutWorkPanics`, `TestDetachAfterMovingOnPanics`, `TestDetachOfAnEarlierFanOutPanics`
       (`detach_test.go`). Derive the expected panic from the state table in §6.7.
-- [ ] Run the root suite.
+- [x] Run the root suite.
+
+Phase 3 record: root suite green under `-race -cpu=1,4`. `scheduleWave` became `newBody` + `addToBody`;
+`consumePending` was replaced by `item.sealBody` / `run.closeBody`. None of the five listed tests needed a change
+(only a comment in `TestTryMoveToReportsFinishedFanOutFailure`): the body-state table gives the same panics they
+already expected. Two tests were added to `queue_test.go` for the waiting-room fixes, each checked by mutation:
+`TestRetryFromWaitingRoomTakesNoSecondQueuedSlot` (queue size 2, retry against a still-full stage; the stage-only
+half of the phase 6 "failed leave, after the waiting room" case) and `TestWaitingRoomSlotReleasedWhenTheItemWaitsElsewhere`
+for a second latent bug found on the way: `takeQueue` now gives back a queued slot the item still held in front of an
+earlier node (a failed move there, then a move to a later node's waiting room) — before, that slot leaked for the
+rest of the run. Both belong in the `impl_details.md` §5/§6 rewrite of phase 7.
 
 ### 11.6 Phase 4: `Schedule` and `Wait`, additive
 

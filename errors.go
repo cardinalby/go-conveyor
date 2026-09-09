@@ -94,9 +94,17 @@ var (
 	// node it is trying to hand its slot to. Its message reads as a trailing clause of the wrapped panic.
 	errStageNotEntered = errors.New("the item does not currently occupy it")
 
-	// errNothingToDetach is panicked with by FanOut.Detach when the item has no work outstanding at this fan-out to
-	// detach — it never scheduled any here, or it has already detached it.
+	// errNothingToDetach is panicked with by FanOut.Detach when the item has no body to hand over at this fan-out:
+	// the body is closed (the item left, or tried to and failed), or it was already detached.
 	errNothingToDetach = errors.New("the item has no work to detach here")
+
+	// errBodyClosed is panicked with when the ItemProcessor adds to or waits for its body at a fan-out after closing
+	// it: by leaving (a leave that fails after the body was joined still closes it), or by returning.
+	errBodyClosed = errors.New("the item's body at this fan-out is closed")
+
+	// errWorkDetached is panicked with when the ItemProcessor adds to or waits for its body at a fan-out where it
+	// detached the work: from Detach on, the body belongs to the returned wave.
+	errWorkDetached = errors.New("the item's work at this fan-out was detached")
 
 	// errWrongEnterOrder is panicked with by MoveTo when the target is behind the item's furthest rank (items move
 	// forward only).

@@ -2,6 +2,7 @@ package conveyor
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 )
@@ -503,4 +504,103 @@ func TestFanOutQueueCreatedAtRuntime(t *testing.T) {
 		return commit.MoveTo(ic)
 	})
 	<-sampled
+}
+
+// TestRetryFromWaitingRoomTakesNoSecondQueuedSlot: a MoveTo that fails while the item waits in the waiting room (here a
+// derived call context is canceled) leaves the item standing there. Retrying the move resumes waiting for the node
+// from that spot: with room for two, the waiting room still never counts the item twice.
+func TestRetryFromWaitingRoomTakesNoSecondQueuedSlot(t *testing.T) {
+	c := NewConveyor()
+	s := c.AddStage(OptName("s")).SetQueueSize(2)
+
+	release := make(chan struct{})
+	retrying := make(chan struct{})
+	go func() {
+		<-retrying
+		close(release) // let item 1 out only once the retry is under way, so the retry meets a full stage
+	}()
+	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
+		if no == 1 {
+			if err := s.MoveTo(ctx); err != nil {
+				return err
+			}
+			<-release
+			return nil
+		}
+		dctx, dcancel := context.WithCancel(ctx)
+		defer dcancel()
+		go func() {
+			waitFor(t, "item 2 to wait in front of s", func() bool { return queueOccupancy(c, s) == 1 })
+			dcancel()
+		}()
+		if err := s.MoveTo(dctx); !errors.Is(err, context.Canceled) {
+			t.Errorf("MoveTo with the canceled call context = %v, want Canceled", err)
+		}
+		if got := queueOccupancy(c, s); got != 1 {
+			t.Errorf("s waiting room holds %d after the failed move, want 1 (the item stays there)", got)
+		}
+		close(retrying)
+		if err := s.MoveTo(ctx); err != nil {
+			return err
+		}
+		if got := queueOccupancy(c, s); got != 0 {
+			t.Errorf("s waiting room holds %d after the item entered, want 0", got)
+		}
+		if st, ok := unitStatByName(c.Stats(), "s"); !ok || st.Queued.Max != 1 {
+			t.Errorf("s Queued.Max = %d over the run, want 1: a retried move must not count the item twice", st.Queued.Max)
+		}
+		return nil
+	})
+}
+
+// TestWaitingRoomSlotReleasedWhenTheItemWaitsElsewhere: an item left in one waiting room by a failed move may go for a
+// later node instead. Stepping into that node's waiting room gives the earlier slot back — an item waits in one place
+// at a time.
+func TestWaitingRoomSlotReleasedWhenTheItemWaitsElsewhere(t *testing.T) {
+	c := NewConveyor()
+	a := c.AddStage(OptName("a")).SetQueueSize(1)
+	b := c.AddStage(OptName("b")).SetQueueSize(2)
+
+	release := make(chan struct{})
+	thirdQueuedAtA := make(chan struct{})
+	runNOK(t, c, 3, func(ctx context.Context, no int64) error {
+		switch no {
+		case 1: // holds b, so item 2 must wait in front of it
+			if err := a.MoveTo(ctx); err != nil {
+				return err
+			}
+			if err := b.MoveTo(ctx); err != nil {
+				return err
+			}
+			<-release
+			return nil
+		case 2: // holds a until item 3 is queued in front of it, then waits in front of b
+			if err := a.MoveTo(ctx); err != nil {
+				return err
+			}
+			<-thirdQueuedAtA
+			return b.MoveTo(ctx)
+		default:
+			dctx, dcancel := context.WithCancel(ctx)
+			defer dcancel()
+			go func() {
+				waitFor(t, "item 3 to wait in front of a", func() bool { return queueOccupancy(c, a) == 1 })
+				dcancel()
+			}()
+			if err := a.MoveTo(dctx); !errors.Is(err, context.Canceled) {
+				t.Errorf("MoveTo with the canceled call context = %v, want Canceled", err)
+			}
+			close(thirdQueuedAtA)
+			waitFor(t, "item 2 to wait in front of b", func() bool { return queueOccupancy(c, b) == 1 })
+			go func() {
+				// Item 3 joins item 2 in front of b; the slot it held in front of a must be gone by then.
+				waitFor(t, "item 3 to wait in front of b", func() bool { return queueOccupancy(c, b) == 2 })
+				if got := queueOccupancy(c, a); got != 0 {
+					t.Errorf("a waiting room holds %d while item 3 waits in front of b, want 0", got)
+				}
+				close(release)
+			}()
+			return b.MoveTo(ctx) // skips a: a forward move from its waiting room
+		}
+	})
 }

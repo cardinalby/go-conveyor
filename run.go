@@ -54,12 +54,11 @@ type run struct {
 // Returning an error shuts the conveyor down: no new items are created, later items are canceled, and earlier ones
 // are allowed to finish.
 //
-// Cancellation is judged by the item, not by the context passed to a node method. Once the item's own context is
-// canceled — by a failed task or Retain, or by a shutdown — every node method declines it and returns the
-// cancellation cause, even when called with a context that hides the cancellation (context.WithoutCancel). A
-// derived context with its own deadline still works: it inherits the item's cancellation and adds its own. Code
-// that must run after cancellation (logging, a compensating action) can still run in plain Go once the node method
-// has returned the cause; it just cannot run inside a node.
+// Cancellation is judged by the item, not by the context passed to a node method: once the item's own context is
+// canceled (a failed task or Retain, a shutdown), every node method returns the cause, even when called with a
+// context that hides the cancellation (context.WithoutCancel). A derived context with its own deadline still works.
+// Code that must run after cancellation can still run in plain Go once the node method has returned; it just cannot
+// run inside a node.
 type ItemProcessor func(ctx context.Context) error
 
 // Run drives items through the conveyor until ctx is canceled or an item fails (see the Conveyor interface).
@@ -281,6 +280,12 @@ func (r *run) completeItem(it *item, procErr error) {
 	// finish (a live task owns its slot and cannot be force-freed).
 	if procErr != nil && !isShutdown(procErr) {
 		it.poison(procErr)
+	}
+	// An open fan-out body is sealed: the processor's path into it is over, and an idle body finishes only once
+	// sealed, so the wait below would otherwise never end. It still grows from its own running work; an error of it
+	// nobody observed fails the item below.
+	if w := it.pending; w != nil {
+		it.sealBody(w, bodyClosed)
 	}
 	// Join all outstanding background work before releasing slots.
 	for it.hasLiveWaves() {

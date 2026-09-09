@@ -121,7 +121,7 @@ func (f *fanOut) MoveTo(ctx context.Context, tasks Tasks, joins ...Wave) error {
 	if err := r.join(ctx, it, joins); err != nil {
 		return fmt.Errorf("join at %s: %w", f, err)
 	}
-	r.scheduleWave(it, f, tasks)
+	r.addToBody(it, r.newBody(it, f), f, tasks, true)
 	return nil
 }
 
@@ -144,7 +144,7 @@ func (f *fanOut) TryMoveTo(ctx context.Context, tasks Tasks, joins ...Wave) (ent
 	if err := r.join(ctx, it, joins); err != nil {
 		return true, fmt.Errorf("join at %s: %w", f, err)
 	}
-	r.scheduleWave(it, f, tasks)
+	r.addToBody(it, r.newBody(it, f), f, tasks, true)
 	return true, nil
 }
 
@@ -162,31 +162,50 @@ func (f *fanOut) Detach(ctx context.Context) Wave {
 	if it.occupied[f.node.index] == 0 {
 		panic(fmt.Errorf("cannot detach %s: %w", f, errStageNotEntered))
 	}
-	// The pending wave must be this node's: an item that detached at an earlier fan-out still occupies that node
-	// (its slot is held by the wave), so occupancy alone would not tell the two apart.
-	if it.pending == nil || it.pending.atNode != f.node {
+	// The body state, not occupancy, says whether there is work to hand over: an item that detached here still
+	// occupies the node (the wave holds its slot), and one whose leave failed still stands here with a closed body.
+	switch it.body[f.node.index] {
+	case bodyOpen:
+	case bodyDetached:
+		panic(fmt.Errorf("cannot detach %s: already detached: %w", f, errNothingToDetach))
+	case bodyClosed:
+		panic(fmt.Errorf("cannot detach %s: the body was closed when the item left: %w", f, errNothingToDetach))
+	default:
 		panic(fmt.Errorf("cannot detach %s: %w", f, errNothingToDetach))
 	}
 	w := it.pending
-	it.pending = nil
 	// From here the slot follows the work, not the item: releaseBelow leaves it alone (see item.isRetaining) and the
-	// branch workers free it once the last task is done.
+	// branch workers free it once the last task is done — or the item's next move, if the work is already done.
 	w.retainUnit = f.node
+	it.sealBody(w, bodyDetached)
+	// The door opens (a no-op after the item's own submissions): its work here is on the branches for good.
+	if f.node.rank > it.maxRank {
+		it.maxRank = f.node.rank
+	}
+	r.cond.Broadcast()
 	return w
 }
 
-// scheduleWave groups the tasks into one collection per branch (in argument order), enqueues them atomically — in
-// item order, per the gate in MoveTo — publishes the node's rank so the next item may enqueue, and starts the
-// work. The wave becomes the item's pending work: the node's body, which it must see finish before it may leave.
-// Caller holds run.mu.
+// newBody opens the item's body at f: an unsealed idle wave, recorded as the item's pending work with body state
+// open. It is sealed when the item leaves, detaches or completes (see item.sealBody), so an empty body still
+// finishes. Caller holds run.mu.
+func (r *run) newBody(it *item, f *fanOut) *wave {
+	w := newWave(r, it)
+	w.sealed = false
+	w.atNode = f.node
+	it.pending = w
+	it.body[f.node.index] = bodyOpen
+	return w
+}
+
+// addToBody adds tasks to the item's body w at f: it claims the sources and groups them into one collection per
+// branch in argument order (where a resubmitted Task panics, before anything is mutated), inserts each collection
+// into its branch queue at the item's place, publishes the node's rank so the next item may enter, and starts the
+// work. root says the tasks come through the item's own path (see taskCollection.root). Caller holds run.mu.
 //
 // Several tasks for the same branch become one collection, whose sources are consumed front to back — which is what
-// makes the order the caller added them to Tasks the order their work starts in.
-//
-// The grouping (which claims the sources, and so is where the single-use misuse panic fires) happens before the
-// wave is created on purpose: a panic must not leave the item owning a wave that nothing will ever settle, or the
-// item could never complete.
-func (r *run) scheduleWave(it *item, f *fanOut, tasks Tasks) *wave {
+// makes the order the caller listed them the order their work starts in.
+func (r *run) addToBody(it *item, w *wave, f *fanOut, tasks []Task, root bool) {
 	byBranch := make(map[int]*taskCollection, len(f.branches))
 	touched := make([]int, 0, len(f.branches))
 	for _, t := range tasks {
@@ -199,17 +218,13 @@ func (r *run) scheduleWave(it *item, f *fanOut, tasks Tasks) *wave {
 		branchIdx := t.branch.start.index
 		col := byBranch[branchIdx]
 		if col == nil {
-			col = &taskCollection{it: it, branch: t.branch, root: true}
+			col = &taskCollection{it: it, wave: w, branch: t.branch, root: root}
 			byBranch[branchIdx] = col
 			touched = append(touched, branchIdx)
 		}
 		col.sources = append(col.sources, t.src)
 	}
-	w := newWave(r, it)
-	w.atNode = f.node
-	it.pending = w
 	for _, branchIdx := range touched {
-		byBranch[branchIdx].wave = w
 		r.insertCollection(branchIdx, byBranch[branchIdx])
 	}
 	// Publishing the rank is what opens the gate for the next item and keeps the "older item's maxRank >=
@@ -217,12 +232,10 @@ func (r *run) scheduleWave(it *item, f *fanOut, tasks Tasks) *wave {
 	if f.node.rank > it.maxRank {
 		it.maxRank = f.node.rank
 	}
-	w.settle() // an empty submission is born finished
 	for _, branchIdx := range touched {
 		r.pump(branchIdx)
 	}
 	r.cond.Broadcast()
-	return w
 }
 
 // assignRank reserves rank r for the waiting room and gives the node unit the next one, whether or not a queue is

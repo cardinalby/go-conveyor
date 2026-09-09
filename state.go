@@ -259,6 +259,9 @@ func (r *run) checkEnterOrder(it *item, target *unit) {
 // are re-tested on every wake-up, a waiting room that is created or enlarged while an item is already waiting takes
 // effect for that item at once, which is the same admission-only promise SetLimit makes (see setQueueSize).
 //
+// A move that fails while the item waits in the waiting room leaves it standing there with its queued slot; a retry
+// to the same node resumes waiting for the node from there, taking no second slot.
+//
 // Caller holds mu and has passed checkEnterOrder.
 func (r *run) enterUnit(ctx context.Context, it *item, target *unit, publish bool) error {
 	// Leaving a fan-out means seeing its work finish: that work is the node's body. This precedes even the step into
@@ -266,17 +269,21 @@ func (r *run) enterUnit(ctx context.Context, it *item, target *unit, publish boo
 	if err := r.joinPending(ctx, it); err != nil {
 		return err
 	}
-	if err := r.waitUntil(ctx, it, func() bool {
-		return r.canEnter(it, target) || r.canEnterQueue(it, target)
-	}); err != nil {
-		return err
-	}
-	if !r.canEnter(it, target) {
-		// Only the waiting room is open: step aside (releasing the previous node) and wait for the node from there.
-		r.takeQueue(it, target)
-		if err := r.waitUntil(ctx, it, func() bool { return r.canEnter(it, target) }); err != nil {
+	if it.queuedAt != target.index {
+		if err := r.waitUntil(ctx, it, func() bool {
+			return r.canEnter(it, target) || r.canEnterQueue(it, target)
+		}); err != nil {
 			return err
 		}
+		if r.canEnter(it, target) {
+			r.takeUnit(it, target, publish)
+			return nil
+		}
+		// Only the waiting room is open: step aside (releasing the previous node) and wait for the node from there.
+		r.takeQueue(it, target)
+	}
+	if err := r.waitUntil(ctx, it, func() bool { return r.canEnter(it, target) }); err != nil {
+		return err
 	}
 	r.takeUnit(it, target, publish)
 	return nil
@@ -288,6 +295,8 @@ func (r *run) enterUnit(ctx context.Context, it *item, target *unit, publish boo
 // item has not been in the node yet, so a move that fails while waiting here leaves the node still enterable.
 // Caller holds mu.
 func (r *run) takeQueue(it *item, u *unit) {
+	// An item waits in one place at a time: a slot left in front of an earlier node by a failed move is given back.
+	r.leaveQueue(it, it.queuedAt)
 	r.queued[u.index].add(1)
 	it.queuedAt = u.index
 	if q := u.queueRank(); q > it.reachedRank {
@@ -325,53 +334,70 @@ func (r *run) leaveQueue(it *item, j int) {
 // and an item waiting in front of the node has published only the waiting room's lower rank, so the ordering gate
 // still refuses. Declining here is exactly right — the item ahead is about to take that slot.
 //
-// An item that has not finished its fan-out work is declined too: it may not leave that node yet, and waiting for it
-// is exactly what this variant promises not to do. So "no room" and "my own work is not done" are the same answer —
-// nothing happened, try again later.
+// An item whose fan-out body is busy is declined too: it may not leave that node yet, and waiting for it is exactly
+// what this variant promises not to do. So "no room" and "my own work is not done" are the same answer — nothing
+// happened, try again later. An idle body is closed only once the item is about to be admitted, in the same lock
+// hold: a declined attempt must not leave the item inside with no body to add to.
 //
 // Caller holds mu and has passed checkEnterOrder.
 func (r *run) tryEnterUnit(it *item, target *unit, publish bool) (bool, error) {
-	if it.pending != nil {
-		if !it.pending.isFinished() {
-			return false, nil
-		}
-		// It has finished, so leaving costs no wait: take the outcome now and report a failure instead of entering.
-		if w := it.consumePending(); w.err != nil {
-			return false, joinedErr(w)
-		}
+	if w := it.pending; w != nil && !w.idle() {
+		return false, nil
 	}
 	if !r.canEnter(it, target) {
 		return false, nil
+	}
+	if w := it.pending; w != nil {
+		// Leaving an idle body costs no wait. Its error cannot normally surface here — a failing task poisons the
+		// item, which the caller's preamble already declined — so this is a backstop.
+		if err := r.closeBody(it, w); err != nil {
+			return false, err
+		}
 	}
 	r.takeUnit(it, target, publish)
 	return true, nil
 }
 
-// joinPending waits for the work the item scheduled at the fan-out it currently occupies, unless it detached that
-// work. It is what makes a fan-out a node an item passes through rather than a place it drops work off: the tasks are
-// the node's body, so the item cannot leave before they are done, and the fan-out's limit therefore bounds how many
-// items have work outstanding.
+// joinPending waits for the item's open body — the work it has outstanding at the fan-out it currently occupies — to
+// go idle, then closes it. It is what makes a fan-out a node an item passes through rather than a place it drops work
+// off: the tasks are the node's body, so the item cannot leave before they are done, and the fan-out's limit
+// therefore bounds how many items have work outstanding.
 //
 // The item keeps its fan-out slot for the whole wait — that is the point — so the items behind it stay out, which is
-// the backpressure. Caller holds mu; on return the lock is still held.
+// the backpressure. The body is closed at the idle check, before the admission wait for the target: a leave that
+// fails afterwards leaves it closed (see enterUnit). Caller holds mu; on return the lock is still held.
 func (r *run) joinPending(ctx context.Context, it *item) error {
-	if it.pending == nil {
+	w := it.pending
+	if w == nil {
 		return nil
 	}
-	// Settled work is reported from the wave, not from the context. A failing task poisons its own item (fail-fast),
-	// and a poisoned context is what waitUntil answers with first — so taking that answer would report the item's
-	// cancellation where the truth is "this node's work failed", losing the node. Whether the wave settled is the
-	// question that distinguishes the two, and workDone poisons and settles under one lock hold, so re-asking it after
-	// the wake-up is decisive.
-	if !it.pending.isFinished() {
-		if err := r.waitUntil(ctx, it, it.pending.isFinished); err != nil {
-			if !it.pending.isFinished() {
-				// Canceled by something other than this work: leave the wave pending, so completeItem accounts for it.
+	if !w.idle() {
+		if err := r.waitUntil(ctx, it, w.idle); err != nil {
+			if !w.idle() {
+				// Canceled with work still running: the body stays open, so completeItem accounts for it. A leave
+				// never returns nil for a canceled item.
 				return err
 			}
+			// Idle after all. A failing task poisons its own item, and the poison is what waitUntil answers with
+			// first — so the body's own error, if any, is the truer message ("this node's work failed"). workDone
+			// poisons and settles under one lock hold, so an idle body decides. A clean one leaves the cause.
+			if bodyErr := r.closeBody(it, w); bodyErr != nil {
+				return bodyErr
+			}
+			return err
 		}
 	}
-	if w := it.consumePending(); w.err != nil {
+	return r.closeBody(it, w)
+}
+
+// closeBody closes the item's idle open body w as the item leaves: the wave is sealed and so finishes, its outcome
+// counts as observed (the item is about to be told about it), and the body state becomes closed. It returns the
+// node-qualified error if the work failed. Caller holds mu.
+func (r *run) closeBody(it *item, w *wave) error {
+	it.sealBody(w, bodyClosed)
+	w.acked = true
+	r.cond.Broadcast()
+	if w.err != nil {
 		return joinedErr(w)
 	}
 	return nil
@@ -822,9 +848,6 @@ func (u *unit) setQueueSize(size int) {
 // waitUntil blocks until admissible() reports true or the item may not go on — the call context or the item's own
 // context is canceled (see item.cancelCause) — whichever comes first. The caller must hold r.mu; on a nil return the
 // lock is still held and admissible() is true, so the caller may mutate before releasing the lock.
-//
-// Both contexts are watched because the call context may hide the item's cancellation (context.WithoutCancel), and a
-// canceled item must not be let into a node however it asks.
 func (r *run) waitUntil(ctx context.Context, it *item, admissible func() bool) error {
 	if err := it.cancelCause(ctx); err != nil {
 		return err
@@ -834,9 +857,9 @@ func (r *run) waitUntil(ctx context.Context, it *item, admissible func() bool) e
 	}
 	// sync.Cond does not wake on context cancellation, so arrange a broadcast when either context is done. AfterFunc
 	// runs the callback in its own goroutine (immediately if the context is already done); it blocks on r.mu until
-	// we release it in cond.Wait, so the wake-up is never missed. A call context that shares the item context's Done
-	// channel — the item's context itself, or a values-only derivation of it — is canceled exactly when the item is,
-	// so one watcher covers both; any other call context gets a second watcher on the item's own context.
+	// we release it in cond.Wait, so the wake-up is never missed. A call context sharing the item context's Done
+	// channel (the item's own, or a values-only derivation) is canceled exactly when the item is, so one watcher
+	// covers both; any other gets a second watcher on the item's context.
 	wake := func() {
 		r.mu.Lock()
 		r.cond.Broadcast()

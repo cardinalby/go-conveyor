@@ -278,7 +278,8 @@ func TestTryMoveToReportsFinishedFanOutFailure(t *testing.T) {
 		if err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error { return boom })}); err != nil {
 			return err
 		}
-		// Wait for the work to settle so the call has a finished, failed wave to report rather than a wait to decline.
+		// Wait for the work to settle: the failure poisons the item, and a poisoned item is what the call declines
+		// from its preamble. Before that the body is merely busy, which is "not now" (false, nil).
 		waitFor(t, "the failed task to settle", func() bool { return occupancyOf(c, pool) == 0 })
 		entered, err := commit.TryMoveTo(ctx)
 		tryEntered.Store(entered)

@@ -80,11 +80,10 @@ type item struct {
 	parentWave *wave
 }
 
-// bodyState is where an item stands with the body of one fan-out — the work it may add there through its own path
-// (its ItemProcessor, or, for a lane child, its callback at an interior fan-out of the lane). It is recorded per item
-// and per fan-out (item.body) and drives what the item may still do at that node. It is independent of occupancy: an
-// item may still occupy the node with a closed body (a detached wave in flight, or a failed leave), or may have
-// moved on.
+// bodyState is where an item stands with its body at one fan-out — the work it may add there through its own path
+// (the ItemProcessor, or a lane child's callback at an interior fan-out). Recorded per item and fan-out (item.body),
+// it drives what the item may still do at that node. It is independent of occupancy: an item may still occupy the
+// node with a closed body (a detached wave in flight, a failed leave), or may have moved on.
 type bodyState uint8
 
 const (
@@ -111,11 +110,9 @@ func (it *item) poison(cause error) {
 	}
 }
 
-// cancelCause is the reason this item may not go on, or nil: the cancellation cause of the item's own context first
-// — its true status, whatever the caller derived from it — else the cause of the call context, which may carry a
-// deadline the caller added. Every node method judges cancellation with it, so a call context with the cancellation
-// stripped (context.WithoutCancel) cannot move, schedule, wait or retain for a canceled item: if item 5 fails while
-// writing and item 6 hid its cancellation to reach commit, item 6 would commit past item 5's data. Needs no lock.
+// cancelCause is why this item may not go on, or nil: its own context's cause first (the item's true status), else
+// the call context's (a deadline the caller added). Every node method judges cancellation with it, so a context with
+// the cancellation stripped (context.WithoutCancel) cannot act for a canceled item. Needs no lock.
 func (it *item) cancelCause(ctx context.Context) error {
 	if err := context.Cause(it.ctx); err != nil {
 		return err
@@ -144,13 +141,13 @@ func (it *item) firstUnackedWaveErr() error {
 	return nil
 }
 
-// consumePending takes the item's pending wave: it marks the outcome observed (the item is about to be told about
-// it) and clears it, so the item is free to leave the fan-out. The wave must have finished. Caller holds run.mu.
-func (it *item) consumePending() *wave {
-	w := it.pending
+// sealBody ends the item's own path into its open body w: the wave is sealed (finishing now if idle), it is no longer
+// pending, and the body state at its node becomes state (bodyClosed on leave/completion, bodyDetached on Detach).
+// Only the wave's own running work may add to it from here on. Caller holds run.mu and must broadcast.
+func (it *item) sealBody(w *wave, state bodyState) {
 	it.pending = nil
-	w.acked = true
-	return w
+	it.body[w.atNode.index] = state
+	w.seal()
 }
 
 // isRetaining reports whether a live wave of this item holds unit j — a Stage.Retain's stage or a FanOut.Detach's
