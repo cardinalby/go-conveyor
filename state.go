@@ -18,16 +18,20 @@ import (
 // item advance past an earlier one would break the "maxRank is non-increasing with item age among the items of a
 // scope" invariant, and with it the correctness of checking only it.prev in canEnter.
 
-// taskCollection is one item's ordered, lazily-consumed set of task sources for one lane — everything one
-// FanOut.MoveTo call scheduled there. A lane queue holds collections in item order; work is pulled from the head
-// collection one freed slot at a time, so all of an older item's work starts before any younger item's on the
-// same lane. Consumed sources are nil'd as the collection advances, and an exhausted collection is dequeued
-// immediately. Guarded by run.mu; the one exception is an async pull, which owns the current source exclusively
-// while pulling is set.
+// taskCollection is one item's ordered, lazily-consumed set of task sources for one branch — everything one
+// submission scheduled there. A branch queue holds collections in item order (see insertCollection); work is pulled
+// from the head collection one freed slot at a time, so a free slot never goes to a younger item's work while an
+// older item has work queued. Consumed sources are nil'd as the collection advances, and an exhausted collection is
+// removed from the queue immediately. Guarded by run.mu; the one exception is an async pull, which owns the current
+// source exclusively while pulling is set.
 type taskCollection struct {
 	it     *item // the item that scheduled this work
 	wave   *wave // the wave the work is charged to
 	branch *branch
+	// root marks a collection scheduled through the item's own path (its ItemProcessor, or a lane child's callback
+	// at an interior fan-out of its lane), as opposed to one spawned by the wave's own running work. Only root
+	// collections count toward the wave's Started channel (see wave.rootUnexhausted).
+	root bool
 
 	// sources in submission order; entries before srcIdx are consumed and nil'd.
 	sources []taskSource
@@ -45,7 +49,7 @@ type taskCollection struct {
 // nonMovableCtx returns (and caches) the context for work that cannot travel. Caller holds run.mu.
 func (col *taskCollection) nonMovableCtx() context.Context {
 	if col.workCtx == nil {
-		col.workCtx = withPoolWork(col.it.ctx, col.branch)
+		col.workCtx = withPoolWork(col.it.ctx, col)
 	}
 	return col.workCtx
 }
@@ -152,12 +156,15 @@ func (r *run) newChildItem(col *taskCollection) *item {
 // creation order, which is what keeps each list ordered. Caller holds mu.
 func (r *run) newItem(no int64, scope int) *item {
 	n := len(r.occupancy)
+	r.nextSeq++
 	it := &item{
 		no:       no,
+		seq:      r.nextSeq,
 		run:      r,
 		scope:    scope,
 		occupied: make([]int, n),
 		entered:  make([]bool, n),
+		body:     make([]bodyState, n),
 		queuedAt: -1,
 	}
 	list := &r.scopes[scope]
@@ -498,33 +505,61 @@ func (r *run) unlink(it *item) {
 	it.prev, it.next = nil, nil
 }
 
-// --- lane runtime ---
+// --- branch runtime ---
 
-// enqueueCollection appends col to the lane's queue and registers it on its wave (whose Started channel closes
-// once every collection is exhausted). Caller holds mu.
+// insertCollection places col in the branch's queue at its item's place — behind every queued collection of the same
+// item or an older one, ahead of the first that belongs to a younger item (age is item.seq) — and registers it on its
+// wave. Caller holds mu.
 //
-// It also counts the collection in run.queued, the same counter a stage's waiting room uses — a lane's queue is its
-// waiting room, and this is what Stats reports as the lane's backlog (see UnitStat.Queued). Nothing else is shared:
-// the admission side (canEnterQueue / takeQueue / item.queuedAt) is never reached for a lane's start gate, because
-// work is born there rather than moving to it, so the counter is the lane's alone.
-func (r *run) enqueueCollection(branchIdx int, col *taskCollection) {
-	r.taskQueues[branchIdx] = append(r.taskQueues[branchIdx], col)
+// Walking from the tail is what makes the common case constant-time: a submission by the youngest item with queued
+// work, which is every submission when each item submits once right after entering, lands at the tail after one
+// comparison. Only a submission by an item with younger items queued behind it walks further. An inserted collection
+// may displace the head, including one with an async pull in flight: that collection keeps its single-flight status
+// and its reserved slot, and pulls simply continue from the new head (see pullableHead).
+//
+// It also counts the collection in run.queued, the same counter a stage's waiting room uses — a branch's queue is its
+// waiting room, and this is what Stats reports as the branch's backlog (see UnitStat.Queued). Nothing else is shared:
+// the admission side (canEnterQueue / takeQueue / item.queuedAt) is never reached for a branch's start gate, because
+// work is born there rather than moving to it, so the counter is the branch's alone.
+func (r *run) insertCollection(branchIdx int, col *taskCollection) {
+	q := r.taskQueues[branchIdx]
+	i := len(q)
+	for i > 0 && q[i-1].it.seq > col.it.seq {
+		i--
+	}
+	q = append(q, nil)
+	copy(q[i+1:], q[i:])
+	q[i] = col
+	r.taskQueues[branchIdx] = q
 	r.queued[branchIdx].add(1)
-	col.wave.addSource()
+	col.wave.addSource(col.root)
 }
 
-// dequeueHead removes the lane's head collection and uncounts it. Both ways a collection leaves the queue (settled
-// or dropped) funnel through here, so the backlog gauge cannot drift from the queue itself. The consumed slot is
+// dequeue removes col from the branch's queue, wherever it stands, and uncounts it. Both ways a collection leaves the
+// queue (settled or dropped) funnel through here, so the backlog gauge cannot drift from the queue itself, and each
+// collection leaves exactly once. Removal is by identity, not "the head": a collection that was displaced from the
+// head by an older item's insertion while its async pull was in flight settles from wherever it now stands. The head
+// case stays constant-time (clear the pointer, reslice), so draining a long backlog is linear; the vacated slot is
 // zeroed so the backing array does not pin the collection until reallocation. Caller holds mu.
-func (r *run) dequeueHead(branchIdx int) {
+func (r *run) dequeue(branchIdx int, col *taskCollection) {
 	q := r.taskQueues[branchIdx]
-	q[0] = nil
-	r.taskQueues[branchIdx] = q[1:]
+	if q[0] == col {
+		q[0] = nil
+		r.taskQueues[branchIdx] = q[1:]
+	} else {
+		i := 1
+		for q[i] != col {
+			i++
+		}
+		copy(q[i:], q[i+1:])
+		q[len(q)-1] = nil
+		r.taskQueues[branchIdx] = q[:len(q)-1]
+	}
 	r.queued[branchIdx].add(-1)
 }
 
-// pullableHead returns the lane's head collection if work may be pulled from it right now, or nil when the queue is
-// empty or an async pull is already in flight on the head (pulls are single-flight per source, and per-lane item
+// pullableHead returns the branch's head collection if work may be pulled from it right now, or nil when the queue is
+// empty or an async pull is already in flight on the head (pulls are single-flight per source, and per-branch item
 // ordering forbids pulling past the head). Caller holds mu.
 func (r *run) pullableHead(branchIdx int) *taskCollection {
 	q := r.taskQueues[branchIdx]
@@ -534,36 +569,35 @@ func (r *run) pullableHead(branchIdx int) *taskCollection {
 	return q[0]
 }
 
-// settleHead trims the lane's head collection (col) and, once the whole collection is exhausted, dequeues it — from
+// settleCollection trims col and, once the whole collection is exhausted, removes it from the branch's queue — from
 // then on nothing references it — and tells its wave one source is done. Because a collection leaves the queue as
 // soon as its work has all been handed out, the backlog counts items with work not yet started, never work merely
 // still running. Caller holds mu and must broadcast.
-func (r *run) settleHead(branchIdx int, col *taskCollection) {
+func (r *run) settleCollection(branchIdx int, col *taskCollection) {
 	col.trim()
 	if !col.exhaustedNow() {
 		return
 	}
-	r.dequeueHead(branchIdx)
-	col.wave.sourceExhausted()
+	r.dequeue(branchIdx, col)
+	col.wave.sourceExhausted(col.root)
 }
 
-// dropHead abandons the lane's head collection because its item is canceled: the work it has not handed out yet will
-// never run, so the collection is dequeued and its wave is told the source is done (which is what lets the wave
-// resolve — see Wave). The wave records why the work was abandoned, so it cannot report a clean finish for work that
-// never ran (see wave.recordAbandoned). Caller holds mu, has checked that no async pull is in flight on it, and must
-// broadcast.
+// dropCollection abandons col because its item is canceled: the work it has not handed out yet will never run, so the
+// collection is removed from the queue and its wave is told the source is done (which is what lets the wave resolve —
+// see Wave). The wave records why the work was abandoned, so it cannot report a clean finish for work that never ran
+// (see wave.recordAbandoned). Caller holds mu, has checked that no async pull is in flight on it, and must broadcast.
 //
 // The abandoned sources are released on their own goroutine, because this is the one path that discards a source that
 // may still be holding something — a generator suspended between pulls — and letting go of it runs user code, which
 // must not happen under run.mu. Everywhere else a source is finished by the pull that exhausted it. Since no pull is in
 // flight and the collection is now unreachable, nothing can race with the release.
-func (r *run) dropHead(branchIdx int, col *taskCollection, cause error) {
-	r.dequeueHead(branchIdx)
+func (r *run) dropCollection(branchIdx int, col *taskCollection, cause error) {
+	r.dequeue(branchIdx, col)
 	if rest := col.detachSources(); len(rest) > 0 {
 		go releaseSources(rest)
 	}
 	col.wave.recordAbandoned(cause)
-	col.wave.sourceExhausted()
+	col.wave.sourceExhausted(col.root)
 }
 
 // grabNext tries to fill one free slot of the lane from the head collection (caller holds mu; the caller must
@@ -587,7 +621,7 @@ func (r *run) grabNext(branchIdx int) (g grabbed, asyncCol *taskCollection, ok b
 			// behave the same way on cancellation, and lets the lane serve the next item at once. Whether an item is
 			// allowed to keep working is decided per item, never per task — a task is part of one item's work in a
 			// node, so an item still allowed to continue pulls and runs all of its tasks whatever shape they came in.
-			r.dropHead(branchIdx, col, cause)
+			r.dropCollection(branchIdx, col, cause)
 			continue
 		}
 		src := col.curSource()
@@ -601,11 +635,11 @@ func (r *run) grabNext(branchIdx int) (g grabbed, asyncCol *taskCollection, ok b
 		fn, pulled := src.pull(col.it.ctx)
 		if !pulled {
 			// Unreachable when eager trimming holds (a sync head is never exhausted); settle and retry.
-			r.settleHead(branchIdx, col)
+			r.settleCollection(branchIdx, col)
 			continue
 		}
 		g := r.startWork(col, branchIdx, fn, false)
-		r.settleHead(branchIdx, col)
+		r.settleCollection(branchIdx, col)
 		return g, nil, true
 	}
 }
@@ -628,13 +662,13 @@ func (r *run) finishAsyncPull(col *taskCollection, branchIdx int) (grabbed, bool
 	}
 	r.releaseSlot(col.it, branchIdx)
 	// A streaming source treats cancellation as exhaustion, so a pull that was in flight when the item was canceled
-	// lands here rather than in dropHead. The item is what decides, so report it the same way: this source stopped
-	// because the item lost permission to work, not because it ran out.
+	// lands here rather than in dropCollection. The item is what decides, so report it the same way: this source
+	// stopped because the item lost permission to work, not because it ran out.
 	if cause := context.Cause(col.it.ctx); cause != nil {
 		col.wave.recordAbandoned(cause)
 	}
-	r.settleHead(branchIdx, col) // the failed pull marked the source exhausted; drop it (and maybe the collection)
-	r.pump(branchIdx)            // the freed slot may start the collection's next source, or the next collection
+	r.settleCollection(branchIdx, col) // the failed pull marked the source exhausted; drop it (and maybe the collection)
+	r.pump(branchIdx)                  // the freed slot may start the collection's next source, or the next collection
 	r.cond.Broadcast()
 	return grabbed{}, false
 }

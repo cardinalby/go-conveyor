@@ -40,9 +40,17 @@ type wave struct {
 	// earlier fan-out and is still carrying.
 	atNode *unit
 
-	// unexhausted is the number of this wave's task collections (one per branch touched by the FanOut.MoveTo
-	// call) that may still produce work. Started closes when it reaches zero.
+	// sealed records that nothing more can be added to the wave through its item's own path; only the wave's own
+	// running work may still add to it. The channels close only once the wave is sealed (see settle). Every wave is
+	// born sealed except a fan-out body, which is sealed when its item leaves the node, detaches, or completes.
+	sealed bool
+	// unexhausted is the number of this wave's task collections (one per branch touched by a submission) that may
+	// still produce work. Together with running it decides idle.
 	unexhausted int
+	// rootUnexhausted is the part of unexhausted made of root collections — those scheduled through the item's own
+	// path rather than spawned by the wave's running work. Started closes once the wave is sealed and this is zero:
+	// the sources the ItemProcessor handed over are all consumed (see Wave.Started).
+	rootUnexhausted int
 	// running is the number of this wave's tasks (or child items) that have started but not finished.
 	running int
 
@@ -59,13 +67,15 @@ type wave struct {
 	finishedSet bool // finishedCh has been closed
 }
 
-// newWave creates a wave owned by it, with no work registered yet. The caller holds run.mu (except for the
+// newWave creates a sealed wave owned by it, with no work registered yet. The caller holds run.mu (except for the
 // foreign-context path, which has no run state to touch) and must register the work before releasing the lock,
-// or the wave would look finished too early.
+// or the wave would look finished too early. A wave that must stay open for further submissions clears sealed
+// itself.
 func newWave(r *run, it *item) *wave {
 	w := &wave{
 		run:        r,
 		it:         it,
+		sealed:     true,
 		startedCh:  make(chan struct{}),
 		finishedCh: make(chan struct{}),
 	}
@@ -92,6 +102,7 @@ func finishedWave(r *run, it *item, err error) *wave {
 func standaloneWave(err error) *wave {
 	return &wave{
 		err:         err,
+		sealed:      true,
 		startedCh:   closedChan(),
 		finishedCh:  closedChan(),
 		startedSet:  true,
@@ -144,13 +155,33 @@ func (w *wave) closeFinished() {
 // isFinished reports whether the wave has completed. Caller holds run.mu.
 func (w *wave) isFinished() bool { return w.finishedSet }
 
-// addSource registers one more collection that may still produce work.
-func (w *wave) addSource() { w.unexhausted++ }
+// idle reports whether the wave has nothing outstanding: no collection may still produce work and no task is
+// running. An unsealed idle wave may become busy again; a sealed idle wave is finished. Caller holds run.mu.
+func (w *wave) idle() bool { return w.unexhausted == 0 && w.running == 0 }
+
+// seal closes the wave to additions through its item's own path and settles it, so a wave sealed while idle
+// finishes at once. Idempotent. The caller must broadcast.
+func (w *wave) seal() {
+	w.sealed = true
+	w.settle()
+}
+
+// addSource registers one more collection that may still produce work. root says it was scheduled through the
+// item's own path (see rootUnexhausted).
+func (w *wave) addSource(root bool) {
+	w.unexhausted++
+	if root {
+		w.rootUnexhausted++
+	}
+}
 
 // sourceExhausted records that one collection can produce no more work, and settles the wave if that was the
-// last outstanding thing. The caller must broadcast.
-func (w *wave) sourceExhausted() {
+// last outstanding thing. root must match the addSource call for the same collection. The caller must broadcast.
+func (w *wave) sourceExhausted(root bool) {
 	w.unexhausted--
+	if root {
+		w.rootUnexhausted--
+	}
 	w.settle()
 }
 
@@ -196,14 +227,18 @@ func (w *wave) recordAbandoned(cause error) {
 	w.err = cause
 }
 
-// settle closes Started / Finished once the corresponding counters have drained.
+// settle closes Started / Finished once the wave is sealed and the corresponding counters have drained. An unsealed
+// wave never closes a channel: its item may still add work, so neither "all handed out" nor "all done" can be final.
 func (w *wave) settle() {
-	if w.unexhausted == 0 {
+	if !w.sealed {
+		return
+	}
+	if w.rootUnexhausted == 0 {
 		w.closeStarted()
-		if w.running == 0 {
-			w.closeFinished()
-			w.releaseRetained()
-		}
+	}
+	if w.idle() {
+		w.closeFinished()
+		w.releaseRetained()
 	}
 }
 

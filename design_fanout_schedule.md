@@ -1031,34 +1031,38 @@ Baseline record (2026-09-10, branch `fanout-schedule`, Go 1.26.3, Apple M1 Pro):
 
 Goal: add the data the design needs without changing any observable behavior.
 
-- [ ] `item.go`: add `seq` (creation order within the run; assigned in `run.newItem`, used only for branch queue
+- [x] `item.go`: add `seq` (creation order within the run; assigned in `run.newItem`, used only for branch queue
       insertion). Document why `no` cannot be used (lane children share the parent's number).
-- [ ] `item.go`: add the per-fan-out body state. Suggested shape: a `bodyState []bodyState` slice indexed by unit
+- [x] `item.go`: add the per-fan-out body state. Suggested shape: a `bodyState []bodyState` slice indexed by unit
       index, like `occupied` and `entered`, with values `bodyNone`, `bodyOpen`, `bodyClosed`, `bodyDetached`. Keep
       `pending *wave` as the pointer to the open body (nil when the state is not `open`).
-- [ ] `state.go` (`taskCollection`): add `root bool` (scheduled through the own-body path) for the `Started` rule.
+- [x] `state.go` (`taskCollection`): add `root bool` (scheduled through the own-body path) for the `Started` rule.
       `fanout.go` (`scheduleWave`) must set it to true on every collection it creates, so `rootUnexhausted` mirrors
       `unexhausted` under the old API and `Started` keeps closing exactly when it does today
       (`TestWaveStartedWaitsForStreamingSource`, `TestNewTasksChanArrivesAsSentAndStartedWaitsForClose`).
-- [ ] `context.go`: make the pool-work marker carry the `*taskCollection` instead of only the pool. `nonMovableCtx`
+- [x] `context.go`: make the pool-work marker carry the `*taskCollection` instead of only the pool. `nonMovableCtx`
       still builds one context per collection. `resolveItem` keeps panicking for every method except `Schedule`,
       which gets its own resolver in phase 4.
-- [ ] `wave.go`: add `sealed bool`, `rootUnexhausted int`, `idle()`, `seal()`. `settle` closes nothing while
+- [x] `wave.go`: add `sealed bool`, `rootUnexhausted int`, `idle()`, `seal()`. `settle` closes nothing while
       unsealed; once sealed it closes `Started` when `rootUnexhausted == 0` and `Finished` when idle. `addSource(root)`
       and `sourceExhausted(root)` maintain both counters. `newWave` returns a sealed wave; only the fan-out body
       constructor (phase 3) creates an unsealed one. Verify that `Retain`, `finishedWave` and `standaloneWave` behave
       exactly as before.
-- [ ] `state.go`: replace `enqueueCollection` with `insertCollection(branchIdx, col)`: walk from the tail while the
+- [x] `state.go`: replace `enqueueCollection` with `insertCollection(branchIdx, col)`: walk from the tail while the
       tail's item is younger (`seq` greater) than `col.it`, insert there. With the old API every insert lands at the
       tail, so this is behavior-neutral for now.
-- [ ] `state.go`: replace `dequeueHead` with `dequeue(branchIdx, col)` by identity, keeping the constant-time fast
+- [x] `state.go`: replace `dequeueHead` with `dequeue(branchIdx, col)` by identity, keeping the constant-time fast
       path when `col` is the head (clear the pointer, reslice, as today) and scanning only for a displaced collection,
       so draining a long spawned backlog stays linear under `run.mu`; rename `settleHead` to `settleCollection` and
       `dropHead` to `dropCollection`, both taking the collection. `pullableHead` and `grabNext` stay head-only.
       Check that each collection leaves the queue exactly once with one `Queued` decrement and one exhaustion
       notification, on both the drain path and the drop path.
-- [ ] `debug.go`: no change needed; confirm `DebugUnitOccupants` still walks `taskQueues` correctly after the rename.
-- [ ] Run the root suite. Nothing observable changed.
+- [x] `debug.go`: no change needed; confirm `DebugUnitOccupants` still walks `taskQueues` correctly after the rename.
+- [x] Run the root suite. Nothing observable changed.
+
+Phase 1 record: root suite green under `-race -cpu=1,4`; Codex review found no material issues.
+`BenchmarkFanOutSchedule` allocs/op went from 26/32/44/68 to 27/33/45/70 (one allocation per item for the
+`body` slice); ns/op within noise.
 
 ### 11.4 Phase 2: cancellation judged by the canonical context
 

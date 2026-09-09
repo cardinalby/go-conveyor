@@ -174,7 +174,7 @@ func (s *genSource) finish() {
 
 // release stops a generator whose remaining work will never be pulled. Without it the iter.Pull coroutine created by
 // the first pull would stay parked for the life of the process, since nothing else ever reaches this source again once
-// its collection has been dropped (see run.dropHead).
+// its collection has been dropped (see run.dropCollection).
 func (s *genSource) release() { s.finish() }
 
 // chanSource emits the callbacks received from a user channel (NewTasksChan) until it is closed or the item's

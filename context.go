@@ -17,9 +17,10 @@ const (
 	poolWorkCtxKey
 )
 
-// poolWorkMarker names the pool whose work holds the context, for the panic message.
+// poolWorkMarker identifies the collection whose work holds the context. Through it the runtime reaches the pool
+// (to name it when the work tries to move), and the wave and owning item the work is charged to.
 type poolWorkMarker struct {
-	pool *branch
+	col *taskCollection
 }
 
 // withItem derives an item context from parent, carrying the *item handle.
@@ -28,9 +29,9 @@ func withItem(parent context.Context, it *item) context.Context {
 }
 
 // withPoolWork derives the context handed to a Pool's work: the scheduling item's context (so cancellation and
-// deadlines are shared, with nothing extra to release), marked as non-movable.
-func withPoolWork(parent context.Context, b *branch) context.Context {
-	return context.WithValue(parent, poolWorkCtxKey, poolWorkMarker{pool: b})
+// deadlines are shared, with nothing extra to release), marked as non-movable and tied to its collection.
+func withPoolWork(parent context.Context, col *taskCollection) context.Context {
+	return context.WithValue(parent, poolWorkCtxKey, poolWorkMarker{col: col})
 }
 
 // ItemNoFromContext returns the number of the item this context belongs to, for logging and tracing. A child
@@ -72,7 +73,7 @@ func itemFromContext(ctx context.Context) (*item, error) {
 func (c *conveyor) resolveItem(ctx context.Context) (*item, error) {
 	if m, ok := ctx.Value(poolWorkCtxKey).(poolWorkMarker); ok {
 		panic(fmt.Errorf("this context belongs to work on %s, which has no nodes of its own to move through "+
-			"(use AddLane for a branch whose work travels): %w", m.pool, errCannotMove))
+			"(use AddLane for a branch whose work travels): %w", m.col.branch, errCannotMove))
 	}
 	it, err := itemFromContext(ctx)
 	if err != nil {

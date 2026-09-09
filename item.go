@@ -15,7 +15,13 @@ type item struct {
 	// no identifies the conveyor item this journey belongs to, exposed via ItemNoFromContext: a child inherits its
 	// parent's number, so the number always answers "which item am I part of". It is NOT used for any ordering
 	// decision (the in-flight list carries order) — do not reintroduce no comparisons.
-	no  int64
+	no int64
+	// seq is this item's creation order within the run, over all scopes (run.nextSeq, assigned in run.newItem). It
+	// is used for one thing only: placing a collection in a branch queue behind the queued work of older items and
+	// ahead of younger ones (see run.insertCollection). The admission gate never reads it — that stays with the
+	// in-flight list. no cannot serve here because a lane's children all carry their parent's number, so it does not
+	// tell two children apart; seq is unique per item.
+	seq int64
 	run *run
 
 	// scope is the id of the series this item travels through: 0 for a root item, the lane's scope for a child. It
@@ -36,6 +42,9 @@ type item struct {
 	// node stays "entered once ever" even after the item leaves it. Waiting in front of a node does not count as
 	// entering it (see run.takeQueue).
 	entered []bool
+	// body[k] is this item's body state at fan-out k (by unit index): where the item stands with the work it may add
+	// there through its own path. bodyNone for every unit that is not a fan-out the item has entered. See bodyState.
+	body []bodyState
 	// queuedAt is the index of the node this item is currently waiting in front of, or -1 when it is not waiting.
 	// A single field suffices because an item can be in at most one waiting room at a time, and only in front of
 	// the node it is trying to enter next — which is why the waiting room needs no unit of its own, and so costs
@@ -61,15 +70,33 @@ type item struct {
 	// waves are the background-work handles this item created (FanOut.MoveTo, Stage.Retain). They are joined when
 	// the item completes, and an error none of them had observed fails the item.
 	waves []*wave
-	// pending is the work the item scheduled at the fan-out it currently occupies and has not detached: the node's
-	// body, which the item must see finish before it may leave (see run.joinPending). nil when the item is not in a
-	// fan-out, or has handed its work over with FanOut.Detach.
+	// pending is the item's open body: the work scheduled at the fan-out it currently occupies and has not detached,
+	// which the item must see finish before it may leave (see run.joinPending). nil when the item is not in a
+	// fan-out, or has handed its work over with FanOut.Detach — that is, whenever no entry of body is bodyOpen.
 	pending *wave
 
 	// parentWave is the wave whose work created this child item (nil for a root item). The child's outcome is
 	// reported to it.
 	parentWave *wave
 }
+
+// bodyState is where an item stands with the body of one fan-out — the work it may add there through its own path
+// (its ItemProcessor, or, for a lane child, its callback at an interior fan-out of the lane). It is recorded per item
+// and per fan-out (item.body) and drives what the item may still do at that node. It is independent of occupancy: an
+// item may still occupy the node with a closed body (a detached wave in flight, or a failed leave), or may have
+// moved on.
+type bodyState uint8
+
+const (
+	// bodyNone: the item has never entered this fan-out.
+	bodyNone bodyState = iota
+	// bodyOpen: the item is inside and the body may grow through the item's own path.
+	bodyOpen
+	// bodyClosed: the body was joined when the item left (or tried to), or the item's processor returned. Terminal.
+	bodyClosed
+	// bodyDetached: the body was handed to the caller with FanOut.Detach. Terminal.
+	bodyDetached
+)
 
 // poison cancels this item's context with cause (fail-fast). A child has no context of its own to cancel, so it
 // escalates to its parent: cancellation is item-wide, and a child's failure fails its parent anyway. Caller holds

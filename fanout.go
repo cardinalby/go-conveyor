@@ -197,7 +197,7 @@ func (r *run) scheduleWave(it *item, f *fanOut, tasks Tasks) *wave {
 		branchIdx := t.branch.start.index
 		col := byBranch[branchIdx]
 		if col == nil {
-			col = &taskCollection{it: it, branch: t.branch}
+			col = &taskCollection{it: it, branch: t.branch, root: true}
 			byBranch[branchIdx] = col
 			touched = append(touched, branchIdx)
 		}
@@ -208,7 +208,7 @@ func (r *run) scheduleWave(it *item, f *fanOut, tasks Tasks) *wave {
 	it.pending = w
 	for _, branchIdx := range touched {
 		byBranch[branchIdx].wave = w
-		r.enqueueCollection(branchIdx, byBranch[branchIdx])
+		r.insertCollection(branchIdx, byBranch[branchIdx])
 	}
 	// Publishing the rank is what opens the gate for the next item and keeps the "older item's maxRank >=
 	// younger item's" invariant.
