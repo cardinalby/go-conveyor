@@ -104,7 +104,8 @@ function declareNodes(
   });
 }
 
-/** Emits the MoveTo sequence for nodes at indentLevel, looking up each node/branch's variable in varById. Called
+/** Emits the MoveTo (and, for a fan-out, Schedule) sequence for nodes at indentLevel, looking up each node/branch's
+ * variable in varById. Called
  * once for the top-level Run body, and again — one level of indentation deeper — inside a lane branch's own task
  * closure, for its interior nodes; that recursion is what lets a lane's interior contain a fan-out whose own
  * branches may again be lanes, to any depth. The caller is responsible for the trailing "return nil": once for the
@@ -128,7 +129,10 @@ function emitBody(
       bodyLines.push("");
       return;
     }
-    bodyLines.push(indent(indentLevel, `if err := ${varName}.MoveTo(ctx, Tasks{`));
+    bodyLines.push(indent(indentLevel, `if err := ${varName}.MoveTo(ctx); err != nil {`));
+    bodyLines.push(indent(indentLevel + 1, "return err"));
+    bodyLines.push(indent(indentLevel, "}"));
+    bodyLines.push(indent(indentLevel, `if err := ${varName}.Schedule(ctx,`));
     node.branches.forEach((br) => {
       const brVar = varById.get(br.id) ?? br.id;
       const brLabel = labelById.get(br.id) ?? brVar;
@@ -156,7 +160,7 @@ function emitBody(
       bodyLines.push(indent(indentLevel + 2, "return nil"));
       bodyLines.push(indent(indentLevel + 1, "}),"));
     });
-    bodyLines.push(indent(indentLevel, "}); err != nil {"));
+    bodyLines.push(indent(indentLevel, "); err != nil {"));
     bodyLines.push(indent(indentLevel + 1, "return err"));
     bodyLines.push(indent(indentLevel, "}"));
     bodyLines.push("");

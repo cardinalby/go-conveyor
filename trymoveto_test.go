@@ -75,9 +75,10 @@ func TestTryMoveToDeclinesWhenFullAndRetries(t *testing.T) {
 	}
 }
 
-// TestTryMoveToFanOutLeavesTasksUnclaimed covers the fan-out-specific promise: a declined submission does not
-// consume the Tasks, so the same value can be submitted afterwards (tasks are otherwise single-use).
-func TestTryMoveToFanOutLeavesTasksUnclaimed(t *testing.T) {
+// TestTryMoveToFanOutDeclinedLeavesItemInPlace covers the fan-out side of the promise: a declined entry leaves the
+// item in the previous node, and tasks built ahead of the attempt are still unclaimed, so the same []Task can be
+// scheduled once the item really enters (tasks are otherwise single-use).
+func TestTryMoveToFanOutDeclinedLeavesItemInPlace(t *testing.T) {
 	t.Parallel()
 	c := NewConveyor()
 	fan := c.AddFanOut() // limit 1: one item inside at a time
@@ -89,9 +90,12 @@ func TestTryMoveToFanOutLeavesTasksUnclaimed(t *testing.T) {
 	var ran int64
 
 	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
-		tasks := Tasks{pool.NewTask(func(context.Context) error { return nil })}
+		tasks := []Task{pool.NewTask(func(context.Context) error { return nil })}
 		if no == 1 {
-			err := fan.MoveTo(ctx, tasks)
+			err := fan.MoveTo(ctx)
+			if err == nil {
+				err = fan.Schedule(ctx, tasks...)
+			}
 			if err != nil {
 				return err
 			}
@@ -102,16 +106,22 @@ func TestTryMoveToFanOutLeavesTasksUnclaimed(t *testing.T) {
 		// Wait for item 1's rank to be published, so the decline below can only be for lack of capacity — not
 		// because item 2's turn had not come yet.
 		<-inside
-		ok, err := fan.TryMoveTo(ctx, tasks)
+		ok, err := fan.TryMoveTo(ctx)
 		if err != nil {
 			return err
 		}
 		if ok {
 			t.Error("expected to be declined by a full fan-out")
 		}
+		if occ := occupancyOf(c, c.StartUnit()); occ != 1 {
+			t.Errorf("start occupancy = %d, want 1 — the declined item stays in the previous node", occ)
+		}
 		close(tried)
-		// The same Tasks value, unclaimed by the declined call, is submitted for real now.
-		err = fan.MoveTo(ctx, tasks)
+		// The tasks, built before the declined attempt, are scheduled for real now.
+		err = fan.MoveTo(ctx)
+		if err == nil {
+			err = fan.Schedule(ctx, tasks...)
+		}
 		if err != nil {
 			return err
 		}
@@ -203,11 +213,10 @@ func TestTryMoveToReportsEnteredWithJoinError(t *testing.T) {
 	}
 }
 
-// TestTryMoveToFanOutJoinErrorLeavesTasksUnscheduled: a fan-out schedules its tasks only after its joins succeed, so
-// a failing join leaves the item inside the node with nothing enqueued. That is a state no other path produces — the
-// node is entered but its rank is never published, since publishing is the enqueue's job — and the tasks must not
-// have run.
-func TestTryMoveToFanOutJoinErrorLeavesTasksUnscheduled(t *testing.T) {
+// TestTryMoveToFanOutJoinErrorPoisonsBody: a fan-out entered with a failing join leaves the item inside the node with
+// an open, empty body — a state no other path produces, since the node is entered but its rank is never published.
+// The join error poisons the item, so a following Schedule returns the cause and the tasks never run.
+func TestTryMoveToFanOutJoinErrorPoisonsBody(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
 	c := NewConveyor()
@@ -230,16 +239,19 @@ func TestTryMoveToFanOutJoinErrorLeavesTasksUnscheduled(t *testing.T) {
 			close(inFan)
 		}()
 
-		tasks := Tasks{pool.NewTask(func(context.Context) error {
+		tasks := []Task{pool.NewTask(func(context.Context) error {
 			ran.Add(1)
 			return nil
 		})}
-		entered, err := fan.TryMoveTo(ctx, tasks, w)
+		entered, err := fan.TryMoveTo(ctx, w)
 		if !entered {
 			t.Error("expected entered == true: the fan-out was free, and only the join failed afterwards")
 		}
 		if !errors.Is(err, boom) {
 			t.Errorf("error = %v, want the joined wave's %v", err, boom)
+		}
+		if err := fan.Schedule(ctx, tasks...); !errors.Is(err, boom) {
+			t.Errorf("Schedule after the failed join = %v, want the item's cause %v", err, boom)
 		}
 		return nil
 	})
@@ -247,6 +259,6 @@ func TestTryMoveToFanOutJoinErrorLeavesTasksUnscheduled(t *testing.T) {
 		t.Fatalf("run failed: %v", err)
 	}
 	if got := ran.Load(); got != 0 {
-		t.Fatalf("%d tasks ran, want 0 — a failing join happens before anything is enqueued", got)
+		t.Fatalf("%d tasks ran, want 0 — the failed join poisoned the item before anything was scheduled", got)
 	}
 }

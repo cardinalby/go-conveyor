@@ -14,23 +14,13 @@ import (
 type TaskFunc = func(ctx context.Context) error
 
 // Task is a bundle of work for one branch, produced by a branch's constructors (NewTask, NewTasks, NewTasksGen,
-// NewTasksChan). Collect tasks into a Tasks value and submit them with FanOut.MoveTo.
+// NewTasksChan). Submit tasks with FanOut.Schedule. The tasks of one call may belong to different branches of the
+// same fan-out; several tasks for the same branch start in the order they are listed.
 //
 // A Task is single-use: submitting the same Task twice panics.
 type Task struct {
 	branch *branch
 	src    taskSource // nil for a statically-empty task (e.g. NewTasks with count <= 0)
-}
-
-// Tasks is the collection of work passed to FanOut.MoveTo. Build it as a literal —
-// conveyor.Tasks{s3.NewTasks(n, up), db.NewTask(idx)} — or accumulate it with Add. Its tasks may belong to
-// different branches of the same fan-out; several tasks for the same branch run in the order they appear here.
-type Tasks []Task
-
-// Add appends tasks in place and returns the collection, for optional chaining.
-func (ts *Tasks) Add(tasks ...Task) *Tasks {
-	*ts = append(*ts, tasks...)
-	return ts
 }
 
 // branchName names a task's branch for panic messages, tolerating a zero Task.

@@ -587,33 +587,36 @@ func TestRetainByChildHoldsLaneInteriorStage(t *testing.T) {
 	rec := &recorder{}
 
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTasks(2, func(cctx context.Context, i int) error {
-			started.Add(1)
-			if err := mid.MoveTo(cctx); err != nil {
-				return err
-			}
-			rec.add("mid-in-%d", i)
-			// Child 0 enters mid first: children are linked in creation order and the ordering gate holds child 1
-			// out until child 0 has published mid's rank.
-			if i != 0 {
-				return tail.MoveTo(cctx)
-			}
-			rw := mid.Retain(cctx, func() error {
-				// The other child is running and blocked at mid's door; the retained slot is what holds it there.
-				waitFor(t, "the sibling child to be running", func() bool { return started.Load() == 2 })
-				if occ := occupancyOf(c, mid); occ != 1 {
-					t.Errorf("mid occupancy during the retained bgOp = %d, want 1 (the slot is still held)", occ)
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTasks(2, func(cctx context.Context, i int) error {
+				started.Add(1)
+				if err := mid.MoveTo(cctx); err != nil {
+					return err
 				}
-				bgRan.Store(true)
-				rec.add("bg-done")
+				rec.add("mid-in-%d", i)
+				// Child 0 enters mid first: children are linked in creation order and the ordering gate holds child 1
+				// out until child 0 has published mid's rank.
+				if i != 0 {
+					return tail.MoveTo(cctx)
+				}
+				rw := mid.Retain(cctx, func() error {
+					// The other child is running and blocked at mid's door; the retained slot is what holds it there.
+					waitFor(t, "the sibling child to be running", func() bool { return started.Load() == 2 })
+					if occ := occupancyOf(c, mid); occ != 1 {
+						t.Errorf("mid occupancy during the retained bgOp = %d, want 1 (the slot is still held)", occ)
+					}
+					bgRan.Store(true)
+					rec.add("bg-done")
+					return nil
+				})
+				if err := tail.MoveTo(cctx, rw); err != nil {
+					return err
+				}
+				joinSawBgOp.Store(bgRan.Load())
 				return nil
-			})
-			if err := tail.MoveTo(cctx, rw); err != nil {
-				return err
-			}
-			joinSawBgOp.Store(bgRan.Load())
-			return nil
-		})})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -650,13 +653,16 @@ func TestRetainByChildUnobservedErrorFailsRun(t *testing.T) {
 	commit := c.AddStage(OptName("commit"))
 
 	err := runUntil(t, c, 3, func(ctx context.Context, no int64) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTask(func(cctx context.Context) error {
-			if err := mid.MoveTo(cctx); err != nil {
-				return err
-			}
-			_ = mid.Retain(cctx, func() error { return boom }) // the wave is never joined and never read
-			return nil
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTask(func(cctx context.Context) error {
+				if err := mid.MoveTo(cctx); err != nil {
+					return err
+				}
+				_ = mid.Retain(cctx, func() error { return boom }) // the wave is never joined and never read
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}

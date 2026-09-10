@@ -247,11 +247,11 @@ func (r *run) checkEnterOrder(it *item, target *unit) {
 // enterUnit performs the move: through the node's waiting room if it has one, then into the node itself, releasing
 // everything the item held behind it at each step (so the item behind can move up as early as possible).
 //
-// publish controls whether taking the target raises the item's high-water rank, which is what opens the ordering
-// gate for the item behind. A stage publishes immediately; a fan-out defers it until its work is enqueued (see
-// FanOut.MoveTo), so lane work stays in item order. Stepping into the waiting room always publishes, whatever
-// publish says: the item really is in front of the node, and the rank it publishes there is the waiting room's,
-// which still holds the follower out of the node.
+// publish controls whether taking the target raises the item's high-water rank to the node's, which is what opens
+// the ordering gate for the item behind. A stage publishes immediately; a fan-out defers it until the item's first
+// Schedule, leave or Detach (see FanOut.MoveTo), so branch work stays in item order. Admission without publish, and
+// a step into the waiting room, publish the waiting room's rank: the item really is in front of the node (or
+// inside), and that rank lets the follower step aside into the waiting room while still holding it out of the node.
 //
 // There is one wait with two ways forward — room in the node, or room to step aside in front of it — rather than a
 // decision up front about which to wait for. Two things follow from that. An item walks straight into a free node
@@ -421,8 +421,8 @@ func (r *run) takeUnit(it *item, u *unit, publish bool) {
 	r.cond.Broadcast()
 }
 
-// occupy takes one slot of unit u for it, records that u has been entered, and (if publish) raises the item's
-// high-water rank. Caller holds mu.
+// occupy takes one slot of unit u for it, records that u has been entered, and raises the item's high-water rank:
+// to u's rank if publish, else to the waiting room's (see enterUnit). Caller holds mu.
 func (r *run) occupy(it *item, u *unit, publish bool) {
 	r.addOcc(u.index, 1)
 	it.occupied[u.index]++
@@ -430,8 +430,12 @@ func (r *run) occupy(it *item, u *unit, publish bool) {
 	if u.rank > it.reachedRank {
 		it.reachedRank = u.rank
 	}
-	if publish && u.rank > it.maxRank {
-		it.maxRank = u.rank
+	published := u.queueRank()
+	if publish {
+		published = u.rank
+	}
+	if published > it.maxRank {
+		it.maxRank = published
 	}
 }
 

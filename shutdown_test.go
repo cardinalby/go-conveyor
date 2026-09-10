@@ -64,11 +64,14 @@ func TestGracefulShutdownFinishesInFlightItems(t *testing.T) {
 			return err
 		}
 		n := arrived.Add(1)
-		ferr := fo.MoveTo(ic, Tasks{pool.NewTasks(perItem, func(cctx context.Context, i int) error {
-			<-release // deliberately ignores cctx: the unbounded default must let this work finish
-			bg.Add(1)
-			return nil
-		})})
+		ferr := fo.MoveTo(ic)
+		if ferr == nil {
+			ferr = fo.Schedule(ic, pool.NewTasks(perItem, func(cctx context.Context, i int) error {
+				<-release // deliberately ignores cctx: the unbounded default must let this work finish
+				bg.Add(1)
+				return nil
+			}))
+		}
 		if ferr != nil {
 			return ferr
 		}
@@ -122,12 +125,15 @@ func TestShutdownContextAlreadyDoneCancelsInFlight(t *testing.T) {
 	defer cancel(nil)
 	err := c.Run(ctx, func(ic context.Context) error {
 		no, _ := ItemNoFromContext(ic)
-		ferr := fo.MoveTo(ic, Tasks{pool.NewTasks(2, func(cctx context.Context, i int) error {
-			laneStarted.Add(1)
-			<-cctx.Done() // work that respects its context stops as soon as the item is canceled
-			laneUnwound.Add(1)
-			return context.Cause(cctx)
-		})})
+		ferr := fo.MoveTo(ic)
+		if ferr == nil {
+			ferr = fo.Schedule(ic, pool.NewTasks(2, func(cctx context.Context, i int) error {
+				laneStarted.Add(1)
+				<-cctx.Done() // work that respects its context stops as soon as the item is canceled
+				laneUnwound.Add(1)
+				return context.Cause(cctx)
+			}))
+		}
 		if ferr != nil {
 			record(ferr)
 			return ferr
@@ -616,15 +622,18 @@ func TestGracefulShutdownJoinsChildren(t *testing.T) {
 			<-ctx.Done() // hold the start stage so no further items are created
 			return nil
 		}
-		ferr := fo.MoveTo(ic, Tasks{lane.NewTasks(children, func(cctx context.Context, i int) error {
-			if err := inner.MoveTo(cctx); err != nil {
-				return err
-			}
-			started.Add(1)
-			<-release // deliberately ignores cctx: the unbounded default must let this child finish
-			finished.Add(1)
-			return nil
-		})})
+		ferr := fo.MoveTo(ic)
+		if ferr == nil {
+			ferr = fo.Schedule(ic, lane.NewTasks(children, func(cctx context.Context, i int) error {
+				if err := inner.MoveTo(cctx); err != nil {
+					return err
+				}
+				started.Add(1)
+				<-release // deliberately ignores cctx: the unbounded default must let this child finish
+				finished.Add(1)
+				return nil
+			}))
+		}
 		if ferr != nil {
 			return ferr
 		}
@@ -666,16 +675,19 @@ func TestShutdownCancelsChildren(t *testing.T) {
 			<-ctx.Done() // hold the start stage so no further items are created
 			return nil
 		}
-		ferr := fo.MoveTo(ic, Tasks{lane.NewTasks(children, func(cctx context.Context, i int) error {
-			if err := inner.MoveTo(cctx); err != nil {
-				return err
-			}
-			started.Add(1)
-			<-cctx.Done()
-			unwound.Add(1)
-			childErr.Store(context.Cause(cctx))
-			return context.Cause(cctx)
-		})})
+		ferr := fo.MoveTo(ic)
+		if ferr == nil {
+			ferr = fo.Schedule(ic, lane.NewTasks(children, func(cctx context.Context, i int) error {
+				if err := inner.MoveTo(cctx); err != nil {
+					return err
+				}
+				started.Add(1)
+				<-cctx.Done()
+				unwound.Add(1)
+				childErr.Store(context.Cause(cctx))
+				return context.Cause(cctx)
+			}))
+		}
 		if ferr != nil {
 			return ferr
 		}
@@ -735,10 +747,13 @@ func TestRunReusableAfterShutdown(t *testing.T) {
 			if err := a.MoveTo(ctx); err != nil {
 				return err
 			}
-			err := fo.MoveTo(ctx, Tasks{pool.NewTasks(perItem, func(cctx context.Context, i int) error {
-				bg.Add(1)
-				return nil
-			})})
+			err := fo.MoveTo(ctx)
+			if err == nil {
+				err = fo.Schedule(ctx, pool.NewTasks(perItem, func(cctx context.Context, i int) error {
+					bg.Add(1)
+					return nil
+				}))
+			}
 			if err != nil {
 				return err
 			}
@@ -778,10 +793,13 @@ func TestRunLeavesNoGoroutines(t *testing.T) {
 		if err := a.MoveTo(ctx); err != nil {
 			return err
 		}
-		err := fo.MoveTo(ctx, Tasks{
-			plain.NewTasks(3, func(cctx context.Context, i int) error { return nil }),
-			kids.NewTasks(2, func(cctx context.Context, i int) error { return inner.MoveTo(cctx) }),
-		})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx,
+				plain.NewTasks(3, func(cctx context.Context, i int) error { return nil }),
+				kids.NewTasks(2, func(cctx context.Context, i int) error { return inner.MoveTo(cctx) }),
+			)
+		}
 		if err != nil {
 			return err
 		}

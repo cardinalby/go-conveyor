@@ -51,11 +51,12 @@ type Branch interface {
 // Pool is a single-step branch of a FanOut's work: a task runs on the slot it was given and is done. SetLimit(n)
 // bounds how many of its tasks run at once.
 //
-// A pool's work has nowhere to travel, so calling MoveTo with a pool task's context panics — use a Lane for a
-// branch whose work is a multi-step path.
+// A pool's work has nowhere to travel, so calling MoveTo or Wait with a pool task's context panics — use a Lane for
+// a branch whose work is a multi-step path. The one node method that context may call is Schedule of the pool's own
+// fan-out, to add follow-up work before the task returns.
 //
-// Work is queued per branch in item order: everything an older item scheduled here starts before anything a
-// younger item scheduled.
+// Work is queued per branch by item age: a free slot is never given to a younger item's work while an older item has
+// work queued there. Work that has started, or a slot already reserved for a streaming pull, is never taken back.
 type Pool interface {
 	Branch
 
@@ -78,7 +79,8 @@ type Pool interface {
 
 	// NewTasksGen creates a task whose callbacks are produced by gen, pulled one by one as pool slots free up. Use
 	// it to stream work without materializing it upfront; gen should respect the ItemProcessor's ctx. State it
-	// reads must not be mutated until the wave's Started channel closes. A nil gen is a no-op.
+	// reads must not be mutated until Wait returns or, after Detach, until the wave's Started channel closes. A nil
+	// gen is a no-op.
 	NewTasksGen(gen iter.Seq[TaskFunc]) Task
 
 	// NewTasksChan creates a task whose callbacks are received from ch, pulled one by one as pool slots free up.
@@ -92,7 +94,9 @@ type Pool interface {
 // ItemProcessor uses on the conveyor.
 //
 // A lane's entrance always admits one child at a time — there is no SetLimit — so its parallelism comes from the
-// interior stages' own limits. Children are admitted to the interior nodes in the order their work was scheduled.
+// interior stages' own limits. Children are created in the lane's queue order (item age, then Schedule order) and
+// are admitted to the interior nodes in creation order. A child may Schedule more work at the fan-out its lane
+// belongs to, before its callback returns.
 //
 // A lane with no interior nodes is legal but behaves as a Pool pinned at concurrency 1.
 type Lane interface {

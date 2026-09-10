@@ -66,10 +66,13 @@ func TestStatsOneEntryPerNodeAndBranch(t *testing.T) {
 		if err := s1.MoveTo(ctx); err != nil {
 			return err
 		}
-		err := fo.MoveTo(ctx, Tasks{
-			l1.NewTask(func(cctx context.Context) error { return in.MoveTo(cctx) }),
-			l2.NewTask(func(context.Context) error { return nil }),
-		})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx,
+				l1.NewTask(func(cctx context.Context) error { return in.MoveTo(cctx) }),
+				l2.NewTask(func(context.Context) error { return nil }),
+			)
+		}
 		if err != nil {
 			return err
 		}
@@ -214,12 +217,15 @@ func TestStatsInFlightCountsOwnItemsOnly(t *testing.T) {
 	var maxInFlight, minWorkers atomic.Int64
 	minWorkers.Store(-1)
 	runNOK(t, c, 5, func(ctx context.Context, no int64) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTasks(8, func(cctx context.Context, i int) error {
-			if err := mid.MoveTo(cctx); err != nil {
-				return err
-			}
-			return tail.MoveTo(cctx)
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTasks(8, func(cctx context.Context, i int) error {
+				if err := mid.MoveTo(cctx); err != nil {
+					return err
+				}
+				return tail.MoveTo(cctx)
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -279,13 +285,16 @@ func TestStatsReportsPoolBacklog(t *testing.T) {
 	}()
 
 	_ = c.Run(ctx, func(ic context.Context) error {
-		err := fo.MoveTo(ic, Tasks{pool.NewTask(func(tctx context.Context) error {
-			select {
-			case <-release:
-			case <-tctx.Done():
-			}
-			return nil
-		})})
+		err := fo.MoveTo(ic)
+		if err == nil {
+			err = fo.Schedule(ic, pool.NewTask(func(tctx context.Context) error {
+				select {
+				case <-release:
+				case <-tctx.Done():
+				}
+				return nil
+			}))
+		}
 		return err
 	})
 	<-sampled

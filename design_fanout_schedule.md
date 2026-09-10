@@ -971,8 +971,8 @@ Documentation and examples to revise:
 
 ## 11. Implementation plan
 
-**Progress (2026-09-10):** phases 0 to 4 are done and committed on branch `fanout-schedule` (one commit each).
-Next: phase 5 (§11.7). Process notes: from phase 3 on the phases are self-reviewed, not sent to Codex; nothing is
+**Progress (2026-09-10):** phases 0 to 5 are done and committed on branch `fanout-schedule` (one commit each).
+Next: phase 6 (§11.8). Process notes: from phase 3 on the phases are self-reviewed, not sent to Codex; nothing is
 pushed. Each phase's record sits under its checklist.
 
 ### 11.1 Ground rules
@@ -1209,14 +1209,14 @@ watcher itself is pinned by the phase 2 tests through the same `waitUntil`.
 
 Goal: §5 and §6.1. Breaking change, mechanical migration of every call site, then the semantic updates.
 
-- [ ] `fanout.go`: `MoveTo(ctx, joins ...Wave)` and `TryMoveTo(ctx, joins ...Wave)`. Entry creates the empty open
+- [x] `fanout.go`: `MoveTo(ctx, joins ...Wave)` and `TryMoveTo(ctx, joins ...Wave)`. Entry creates the empty open
       body. Remove the tasks path from both.
-- [ ] `state.go` (`enterUnit` / `takeUnit`): on admission with `publish == false`, publish the waiting-room rank
+- [x] `state.go` (`enterUnit` / `takeUnit`): on admission with `publish == false`, publish the waiting-room rank
       (`rank - 1`) if the item's `maxRank` is lower.
-- [ ] Move the node-rank publish to: the first root `Schedule` (idempotent max in `addToBody`), `Detach`, and the
+- [x] Move the node-rank publish to: the first root `Schedule` (idempotent max in `addToBody`), `Detach`, and the
       leave (already implied by entering the next node or its waiting room). Remove it from entry.
-- [ ] `task.go`: remove `Tasks` and `Tasks.Add`.
-- [ ] Mechanical migration of every test call site: `X.MoveTo(ctx, Tasks{...}, joins...)` becomes `X.MoveTo(ctx,
+- [x] `task.go`: remove `Tasks` and `Tasks.Add`.
+- [x] Mechanical migration of every test call site: `X.MoveTo(ctx, Tasks{...}, joins...)` becomes `X.MoveTo(ctx,
       joins...)` followed by `X.Schedule(ctx, ...)`; `X.MoveTo(ctx, nil)` becomes `X.MoveTo(ctx)`; `var tasks Tasks;
       tasks.Add(...)` becomes `var tasks []Task; tasks = append(tasks, ...)`. Files by weight: `task_sources_test.go`,
       `fanout_test.go`, `children_test.go`, `errors_test.go`, `shutdown_test.go`, `wave_test.go`, `detach_test.go`,
@@ -1224,46 +1224,59 @@ Goal: §5 and §6.1. Breaking change, mechanical migration of every call site, t
       `property_test.go`, `queue_test.go`, `trymoveto_test.go`, `worker_pool_test.go`, `conveyor_test.go`,
       `items_limit_test.go`, `stats_test.go`, `builder_test.go`, `debug_test.go`, `bound_test.go`,
       `fanout_bench_test.go`, `helpers_test.go`, and the phase-4 tests (`MoveTo(ctx, nil)` to `MoveTo(ctx)`).
-- [ ] Semantic updates where the old test encoded the old rule:
-  - [ ] `TestFanOutReleasesPreviousStageAtEnqueue` (`fanout_test.go`): the previous stage is now released at
+- [x] Semantic updates where the old test encoded the old rule:
+  - [x] `TestFanOutReleasesPreviousStageAtEnqueue` (`fanout_test.go`): the previous stage is now released at
         admission; rename and assert the door stays closed until the first `Schedule`.
-  - [ ] `TestFanOutEmptyMoveIsStillAMove` (`fanout_test.go`) and `TestEmptyFanOutIsAUsableNode`
+  - [x] `TestFanOutEmptyMoveIsStillAMove` (`fanout_test.go`) and `TestEmptyFanOutIsAUsableNode`
         (`interaction_test.go`): an empty visit holds the next item at the door until the visitor leaves.
-  - [ ] `TestTryMoveToFanOutLeavesTasksUnclaimed` (`trymoveto_test.go`): replace with "declined entry leaves the item
+  - [x] `TestTryMoveToFanOutLeavesTasksUnclaimed` (`trymoveto_test.go`): replace with "declined entry leaves the item
         in the previous node, and the same `[]Task` can be scheduled later at its owning fan-out" (a task belongs to
         one branch, so it can never go to another fan-out).
-  - [ ] `TestTryMoveToFanOutJoinErrorLeavesTasksUnscheduled` (`trymoveto_test.go`): entered with a join error; the
+  - [x] `TestTryMoveToFanOutJoinErrorLeavesTasksUnscheduled` (`trymoveto_test.go`): entered with a join error; the
         body is open and empty; a following `Schedule` returns the cause because the join error poisoned the item.
-  - [ ] `TestFanOutTasksFromForeignBranchPanics`, `TestTaskReusePanics` (`fanout_test.go`),
+  - [x] `TestFanOutTasksFromForeignBranchPanics`, `TestTaskReusePanics` (`fanout_test.go`),
         `TestErrInvalidUnitTaskFromAnotherFanOut`, `TestErrTaskReusedOnSecondSubmission` (`errors_test.go`): the
         panic now comes from `Schedule`.
   - [x] `TestErrForeignContextFromFanOutMoveTo` (`errors_test.go`): add `Schedule` and `Wait` with a foreign context
         (done in phase 4, together with `TestErrStaleContextFromFinishedItem`).
   - [x] `TestErrWrongScopeIsCheckedOnEveryEntryPoint` (`errors_test.go`): add `Schedule` (own-body path) and `Wait`
         (done in phase 4).
-  - [ ] `TestErrCannotMoveFromNonTravellingWork` (`errors_test.go`) and `TestNonTravellingWorkCannotMove`
+  - [x] `TestErrCannotMoveFromNonTravellingWork` (`errors_test.go`) and `TestNonTravellingWorkCannotMove`
         (`children_test.go`): `Schedule` with a pool context is now allowed; `Wait` and the moves still panic.
-  - [ ] `TestErrStageNotEnteredAfterLeaving` (`errors_test.go`): add `Schedule` and `Wait` after leaving
+  - [x] `TestErrStageNotEnteredAfterLeaving` (`errors_test.go`): add `Schedule` and `Wait` after leaving
         (`errBodyClosed`) and after `Detach` (`errWorkDetached`).
-  - [ ] `TestMixedSourcesAcrossPoolsInOneMove` (`task_sources_test.go`): rename to "in one Schedule".
-  - [ ] `TestSetLimitRaiseFanOutAdmitsMoreItems` (`setlimit_test.go`): a raise admits the next item only after the item
+  - [x] `TestMixedSourcesAcrossPoolsInOneMove` (`task_sources_test.go`): rename to "in one Schedule".
+  - [x] `TestSetLimitRaiseFanOutAdmitsMoreItems` (`setlimit_test.go`): a raise admits the next item only after the item
         ahead has scheduled; make the test schedule before asserting admission.
-  - [ ] `TestQueueOnFanOut`, `TestFanOutQueueCreatedAtRuntime` (`queue_test.go`): confirm they still hold; add the
+  - [x] `TestQueueOnFanOut`, `TestFanOutQueueCreatedAtRuntime` (`queue_test.go`): confirm they still hold; add the
         waiting-room-during-closed-door case here or in phase 6.
-  - [ ] `TestPoolFIFOAcrossItems`, `TestPoolTasksStartInSubmissionOrder`, `TestChildrenPreserveOrderAcrossItems`,
+  - [x] `TestPoolFIFOAcrossItems`, `TestPoolTasksStartInSubmissionOrder`, `TestChildrenPreserveOrderAcrossItems`,
         `TestChildTicketOrderAcrossTasksAndItems`, `TestFanOutWorkPerPoolOrderSurvivesTheWaitingRoom`: schedule once
         right after entering; the old guarantee must still hold exactly.
-- [ ] Godoc for `FanOut`, `Pool`, `Lane`, `Branch`, `Task`, `Wave` per §5 and §6.8.
-- [ ] `debug.go` (`UnitOccupants.InQueue` doc): a branch's backlog is listed in queue order, which is item age and
+- [x] Godoc for `FanOut`, `Pool`, `Lane`, `Branch`, `Task`, `Wave` per §5 and §6.8.
+- [x] `debug.go` (`UnitOccupants.InQueue` doc): a branch's backlog is listed in queue order, which is item age and
       then submission order, not arrival order.
-- [ ] Mechanical migration of the dependent modules so they compile again in this phase:
+- [x] Mechanical migration of the dependent modules so they compile again in this phase:
       `demo/internal/topology/process.go` (`runNodes`, `KindFanOut` case: `fo.MoveTo(ctx)`, build a
       `[]conveyor.Task`, `fo.Schedule(ctx, tasks...)`; keep `MarkPending` before `MoveTo` and `MarkConfirmed` after
       `Schedule`; treat a `Schedule` error like a `MoveTo` error), `bench/internal/pipeline/conveyor.go` (`Run`:
       `nd.fanout.MoveTo(ic, pending...)`, `nd.fanout.Schedule(ic, tasks...)`, then `Detach`), and
       `demo/web/src/codegen/generateGoCode.ts` (`emitBody`: emit the two calls, no `Tasks{`). Run both module suites
       and `npm run build`.
-- [ ] Run the root suite.
+- [x] Run the root suite.
+
+Phase 5 record: root suite green under `-race -cpu=1,4`; demo and bench modules vet, build and test; `npm run lint`
+and `npm run build` pass. Runtime: `occupy` publishes the waiting-room rank (`queueRank`) when `publish` is false, so a
+fan-out admission lets the follower step aside without opening the node; the node rank is published only by
+`addToBody` (first `Schedule`, also with zero tasks), `Detach`, and the leave. `MoveTo`/`TryMoveTo` create the body
+with `newBody` before the join, so a failed join leaves an open empty body on a poisoned item (pinned by
+`TestTryMoveToFanOutJoinErrorPoisonsBody`). The mechanical migration was done with a throwaway AST-driven rewriter
+(`MoveTo(ctx, Tasks{...})` became `MoveTo(ctx)` plus `Schedule(ctx, ...)` with the same error handling; `MoveTo(ctx,
+nil)` dropped the argument; one `Stage.MoveTo(ctx, nil)` in `TestErrForeignWaveFromNilWave` was restored by hand,
+since there `nil` is a nil Wave). Door checks: `TestFanOutReleasesPreviousStageAtAdmission` and
+`TestEmptyFanOutIsAUsableNode` hold the visitor inside for the check; both fail when `occupy` publishes the node
+rank at entry (mutation check). The waiting-room-during-closed-door case and the other door tests are left to phase 6.
+`TestSetLimitRaiseFanOutAdmitsMoreItems` already scheduled right after entering; only its comment changed.
 
 ### 11.8 Phase 6: tests that need the door rule, and the property suite
 

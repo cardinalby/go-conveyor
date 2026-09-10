@@ -17,7 +17,10 @@ func TestWaveStartedThenFinished(t *testing.T) {
 
 	var startedBeforeFinished atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasks(4, func(_ context.Context, i int) error { return nil })})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasks(4, func(_ context.Context, i int) error { return nil }))
+		}
 		if err != nil {
 			return err
 		}
@@ -49,14 +52,17 @@ func TestWaveStartedWaitsForStreamingSource(t *testing.T) {
 
 	var pulls, pullsAtStarted atomic.Int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-			for i := 0; i < 5; i++ {
-				pulls.Add(1)
-				if !yield(func(context.Context) error { return nil }) {
-					return
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
+				for i := 0; i < 5; i++ {
+					pulls.Add(1)
+					if !yield(func(context.Context) error { return nil }) {
+						return
+					}
 				}
-			}
-		})})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -83,7 +89,10 @@ func TestWaveErrIsFinalAfterFinished(t *testing.T) {
 
 	var got error
 	err := runOnce(t, c, func(ctx context.Context) error {
-		ferr := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error { return boom })})
+		ferr := fo.MoveTo(ctx)
+		if ferr == nil {
+			ferr = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return boom }))
+		}
 		if ferr != nil {
 			return ferr
 		}
@@ -112,13 +121,16 @@ func TestUnobservedWaveErrorFailsTheRun(t *testing.T) {
 	defer cancel()
 	err := c.Run(ctx, func(ic context.Context) error {
 		no, _ := ItemNoFromContext(ic)
-		var tasks Tasks
+		var tasks []Task
 		if no == 1 {
-			tasks.Add(pool.NewTask(func(context.Context) error { return boom }))
+			tasks = append(tasks, pool.NewTask(func(context.Context) error { return boom }))
 		} else {
-			tasks.Add(pool.NewTask(func(context.Context) error { return nil }))
+			tasks = append(tasks, pool.NewTask(func(context.Context) error { return nil }))
 		}
-		ferr := fo.MoveTo(ic, tasks)
+		ferr := fo.MoveTo(ic)
+		if ferr == nil {
+			ferr = fo.Schedule(ic, tasks...)
+		}
 		return ferr // the wave is never joined
 	})
 	if !errors.Is(err, boom) {
@@ -142,10 +154,13 @@ func TestWaveJoinedAtLaterNodeSurfacesThere(t *testing.T) {
 	// otherwise be free to cancel the item first and make the assertion below racy.
 	pastMid := make(chan struct{})
 	err := runOnce(t, c, func(ctx context.Context) error {
-		ferr := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error {
-			<-pastMid
-			return boom
-		})})
+		ferr := fo.MoveTo(ctx)
+		if ferr == nil {
+			ferr = fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
+				<-pastMid
+				return boom
+			}))
+		}
 		if ferr != nil {
 			return ferr
 		}
@@ -191,12 +206,18 @@ func TestJoinSeveralWavesReportsFirstFailure(t *testing.T) {
 
 	var joinErr error
 	_ = runOnce(t, c, func(ctx context.Context) error {
-		err := foA.MoveTo(ctx, Tasks{poolA.NewTask(func(context.Context) error { return first })})
+		err := foA.MoveTo(ctx)
+		if err == nil {
+			err = foA.Schedule(ctx, poolA.NewTask(func(context.Context) error { return first }))
+		}
 		if err != nil {
 			return err
 		}
 		wa := foA.Detach(ctx)
-		err = foB.MoveTo(ctx, Tasks{poolB.NewTask(func(context.Context) error { return second })})
+		err = foB.MoveTo(ctx)
+		if err == nil {
+			err = foB.Schedule(ctx, poolB.NewTask(func(context.Context) error { return second }))
+		}
 		if err != nil {
 			// foB's move joins nothing, but the item's ctx may already be poisoned by foA's failure.
 			return err
@@ -226,7 +247,10 @@ func TestJoinForeignWavePanics(t *testing.T) {
 		no, _ := ItemNoFromContext(ic)
 		switch no {
 		case 1:
-			err := fo.MoveTo(ic, Tasks{pool.NewTask(func(context.Context) error { return nil })})
+			err := fo.MoveTo(ic)
+			if err == nil {
+				err = fo.Schedule(ic, pool.NewTask(func(context.Context) error { return nil }))
+			}
 			if err != nil {
 				return err
 			}
@@ -263,10 +287,13 @@ func TestWaveResolvesOnShutdown(t *testing.T) {
 
 	go func() {
 		_ = c.Run(ctx, func(ic context.Context) error {
-			err := fo.MoveTo(ic, Tasks{pool.NewTasks(3, func(_ context.Context, i int) error {
-				<-ic.Done() // never completes until shutdown cancels the item
-				return nil
-			})})
+			err := fo.MoveTo(ic)
+			if err == nil {
+				err = fo.Schedule(ic, pool.NewTasks(3, func(_ context.Context, i int) error {
+					<-ic.Done() // never completes until shutdown cancels the item
+					return nil
+				}))
+			}
 			if err != nil {
 				return err
 			}
@@ -379,19 +406,22 @@ func TestWaveNeverReportsCleanFinishForSkippedWork(t *testing.T) {
 					if no != 1 {
 						return nil // later items take no part
 					}
-					err := fo.MoveTo(ic, Tasks{build(pool, func(context.Context) error {
-						if once.CompareAndSwap(false, true) {
-							cancel() // shut down with the rest of the set still queued
-							// Hold the pool until the shutdown has landed on this item, so the rest of the set is
-							// still waiting when it does. An item that keeps its permission is never canceled, so
-							// there is nothing to wait for in that case.
-							for i := 0; !tc.wantAll && i < 200 && context.Cause(ic) == nil; i++ {
-								time.Sleep(time.Millisecond)
+					err := fo.MoveTo(ic)
+					if err == nil {
+						err = fo.Schedule(ic, build(pool, func(context.Context) error {
+							if once.CompareAndSwap(false, true) {
+								cancel() // shut down with the rest of the set still queued
+								// Hold the pool until the shutdown has landed on this item, so the rest of the set is
+								// still waiting when it does. An item that keeps its permission is never canceled, so
+								// there is nothing to wait for in that case.
+								for i := 0; !tc.wantAll && i < 200 && context.Cause(ic) == nil; i++ {
+									time.Sleep(time.Millisecond)
+								}
 							}
-						}
-						ran.Add(1)
-						return nil
-					})})
+							ran.Add(1)
+							return nil
+						}))
+					}
 					if err != nil {
 						return err
 					}

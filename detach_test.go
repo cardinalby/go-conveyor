@@ -20,11 +20,14 @@ func TestDetachLetsTheItemMoveOnWithoutWaiting(t *testing.T) {
 	pastMid := make(chan struct{})
 	var events recorder
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
 			<-pastMid // the item must reach mid without this having finished
 			events.add("task")
 			return nil
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
 		w := fo.Detach(ctx)
@@ -79,13 +82,16 @@ func TestDetachedSlotOutlivesTheItemsPresence(t *testing.T) {
 	}()
 
 	_ = c.Run(ctx, func(ic context.Context) error {
-		if err := fo.MoveTo(ic, Tasks{pool.NewTask(func(tctx context.Context) error {
+		if err := fo.MoveTo(ic); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ic, pool.NewTask(func(tctx context.Context) error {
 			select {
 			case <-release:
 			case <-tctx.Done():
 			}
 			return nil
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
 		w := fo.Detach(ic)
@@ -117,11 +123,14 @@ func TestDetachedWorkStillBoundedByTheLimit(t *testing.T) {
 	var wg workGauge
 	runNOK(t, c, items, func(ctx context.Context, no int64) error {
 		w := wg.item(1)
-		if err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
 			defer w.taskDone()
 			time.Sleep(20 * time.Millisecond)
 			return nil
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
 		wave := fo.Detach(ctx)
@@ -144,7 +153,10 @@ func TestDetachedErrorNobodyJoinedFailsTheItem(t *testing.T) {
 	commit := c.AddStage(OptName("commit"))
 
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error { return boom })}); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return boom })); err != nil {
 			return err
 		}
 		_ = fo.Detach(ctx) // deliberately never joined
@@ -166,10 +178,13 @@ func TestDetachAfterWorkAlreadyFinished(t *testing.T) {
 
 	taskRan := make(chan struct{})
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
 			close(taskRan)
 			return nil
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
 		// MoveTo does not return until the task's slot on the pool is taken (see run.startWork), so once the task
@@ -203,7 +218,7 @@ func TestDetachWithoutWorkPanics(t *testing.T) {
 	_ = fo.AddPool(OptName("lane"))
 
 	panicsInItem(t, c, errNothingToDetach, func(ctx context.Context) {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			t.Fatalf("move failed: %v", err)
 		}
 		_ = fo.Detach(ctx) // legal: an empty submission still has a wave to hand over
@@ -235,7 +250,10 @@ func TestDetachAfterMovingOnPanics(t *testing.T) {
 	commit := c.AddStage(OptName("commit"))
 
 	panicsInItem(t, c, errStageNotEntered, func(ctx context.Context) {
-		if err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error { return nil })}); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
+			t.Fatalf("move failed: %v", err)
+		}
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil })); err != nil {
 			t.Fatalf("move failed: %v", err)
 		}
 		if err := commit.MoveTo(ctx); err != nil {
@@ -259,17 +277,23 @@ func TestDetachOfAnEarlierFanOutPanics(t *testing.T) {
 	release := make(chan struct{})
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := first.MoveTo(ctx, Tasks{firstPool.NewTask(func(tctx context.Context) error {
+		if err := first.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := first.Schedule(ctx, firstPool.NewTask(func(tctx context.Context) error {
 			select {
 			case <-release:
 			case <-tctx.Done():
 			}
 			return nil
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
 		_ = first.Detach(ctx) // not joined here: joining it would wait for the work that is holding first's slot
-		if err := second.MoveTo(ctx, Tasks{secondPool.NewTask(func(context.Context) error { return nil })}); err != nil {
+		if err := second.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := second.Schedule(ctx, secondPool.NewTask(func(context.Context) error { return nil })); err != nil {
 			return err
 		}
 		if occ := occupancyOf(c, first); occ != 1 {
@@ -323,10 +347,13 @@ func TestDetachedSlotFreedWhenTheWorkFinishes(t *testing.T) {
 		}
 		// The work settles only once the item is parked in commit, so nothing but the work's own completion can hand
 		// the fan-out's slot back: the item's next move comes later, after the check.
-		if err := fo.MoveTo(ic, Tasks{pool.NewTask(func(context.Context) error {
+		if err := fo.MoveTo(ic); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ic, pool.NewTask(func(context.Context) error {
 			<-inCommit
 			return nil
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
 		w := fo.Detach(ic)

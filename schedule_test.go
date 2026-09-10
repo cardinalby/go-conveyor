@@ -35,7 +35,7 @@ func TestScheduleRoundsDecidedByEarlierResults(t *testing.T) {
 	var events recorder
 	var found atomic.Int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := fo.Schedule(ctx, pool.NewTasks(3, func(_ context.Context, i int) error {
@@ -92,7 +92,7 @@ func TestScheduleTreeFromTasksOnOnePool(t *testing.T) {
 	}
 	var atCommit int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := fo.Schedule(ctx, pool.NewTasks(roots, func(ctx context.Context, _ int) error {
@@ -143,7 +143,7 @@ func TestScheduleTreeAcrossTwoPools(t *testing.T) {
 	}
 	var atCommit [2]int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := crawl.MoveTo(ctx, nil); err != nil {
+		if err := crawl.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := crawl.Schedule(ctx, fetch.NewTask(func(ctx context.Context) error { return visit(ctx, 0) })); err != nil {
@@ -183,7 +183,7 @@ func TestSchedulePaginationChain(t *testing.T) {
 	}
 	var afterWait []int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := fo.Schedule(ctx, pool.NewTask(func(ctx context.Context) error { return page(ctx, 1) })); err != nil {
@@ -217,7 +217,7 @@ func TestJoinAsAContinuation(t *testing.T) {
 	var done, merged atomic.Int64
 	var partsAtMerge int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		var remaining atomic.Int64
@@ -262,7 +262,7 @@ func TestLaneChildSpawnsIntoItsParentsFanOut(t *testing.T) {
 	var poolRuns, siblingRuns atomic.Int64
 	var atCommit [2]int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		err := fo.Schedule(ctx, lane.NewTask(func(cctx context.Context) error {
@@ -313,7 +313,7 @@ func TestSpawnIntoDetachedWaveKeepsTheSlot(t *testing.T) {
 	release := make(chan struct{})
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		err := fo.Schedule(ctx, pool.NewTask(func(ctx context.Context) error {
@@ -374,7 +374,7 @@ func TestScheduleFromCanceledItemQueuesNothing(t *testing.T) {
 			<-trigger
 			return boom
 		})
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		close(trigger) // poison the item once it is inside, with an empty body
@@ -427,7 +427,7 @@ func TestScheduleFromFinishedWorkIsStale(t *testing.T) {
 	var ran atomic.Int64
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		err := fo.Schedule(ctx,
@@ -506,7 +506,7 @@ func TestScheduleAfterLeavingPanics(t *testing.T) {
 	commit := c.AddStage(OptName("commit"))
 
 	panicsInItem(t, c, errBodyClosed, func(ctx context.Context) {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			t.Fatalf("move failed: %v", err)
 		}
 		if err := commit.MoveTo(ctx); err != nil {
@@ -523,7 +523,7 @@ func TestScheduleAfterDetachPanics(t *testing.T) {
 	pool := fo.AddPool(OptName("pool"))
 
 	panicsInItem(t, c, errWorkDetached, func(ctx context.Context) {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			t.Fatalf("move failed: %v", err)
 		}
 		_ = fo.Detach(ctx)
@@ -542,7 +542,7 @@ func TestTaskSchedulingAtAnotherFanOutPanics(t *testing.T) {
 
 	got := make(chan error, 1)
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := first.MoveTo(ctx, nil); err != nil {
+		if err := first.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := first.Schedule(ctx, firstPool.NewTask(func(tctx context.Context) error {
@@ -584,7 +584,7 @@ func TestScheduleFromRetainCallbackAfterProcessorReturnedPanics(t *testing.T) {
 			})
 			return nil
 		})
-		return fo.MoveTo(ctx, nil) // returns with the body open; completion closes it while the Retain still runs
+		return fo.MoveTo(ctx) // returns with the body open; completion closes it while the Retain still runs
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -608,7 +608,7 @@ func TestTryMoveToOutOfBusyBodyLeavesItOpen(t *testing.T) {
 	var ran atomic.Int64
 	var atCommit int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
@@ -657,7 +657,7 @@ func TestTryMoveToOutOfIdleBodyIntoFullTargetLeavesItOpen(t *testing.T) {
 	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
 		switch no {
 		case 1:
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			if err := commit.MoveTo(ctx); err != nil {
@@ -668,7 +668,7 @@ func TestTryMoveToOutOfIdleBodyIntoFullTargetLeavesItOpen(t *testing.T) {
 			return nil
 		case 2:
 			<-firstInCommit
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			task := func(context.Context) error {
@@ -715,7 +715,7 @@ func TestTryMoveToOutOfFailedBodyReportsThePoison(t *testing.T) {
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return boom })); err != nil {
@@ -768,7 +768,7 @@ func TestSpawnChainOnLimitOnePoolKeepsItemOrder(t *testing.T) {
 	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
 		switch no {
 		case 1:
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			if err := fo.Schedule(ctx, pool.NewTask(func(ctx context.Context) error { return link(ctx, 0) })); err != nil {
@@ -777,7 +777,7 @@ func TestSpawnChainOnLimitOnePoolKeepsItemOrder(t *testing.T) {
 			close(olderScheduled)
 		case 2:
 			<-olderScheduled // enter only once the older item has scheduled, whatever opens the door
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
@@ -813,7 +813,7 @@ func TestSpawnTakesTheFreedSlotAheadOfYoungerQueuedWork(t *testing.T) {
 	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
 		switch no {
 		case 1:
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			err := fo.Schedule(ctx,
@@ -837,7 +837,7 @@ func TestSpawnTakesTheFreedSlotAheadOfYoungerQueuedWork(t *testing.T) {
 			close(olderScheduled)
 		case 2:
 			<-olderScheduled
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
@@ -871,7 +871,7 @@ func TestSpawnDisplacesAPullInFlightAndBothRun(t *testing.T) {
 	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
 		switch no {
 		case 1:
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			err := fo.Schedule(ctx, pool.NewTask(func(ctx context.Context) error {
@@ -888,7 +888,7 @@ func TestSpawnDisplacesAPullInFlightAndBothRun(t *testing.T) {
 			close(olderScheduled)
 		case 2:
 			<-olderScheduled
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			err := fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
@@ -927,7 +927,7 @@ func TestDisplacedPullExhaustionRemovesTheRightCollection(t *testing.T) {
 	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
 		switch no {
 		case 1:
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			err := fo.Schedule(ctx, pool.NewTask(func(ctx context.Context) error {
@@ -950,7 +950,7 @@ func TestDisplacedPullExhaustionRemovesTheRightCollection(t *testing.T) {
 			return commit.MoveTo(ctx)
 		case 2:
 			<-olderScheduled
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			err := fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
@@ -998,7 +998,7 @@ func TestDisplacedPullCanceledMidPullRecordsAbandonment(t *testing.T) {
 	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
 		switch no {
 		case 1:
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			err := fo.Schedule(ctx, pool.NewTask(func(ctx context.Context) error {
@@ -1027,7 +1027,7 @@ func TestDisplacedPullCanceledMidPullRecordsAbandonment(t *testing.T) {
 				<-spawnQueued // poison the item while its pull is in flight and the older spawn heads the queue
 				return boom
 			})
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			err := fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
@@ -1075,7 +1075,7 @@ func TestConcurrentSchedulesAllLandOnce(t *testing.T) {
 	var runs atomic.Int64
 	var atCommit int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := fo.Schedule(ctx, pool.NewTasks(roots, func(ctx context.Context, i int) error {
@@ -1123,7 +1123,7 @@ func TestStartedOnDetachedWaveCountsRootSourcesOnly(t *testing.T) {
 	release := make(chan struct{})
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		err := fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
@@ -1178,12 +1178,12 @@ func TestChildRunsRoundsAndSpawnsInsideItsLane(t *testing.T) {
 	var round2 atomic.Int64
 	var shortWaits atomic.Int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		err := fo.Schedule(ctx, lane.NewTasks(children, func(cctx context.Context, _ int) error {
 			var mine atomic.Int64 // this child's round-1 tasks and their spawns
-			if err := inner.MoveTo(cctx, nil); err != nil {
+			if err := inner.MoveTo(cctx); err != nil {
 				return err
 			}
 			if err := inner.Schedule(cctx, innerPool.NewTasks(2, func(tctx context.Context, _ int) error {

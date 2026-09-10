@@ -18,12 +18,15 @@ func TestNewTaskRunsExactlyOneCallback(t *testing.T) {
 	var runs atomic.Int64
 	var ctxUsable atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(tctx context.Context) error {
-			runs.Add(1)
-			no, ok := ItemNoFromContext(tctx)
-			ctxUsable.Store(ok && no == 1 && tctx.Err() == nil)
-			return nil
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTask(func(tctx context.Context) error {
+				runs.Add(1)
+				no, ok := ItemNoFromContext(tctx)
+				ctxUsable.Store(ok && no == 1 && tctx.Err() == nil)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -59,16 +62,19 @@ func TestNewTasksAreBuiltLazilyOnePerFreedSlot(t *testing.T) {
 	var stillHandingOut atomic.Bool
 
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasks(count, func(_ context.Context, i int) error {
-			return g.hold(func() error {
-				order.add(int64(i))
-				if i == 0 {
-					close(firstIn)
-					<-release
-				}
-				return nil
-			})
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasks(count, func(_ context.Context, i int) error {
+				return g.hold(func() error {
+					order.add(int64(i))
+					if i == 0 {
+						close(firstIn)
+						<-release
+					}
+					return nil
+				})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -114,10 +120,13 @@ func TestNewTasksNonPositiveCountIsNoOp(t *testing.T) {
 		var runs atomic.Int64
 		var bornFinished atomic.Bool
 		err := runOnce(t, c, func(ctx context.Context) error {
-			err := fo.MoveTo(ctx, Tasks{pool.NewTasks(count, func(context.Context, int) error {
-				runs.Add(1)
-				return nil
-			})})
+			err := fo.MoveTo(ctx)
+			if err == nil {
+				err = fo.Schedule(ctx, pool.NewTasks(count, func(context.Context, int) error {
+					runs.Add(1)
+					return nil
+				}))
+			}
 			if err != nil {
 				return err
 			}
@@ -157,22 +166,25 @@ func TestNewTasksGenPulledOnePerFreedSlot(t *testing.T) {
 	var stillHandingOut atomic.Bool
 
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-			for i := 0; i < count; i++ {
-				pulls.Add(1)
-				i := i
-				if !yield(func(context.Context) error {
-					order.add(int64(i))
-					if i == 0 {
-						close(firstIn)
-						<-release
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
+				for i := 0; i < count; i++ {
+					pulls.Add(1)
+					i := i
+					if !yield(func(context.Context) error {
+						order.add(int64(i))
+						if i == 0 {
+							close(firstIn)
+							<-release
+						}
+						return nil
+					}) {
+						return
 					}
-					return nil
-				}) {
-					return
 				}
-			}
-		})})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -217,24 +229,27 @@ func TestNewTasksGenPullIsSerializedAndHoldsASlot(t *testing.T) {
 	resume := make(chan struct{})  // releases both the first callback and the blocked pull
 
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-			for i := 0; i < count; i++ {
-				if i == 1 {
-					close(pulling) // the generator body only runs while a pull is in flight
-					<-resume
-				}
-				i := i
-				if !yield(func(context.Context) error {
-					started.Add(1)
-					if i == 0 {
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
+				for i := 0; i < count; i++ {
+					if i == 1 {
+						close(pulling) // the generator body only runs while a pull is in flight
 						<-resume
 					}
-					return nil
-				}) {
-					return
+					i := i
+					if !yield(func(context.Context) error {
+						started.Add(1)
+						if i == 0 {
+							<-resume
+						}
+						return nil
+					}) {
+						return
+					}
 				}
-			}
-		})})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -274,21 +289,24 @@ func TestNewTasksGenStopsPullingWhenItemIsCanceled(t *testing.T) {
 
 	var pulls, ran atomic.Int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		ferr := fo.MoveTo(ctx, Tasks{pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-			for i := 0; i < 1000; i++ {
-				pulls.Add(1)
-				i := i
-				if !yield(func(context.Context) error {
-					ran.Add(1)
-					if i == 2 {
-						return boom // fail-fast: cancels the item, so nothing more is pulled
+		ferr := fo.MoveTo(ctx)
+		if ferr == nil {
+			ferr = fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
+				for i := 0; i < 1000; i++ {
+					pulls.Add(1)
+					i := i
+					if !yield(func(context.Context) error {
+						ran.Add(1)
+						if i == 2 {
+							return boom // fail-fast: cancels the item, so nothing more is pulled
+						}
+						return nil
+					}) {
+						return
 					}
-					return nil
-				}) {
-					return
 				}
-			}
-		})})
+			}))
+		}
 		if ferr != nil {
 			return ferr
 		}
@@ -317,7 +335,10 @@ func TestNewTasksGenNilIsNoOp(t *testing.T) {
 
 	var bornFinished, committed atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasksGen(nil)})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasksGen(nil))
+		}
 		if err != nil {
 			return err
 		}
@@ -389,7 +410,10 @@ func TestNewTasksChanArrivesAsSentAndStartedWaitsForClose(t *testing.T) {
 			<-letClose
 		}()
 
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasksChan(ch)})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasksChan(ch))
+		}
 		if err != nil {
 			return err
 		}
@@ -454,7 +478,10 @@ func TestNewTasksChanStopsConsumingWhenItemIsCanceled(t *testing.T) {
 			}
 		}()
 
-		ferr := fo.MoveTo(ctx, Tasks{pool.NewTasksChan(ch)})
+		ferr := fo.MoveTo(ctx)
+		if ferr == nil {
+			ferr = fo.Schedule(ctx, pool.NewTasksChan(ch))
+		}
 		if ferr != nil {
 			return ferr
 		}
@@ -483,7 +510,10 @@ func TestNewTasksChanNilIsNoOp(t *testing.T) {
 
 	var bornFinished, committed atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasksChan(nil)})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasksChan(nil))
+		}
 		if err != nil {
 			return err
 		}
@@ -526,19 +556,22 @@ func TestMixedSourcesOnOnePoolConsumeInSubmissionOrder(t *testing.T) {
 		}
 		close(ch)
 
-		err := fo.MoveTo(ctx, Tasks{
-			pool.NewTask(func(context.Context) error { events.add("single"); return nil }),
-			pool.NewTasks(2, func(_ context.Context, i int) error { events.add("count-%d", i); return nil }),
-			pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-				for i := 0; i < 2; i++ {
-					i := i
-					if !yield(func(context.Context) error { events.add("gen-%d", i); return nil }) {
-						return
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx,
+				pool.NewTask(func(context.Context) error { events.add("single"); return nil }),
+				pool.NewTasks(2, func(_ context.Context, i int) error { events.add("count-%d", i); return nil }),
+				pool.NewTasksGen(func(yield func(TaskFunc) bool) {
+					for i := 0; i < 2; i++ {
+						i := i
+						if !yield(func(context.Context) error { events.add("gen-%d", i); return nil }) {
+							return
+						}
 					}
-				}
-			}),
-			pool.NewTasksChan(ch),
-		})
+				}),
+				pool.NewTasksChan(ch),
+			)
+		}
 		if err != nil {
 			return err
 		}
@@ -563,9 +596,9 @@ func TestMixedSourcesOnOnePoolConsumeInSubmissionOrder(t *testing.T) {
 	}
 }
 
-// TestMixedSourcesAcrossPoolsInOneMove: sources for different pools submitted in one MoveTo each become that pool's
-// collection, and the single wave covers all of them.
-func TestMixedSourcesAcrossPoolsInOneMove(t *testing.T) {
+// TestMixedSourcesAcrossPoolsInOneSchedule: sources for different pools submitted in one Schedule each become that
+// pool's collection, and the single wave covers all of them.
+func TestMixedSourcesAcrossPoolsInOneSchedule(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	a := fo.AddPool(OptName("a"))
@@ -581,19 +614,22 @@ func TestMixedSourcesAcrossPoolsInOneMove(t *testing.T) {
 		}
 		close(ch)
 
-		err := fo.MoveTo(ctx, Tasks{
-			a.NewTask(func(context.Context) error { aEvents.add(0); return nil }),
-			a.NewTasks(2, func(_ context.Context, i int) error { aEvents.add(int64(i + 1)); return nil }),
-			b.NewTasksGen(func(yield func(TaskFunc) bool) {
-				for i := 0; i < 3; i++ {
-					i := i
-					if !yield(func(context.Context) error { bEvents.add(int64(i)); return nil }) {
-						return
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx,
+				a.NewTask(func(context.Context) error { aEvents.add(0); return nil }),
+				a.NewTasks(2, func(_ context.Context, i int) error { aEvents.add(int64(i + 1)); return nil }),
+				b.NewTasksGen(func(yield func(TaskFunc) bool) {
+					for i := 0; i < 3; i++ {
+						i := i
+						if !yield(func(context.Context) error { bEvents.add(int64(i)); return nil }) {
+							return
+						}
 					}
-				}
-			}),
-			d.NewTasksChan(ch),
-		})
+				}),
+				d.NewTasksChan(ch),
+			)
+		}
 		if err != nil {
 			return err
 		}
@@ -636,21 +672,24 @@ func TestStreamingSourcesFeedLaneWithInteriorStages(t *testing.T) {
 		}
 		close(ch)
 
-		err := fo.MoveTo(ctx, Tasks{
-			lane.NewTasksGen(func(yield func(TaskFunc) bool) {
-				for i := 0; i < perSource; i++ {
-					if !yield(func(cctx context.Context) error {
-						if err := mid.MoveTo(cctx); err != nil {
-							return err
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx,
+				lane.NewTasksGen(func(yield func(TaskFunc) bool) {
+					for i := 0; i < perSource; i++ {
+						if !yield(func(cctx context.Context) error {
+							if err := mid.MoveTo(cctx); err != nil {
+								return err
+							}
+							return midGauge.hold(func() error { children.Add(1); return nil })
+						}) {
+							return
 						}
-						return midGauge.hold(func() error { children.Add(1); return nil })
-					}) {
-						return
 					}
-				}
-			}),
-			lane.NewTasksChan(ch),
-		})
+				}),
+				lane.NewTasksChan(ch),
+			)
+		}
 		if err != nil {
 			return err
 		}
@@ -681,18 +720,21 @@ func TestOverSubscribedStreamingPoolDrains(t *testing.T) {
 		}
 		close(ch)
 
-		err := fo.MoveTo(ctx, Tasks{
-			pool.NewTask(func(context.Context) error { return g.hold(func() error { return nil }) }),
-			pool.NewTasks(each, func(context.Context, int) error { return g.hold(func() error { return nil }) }),
-			pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-				for i := 0; i < each; i++ {
-					if !yield(func(context.Context) error { return g.hold(func() error { return nil }) }) {
-						return
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx,
+				pool.NewTask(func(context.Context) error { return g.hold(func() error { return nil }) }),
+				pool.NewTasks(each, func(context.Context, int) error { return g.hold(func() error { return nil }) }),
+				pool.NewTasksGen(func(yield func(TaskFunc) bool) {
+					for i := 0; i < each; i++ {
+						if !yield(func(context.Context) error { return g.hold(func() error { return nil }) }) {
+							return
+						}
 					}
-				}
-			}),
-			pool.NewTasksChan(ch),
-		})
+				}),
+				pool.NewTasksChan(ch),
+			)
+		}
 		if err != nil {
 			return err
 		}
@@ -741,7 +783,7 @@ func TestGenSourceStoppedWhenItsWorkIsDropped(t *testing.T) {
 	base := runtime.NumGoroutine()
 	var started atomic.Int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		var tasks Tasks
+		var tasks []Task
 		for _, l := range ls {
 			tasks = append(tasks, l.NewTasksGen(func(yield func(TaskFunc) bool) {
 				for i := 0; i < 50; i++ { // plenty left ungenerated when the item is canceled
@@ -751,7 +793,10 @@ func TestGenSourceStoppedWhenItsWorkIsDropped(t *testing.T) {
 				}
 			}))
 		}
-		if err := fo.MoveTo(ctx, tasks); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, tasks...); err != nil {
 			return err
 		}
 		waitFor(t, "every lane to have pulled from its generator", func() bool {

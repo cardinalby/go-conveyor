@@ -29,11 +29,14 @@ func BenchmarkFanOutSchedule(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			_ = c.Run(ctx, func(ic context.Context) error {
-				tasks := make(Tasks, 0, len(ls))
+				tasks := make([]Task, 0, len(ls))
 				for _, l := range ls {
 					tasks = append(tasks, l.NewTask(noop))
 				}
-				err := fo.MoveTo(ic, tasks)
+				err := fo.MoveTo(ic)
+				if err == nil {
+					err = fo.Schedule(ic, tasks...)
+				}
 				if err != nil {
 					return err
 				}

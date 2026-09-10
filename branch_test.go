@@ -45,15 +45,18 @@ func TestBranchServesBothKindsUniformly(t *testing.T) {
 			var ran atomic.Int64
 			err := runOnce(t, c, func(ctx context.Context) error {
 				// One call site for both kinds: this is what Branch buys.
-				err := fo.MoveTo(ctx, Tasks{b.NewTasks(tasks, func(cctx context.Context, _ int) error {
-					if inner != nil {
-						if err := inner.MoveTo(cctx); err != nil {
-							return err
+				err := fo.MoveTo(ctx)
+				if err == nil {
+					err = fo.Schedule(ctx, b.NewTasks(tasks, func(cctx context.Context, _ int) error {
+						if inner != nil {
+							if err := inner.MoveTo(cctx); err != nil {
+								return err
+							}
 						}
-					}
-					ran.Add(1)
-					return nil
-				})})
+						ran.Add(1)
+						return nil
+					}))
+				}
 				if err != nil {
 					return err
 				}
@@ -107,25 +110,28 @@ func TestLaneEntranceAdmitsOneChildAtATime(t *testing.T) {
 	}
 
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTasks(children, func(cctx context.Context, i int) error {
-			created.Add(1)
-			if i == 0 {
-				// Still holding the entrance, and the other three are queued behind it. The whole set was handed over
-				// in one MoveTo, and the lane is pumped under the run's lock before that call returns — so if the
-				// entrance admitted more than one, the siblings would already exist. Nothing to wait for.
-				if occ := occupancyOf(c, lane); occ != 1 {
-					t.Errorf("lane entrance occupancy = %d while the first child holds it, want 1", occ)
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTasks(children, func(cctx context.Context, i int) error {
+				created.Add(1)
+				if i == 0 {
+					// Still holding the entrance, and the other three are queued behind it. The whole set was handed over
+					// in one MoveTo, and the lane is pumped under the run's lock before that call returns — so if the
+					// entrance admitted more than one, the siblings would already exist. Nothing to wait for.
+					if occ := occupancyOf(c, lane); occ != 1 {
+						t.Errorf("lane entrance occupancy = %d while the first child holds it, want 1", occ)
+					}
+					if n := created.Load(); n != 1 {
+						t.Errorf("%d children created while the first one holds the entrance, want 1", n)
+					}
+					checked.Store(true)
 				}
-				if n := created.Load(); n != 1 {
-					t.Errorf("%d children created while the first one holds the entrance, want 1", n)
+				if err := inner.MoveTo(cctx); err != nil { // frees the entrance for the next child
+					return err
 				}
-				checked.Store(true)
-			}
-			if err := inner.MoveTo(cctx); err != nil { // frees the entrance for the next child
-				return err
-			}
-			return holdInner(cctx)
-		})})
+				return holdInner(cctx)
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -158,20 +164,23 @@ func TestLaneWithoutInteriorNodesActsAsAPool(t *testing.T) {
 	var moveErr atomic.Value
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTasks(tasks, func(cctx context.Context, i int) error {
-			return g.hold(func() error {
-				if i == 0 {
-					// The work runs on the entrance slot, so it has nowhere to go: the pool's panic, not a scope
-					// error. Captured rather than asserted here — see recoveredErr.
-					if e := recoveredErr(func() { _ = commit.MoveTo(cctx) }); e != nil {
-						moveErr.Store(e)
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTasks(tasks, func(cctx context.Context, i int) error {
+				return g.hold(func() error {
+					if i == 0 {
+						// The work runs on the entrance slot, so it has nowhere to go: the pool's panic, not a scope
+						// error. Captured rather than asserted here — see recoveredErr.
+						if e := recoveredErr(func() { _ = commit.MoveTo(cctx) }); e != nil {
+							moveErr.Store(e)
+						}
+						checked.Store(true)
 					}
-					checked.Store(true)
-				}
-				spin()
-				return nil
-			})
-		})})
+					spin()
+					return nil
+				})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -192,8 +201,8 @@ func TestLaneWithoutInteriorNodesActsAsAPool(t *testing.T) {
 	}
 }
 
-// TestPoolTasksStartInSubmissionOrder: several Tasks for one branch become a single collection whose sources are
-// drained front to back, so the order they were added to the Tasks value is the order their work starts in — across
+// TestPoolTasksStartInSubmissionOrder: several tasks for one branch in one Schedule become a single collection whose
+// sources are drained front to back, so the order they were listed is the order their work starts in — across
 // constructors, not just within one.
 func TestPoolTasksStartInSubmissionOrder(t *testing.T) {
 	c := NewConveyor()
@@ -203,14 +212,17 @@ func TestPoolTasksStartInSubmissionOrder(t *testing.T) {
 
 	rec := &recorder{}
 	err := runOnce(t, c, func(ctx context.Context) error {
-		var ts Tasks
-		ts.Add(pool.NewTask(func(context.Context) error { rec.add("A"); return nil }))
-		ts.Add(pool.NewTasks(2, func(_ context.Context, i int) error { rec.add("B%d", i); return nil }))
-		ts.Add(pool.NewTasksGen(func(yield func(TaskFunc) bool) {
+		var ts []Task
+		ts = append(ts, pool.NewTask(func(context.Context) error { rec.add("A"); return nil }))
+		ts = append(ts, pool.NewTasks(2, func(_ context.Context, i int) error { rec.add("B%d", i); return nil }))
+		ts = append(ts, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
 			yield(func(context.Context) error { rec.add("C"); return nil })
 		}))
-		ts.Add(pool.NewTask(func(context.Context) error { rec.add("D"); return nil }))
-		if err := fo.MoveTo(ctx, ts); err != nil {
+		ts = append(ts, pool.NewTask(func(context.Context) error { rec.add("D"); return nil }))
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, ts...); err != nil {
 			return err
 		}
 		return commit.MoveTo(ctx) // joins the wave: all five callbacks have run by here

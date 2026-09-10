@@ -9,7 +9,8 @@ type UnitOccupants struct {
 	// slots appears once per slot.
 	InBody []int64
 
-	// InQueue lists the item numbers waiting in front of the node, in arrival order.
+	// InQueue lists the item numbers waiting in front of the node, in arrival order. For a branch it is the backlog
+	// in queue order — item age, then Schedule order — which is not the order the work arrived in.
 	InQueue []int64
 }
 

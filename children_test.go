@@ -27,15 +27,18 @@ func TestBatchSplitsIntoChildJourneys(t *testing.T) {
 		if err := read.MoveTo(ctx); err != nil {
 			return err
 		}
-		err := fo.MoveTo(ctx, Tasks{lane.NewTasks(batch, func(cctx context.Context, i int) error {
-			if err := enrich.MoveTo(cctx); err != nil { // a child moving through its lane's stage
-				return err
-			}
-			return enrichGauge.hold(func() error {
-				enriched.add(int64(i))
-				return nil
-			})
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTasks(batch, func(cctx context.Context, i int) error {
+				if err := enrich.MoveTo(cctx); err != nil { // a child moving through its lane's stage
+					return err
+				}
+				return enrichGauge.hold(func() error {
+					enriched.add(int64(i))
+					return nil
+				})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -86,18 +89,21 @@ func TestChildReleasesLaneEntranceOnFirstMove(t *testing.T) {
 	}()
 
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTasks(4, func(cctx context.Context, i int) error {
-			return inLane.hold(func() error {
-				if err := mid.MoveTo(cctx); err != nil { // frees the lane entrance for the next child
-					return err
-				}
-				select { // hold the interior stage so a second child piles up at the entrance
-				case <-proceed:
-				case <-cctx.Done():
-				}
-				return nil
-			})
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTasks(4, func(cctx context.Context, i int) error {
+				return inLane.hold(func() error {
+					if err := mid.MoveTo(cctx); err != nil { // frees the lane entrance for the next child
+						return err
+					}
+					select { // hold the interior stage so a second child piles up at the entrance
+					case <-proceed:
+					case <-cctx.Done():
+					}
+					return nil
+				})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -125,14 +131,17 @@ func TestChildrenPreserveOrderAcrossItems(t *testing.T) {
 	var order recorder
 	var itemOrder numbers
 	runNOK(t, c, 5, func(ctx context.Context, no int64) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTasks(3, func(cctx context.Context, i int) error {
-			if err := mid.MoveTo(cctx); err != nil {
-				return err
-			}
-			order.add("%d.%d", no, i)
-			itemOrder.add(no)
-			return nil
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTasks(3, func(cctx context.Context, i int) error {
+				if err := mid.MoveTo(cctx); err != nil {
+					return err
+				}
+				order.add("%d.%d", no, i)
+				itemOrder.add(no)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -155,7 +164,7 @@ func TestChildrenPreserveOrderAcrossItems(t *testing.T) {
 }
 
 // TestChildTicketOrderAcrossTasksAndItems exercises all three ordering rules at once, which the test above cannot:
-// it submits *several* Tasks per item to the same lane, so the middle rule — the order they were added to the Tasks
+// it submits *several* Tasks per item to the same lane, so the middle rule — the order they were listed in Schedule
 // value — has something to decide.
 //
 // A child's place is stamped when its work is pulled off the lane's queue, not when its callback starts, so the total
@@ -171,30 +180,33 @@ func TestChildTicketOrderAcrossTasksAndItems(t *testing.T) {
 	var order recorder
 	runNOK(t, c, items, func(ctx context.Context, no int64) error {
 		rec := func(label string) { order.add("%d.%s", no, label) }
-		// Three Tasks for one lane, built with different constructors, deliberately not in index order.
-		var ts Tasks
-		ts.Add(lane.NewTask(func(cctx context.Context) error {
+		// Three tasks for one lane, built with different constructors, deliberately not in index order.
+		var ts []Task
+		ts = append(ts, lane.NewTask(func(cctx context.Context) error {
 			if err := mid.MoveTo(cctx); err != nil {
 				return err
 			}
 			rec("A")
 			return nil
 		}))
-		ts.Add(lane.NewTasks(2, func(cctx context.Context, i int) error {
+		ts = append(ts, lane.NewTasks(2, func(cctx context.Context, i int) error {
 			if err := mid.MoveTo(cctx); err != nil {
 				return err
 			}
 			rec(sprintf("B%d", i))
 			return nil
 		}))
-		ts.Add(lane.NewTask(func(cctx context.Context) error {
+		ts = append(ts, lane.NewTask(func(cctx context.Context) error {
 			if err := mid.MoveTo(cctx); err != nil {
 				return err
 			}
 			rec("C")
 			return nil
 		}))
-		if err := fo.MoveTo(ctx, ts); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, ts...); err != nil {
 			return err
 		}
 		return commit.MoveTo(ctx)
@@ -233,21 +245,24 @@ func TestChildCannotMoveIntoASiblingLane(t *testing.T) {
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{
-			laneA.NewTask(func(cctx context.Context) error {
-				if err := midA.MoveTo(cctx); err != nil {
-					return err
-				}
-				// midB belongs to laneB's scope, which this child does not run in.
-				if e := recoveredErr(func() { _ = midB.MoveTo(cctx) }); e == nil || !errors.Is(e, errWrongScope) {
-					t.Errorf("moving into a sibling lane = %v, want %v", e, errWrongScope)
-				}
-				checked.Store(true)
-				return nil
-			}),
-			// laneB needs work of its own, or its scope would have no children at all.
-			laneB.NewTask(func(cctx context.Context) error { return midB.MoveTo(cctx) }),
-		})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx,
+				laneA.NewTask(func(cctx context.Context) error {
+					if err := midA.MoveTo(cctx); err != nil {
+						return err
+					}
+					// midB belongs to laneB's scope, which this child does not run in.
+					if e := recoveredErr(func() { _ = midB.MoveTo(cctx) }); e == nil || !errors.Is(e, errWrongScope) {
+						t.Errorf("moving into a sibling lane = %v, want %v", e, errWrongScope)
+					}
+					checked.Store(true)
+					return nil
+				}),
+				// laneB needs work of its own, or its scope would have no children at all.
+				laneB.NewTask(func(cctx context.Context) error { return midB.MoveTo(cctx) }),
+			)
+		}
 		if err != nil {
 			return err
 		}
@@ -274,15 +289,18 @@ func TestChildErrorFailsItemAndRun(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	err := c.Run(ctx, func(ic context.Context) error {
-		err := fo.MoveTo(ic, Tasks{lane.NewTasks(4, func(cctx context.Context, i int) error {
-			if err := mid.MoveTo(cctx); err != nil {
-				return err
-			}
-			if i == 2 {
-				return boom
-			}
-			return nil
-		})})
+		err := fo.MoveTo(ic)
+		if err == nil {
+			err = fo.Schedule(ic, lane.NewTasks(4, func(cctx context.Context, i int) error {
+				if err := mid.MoveTo(cctx); err != nil {
+					return err
+				}
+				if i == 2 {
+					return boom
+				}
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -318,23 +336,26 @@ func TestChildSeesParentCancellation(t *testing.T) {
 	defer cancel()
 
 	err := c.Run(ctx, func(ic context.Context) error {
-		err := fo.MoveTo(ic, Tasks{lane.NewTasks(3, func(cctx context.Context, i int) error {
-			if err := mid.MoveTo(cctx); err != nil {
-				return err
-			}
-			if i == 0 {
-				<-waiting // fail only once the siblings are actually blocked, so the test is not racy
-				return boom
-			}
-			if parked.Add(1) == 2 && onceWaiting.CompareAndSwap(false, true) {
-				close(waiting)
-			}
-			<-cctx.Done() // must be released by the fail-fast cancellation
-			if releasedCount.Add(1) == 2 && onceReleased.CompareAndSwap(false, true) {
-				close(released)
-			}
-			return nil
-		})})
+		err := fo.MoveTo(ic)
+		if err == nil {
+			err = fo.Schedule(ic, lane.NewTasks(3, func(cctx context.Context, i int) error {
+				if err := mid.MoveTo(cctx); err != nil {
+					return err
+				}
+				if i == 0 {
+					<-waiting // fail only once the siblings are actually blocked, so the test is not racy
+					return boom
+				}
+				if parked.Add(1) == 2 && onceWaiting.CompareAndSwap(false, true) {
+					close(waiting)
+				}
+				<-cctx.Done() // must be released by the fail-fast cancellation
+				if releasedCount.Add(1) == 2 && onceReleased.CompareAndSwap(false, true) {
+					close(released)
+				}
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -359,12 +380,15 @@ func TestChildInheritsItemNumber(t *testing.T) {
 
 	var mismatch atomic.Int64
 	runNOK(t, c, 4, func(ctx context.Context, no int64) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTasks(2, func(cctx context.Context, i int) error {
-			if childNo, ok := ItemNoFromContext(cctx); !ok || childNo != no {
-				mismatch.Add(1)
-			}
-			return mid.MoveTo(cctx)
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTasks(2, func(cctx context.Context, i int) error {
+				if childNo, ok := ItemNoFromContext(cctx); !ok || childNo != no {
+					mismatch.Add(1)
+				}
+				return mid.MoveTo(cctx)
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -386,9 +410,12 @@ func TestInFlightCountsItemsNotChildren(t *testing.T) {
 
 	var maxInFlight atomic.Int64
 	runNOK(t, c, 6, func(ctx context.Context, no int64) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTasks(10, func(cctx context.Context, i int) error {
-			return mid.MoveTo(cctx)
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTasks(10, func(cctx context.Context, i int) error {
+				return mid.MoveTo(cctx)
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -418,16 +445,19 @@ func TestChildCannotMoveOutsideItsLane(t *testing.T) {
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTask(func(cctx context.Context) error {
-			if err := mid.MoveTo(cctx); err != nil {
-				return err
-			}
-			assertPanics(t, errWrongScope, func() {
-				_ = commit.MoveTo(cctx) // a node of the conveyor, not of this lane
-			})
-			checked.Store(true)
-			return nil
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTask(func(cctx context.Context) error {
+				if err := mid.MoveTo(cctx); err != nil {
+					return err
+				}
+				assertPanics(t, errWrongScope, func() {
+					_ = commit.MoveTo(cctx) // a node of the conveyor, not of this lane
+				})
+				checked.Store(true)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -461,8 +491,9 @@ func TestItemCannotMoveIntoALane(t *testing.T) {
 	}
 }
 
-// TestNonTravellingWorkCannotMove: on a lane without interior nodes there is nowhere to go, and the attempt says so
-// instead of moving the item that scheduled the work.
+// TestNonTravellingWorkCannotMove: a pool's work has nowhere to go, and the attempt says so instead of moving the
+// item that scheduled the work. Waiting is refused for the same reason; scheduling more work at the pool's own
+// fan-out is allowed.
 func TestNonTravellingWorkCannotMove(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -470,14 +501,27 @@ func TestNonTravellingWorkCannotMove(t *testing.T) {
 	commit := c.AddStage(OptName("commit"))
 
 	var checked atomic.Bool
+	var spawned atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(cctx context.Context) error {
-			assertPanics(t, errCannotMove, func() {
-				_ = commit.MoveTo(cctx)
-			})
-			checked.Store(true)
-			return nil
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTask(func(cctx context.Context) error {
+				assertPanics(t, errCannotMove, func() {
+					_ = commit.MoveTo(cctx)
+				})
+				assertPanics(t, errCannotMove, func() {
+					_ = fo.Wait(cctx)
+				})
+				if err := fo.Schedule(cctx, pool.NewTask(func(context.Context) error {
+					spawned.Store(true)
+					return nil
+				})); err != nil {
+					t.Errorf("Schedule from a pool task = %v, want nil", err)
+				}
+				checked.Store(true)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -490,6 +534,9 @@ func TestNonTravellingWorkCannotMove(t *testing.T) {
 	}
 	if !checked.Load() {
 		t.Fatalf("the cannot-move check did not run")
+	}
+	if !spawned.Load() {
+		t.Fatalf("the task scheduled from a pool task did not run")
 	}
 }
 
@@ -505,20 +552,26 @@ func TestNestedFanOutInsideLane(t *testing.T) {
 
 	var innerRuns, afterRuns atomic.Int64
 	runNOK(t, c, 3, func(ctx context.Context, no int64) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTasks(2, func(cctx context.Context, i int) error {
-			err := inner.MoveTo(cctx, Tasks{innerPool.NewTasks(3, func(_ context.Context, j int) error {
-				innerRuns.Add(1)
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTasks(2, func(cctx context.Context, i int) error {
+				err := inner.MoveTo(cctx)
+				if err == nil {
+					err = inner.Schedule(cctx, innerPool.NewTasks(3, func(_ context.Context, j int) error {
+						innerRuns.Add(1)
+						return nil
+					}))
+				}
+				if err != nil {
+					return err
+				}
+				if err := after.MoveTo(cctx); err != nil { // joins the nested wave
+					return err
+				}
+				afterRuns.Add(1)
 				return nil
-			})})
-			if err != nil {
-				return err
-			}
-			if err := after.MoveTo(cctx); err != nil { // joins the nested wave
-				return err
-			}
-			afterRuns.Add(1)
-			return nil
-		})})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -548,17 +601,23 @@ func TestNestedWaveErrorFailsEverything(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	err := c.Run(ctx, func(ic context.Context) error {
-		err := fo.MoveTo(ic, Tasks{lane.NewTask(func(cctx context.Context) error {
-			err := inner.MoveTo(cctx, Tasks{innerPool.NewTask(func(context.Context) error { return boom })})
-			if err != nil {
-				return err
-			}
-			if err := after.MoveTo(cctx); err != nil {
-				return err
-			}
-			afterRan.Store(true)
-			return nil
-		})})
+		err := fo.MoveTo(ic)
+		if err == nil {
+			err = fo.Schedule(ic, lane.NewTask(func(cctx context.Context) error {
+				err := inner.MoveTo(cctx)
+				if err == nil {
+					err = inner.Schedule(cctx, innerPool.NewTask(func(context.Context) error { return boom }))
+				}
+				if err != nil {
+					return err
+				}
+				if err := after.MoveTo(cctx); err != nil {
+					return err
+				}
+				afterRan.Store(true)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -585,18 +644,21 @@ func TestInteriorStageWithQueue(t *testing.T) {
 	g := &gauge{}
 	var done atomic.Int64
 	runNOK(t, c, 3, func(ctx context.Context, no int64) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTasks(5, func(cctx context.Context, i int) error {
-			if err := first.MoveTo(cctx); err != nil {
-				return err
-			}
-			if err := second.MoveTo(cctx); err != nil {
-				return err
-			}
-			return g.hold(func() error {
-				done.Add(1)
-				return nil
-			})
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTasks(5, func(cctx context.Context, i int) error {
+				if err := first.MoveTo(cctx); err != nil {
+					return err
+				}
+				if err := second.MoveTo(cctx); err != nil {
+					return err
+				}
+				return g.hold(func() error {
+					done.Add(1)
+					return nil
+				})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -621,19 +683,22 @@ func TestStreamingChildren(t *testing.T) {
 
 	var ran atomic.Int64
 	runNOK(t, c, 3, func(ctx context.Context, no int64) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTasksGen(func(yield func(TaskFunc) bool) {
-			for i := 0; i < 4; i++ {
-				if !yield(func(cctx context.Context) error {
-					if err := mid.MoveTo(cctx); err != nil {
-						return err
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTasksGen(func(yield func(TaskFunc) bool) {
+				for i := 0; i < 4; i++ {
+					if !yield(func(cctx context.Context) error {
+						if err := mid.MoveTo(cctx); err != nil {
+							return err
+						}
+						ran.Add(1)
+						return nil
+					}) {
+						return
 					}
-					ran.Add(1)
-					return nil
-				}) {
-					return
 				}
-			}
-		})})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -669,27 +734,33 @@ func TestGrandchildJourneysThroughANestedLane(t *testing.T) {
 	deepG := &gauge{}
 
 	runNOK(t, c, items, func(ctx context.Context, no int64) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTasks(children, func(cctx context.Context, ci int) error {
-			err := inner.MoveTo(cctx, Tasks{innerLane.NewTasks(grandchildren, func(gctx context.Context, gi int) error {
-				// A grandchild is a full item in the inner lane's scope: it moves through that lane's nodes.
-				if err := deep.MoveTo(gctx); err != nil {
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTasks(children, func(cctx context.Context, ci int) error {
+				err := inner.MoveTo(cctx)
+				if err == nil {
+					err = inner.Schedule(cctx, innerLane.NewTasks(grandchildren, func(gctx context.Context, gi int) error {
+						// A grandchild is a full item in the inner lane's scope: it moves through that lane's nodes.
+						if err := deep.MoveTo(gctx); err != nil {
+							return err
+						}
+						return deepG.hold(func() error {
+							deepRuns.Add(1)
+							// The item number is inherited twice over, so it still names the conveyor item this work
+							// belongs to rather than anything about the nesting.
+							if gno, ok := ItemNoFromContext(gctx); !ok || gno != no {
+								wrongNo.Add(1)
+							}
+							return nil
+						})
+					}))
+				}
+				if err != nil {
 					return err
 				}
-				return deepG.hold(func() error {
-					deepRuns.Add(1)
-					// The item number is inherited twice over, so it still names the conveyor item this work
-					// belongs to rather than anything about the nesting.
-					if gno, ok := ItemNoFromContext(gctx); !ok || gno != no {
-						wrongNo.Add(1)
-					}
-					return nil
-				})
-			})})
-			if err != nil {
-				return err
-			}
-			return after.MoveTo(cctx)
-		})})
+				return after.MoveTo(cctx)
+			}))
+		}
 		if err != nil {
 			return err
 		}

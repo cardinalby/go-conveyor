@@ -24,17 +24,20 @@ func TestFanOutLimitBoundsOutstandingWork(t *testing.T) {
 			var wg workGauge
 			runNOK(t, c, items, func(ctx context.Context, no int64) error {
 				w := wg.item(2)
-				err := dbs.MoveTo(ctx, Tasks{
-					slow.NewTask(func(context.Context) error {
-						defer w.taskDone()
-						time.Sleep(20 * time.Millisecond)
-						return nil
-					}),
-					fast.NewTask(func(context.Context) error {
-						defer w.taskDone()
-						return nil
-					}),
-				})
+				err := dbs.MoveTo(ctx)
+				if err == nil {
+					err = dbs.Schedule(ctx,
+						slow.NewTask(func(context.Context) error {
+							defer w.taskDone()
+							time.Sleep(20 * time.Millisecond)
+							return nil
+						}),
+						fast.NewTask(func(context.Context) error {
+							defer w.taskDone()
+							return nil
+						}),
+					)
+				}
 				if err != nil {
 					return err
 				}

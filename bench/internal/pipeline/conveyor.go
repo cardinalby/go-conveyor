@@ -99,15 +99,18 @@ func (p *conveyorPipeline) Run(ctx context.Context, n int) error {
 				pending = pending[:0]
 				nd.rt.process(ic, no)
 			case FanOut:
-				tasks := make(conveyor.Tasks, 0, len(nd.lanes))
+				tasks := make([]conveyor.Task, 0, len(nd.lanes))
 				for li := range nd.lanes {
 					rt := nd.laneRt[li]
-					tasks.Add(nd.lanes[li].NewTask(func(context.Context) error {
+					tasks = append(tasks, nd.lanes[li].NewTask(func(context.Context) error {
 						rt.process(ic, no)
 						return nil
 					}))
 				}
-				if err := nd.fanout.MoveTo(ic, tasks, pending...); err != nil {
+				if err := nd.fanout.MoveTo(ic, pending...); err != nil {
+					return err
+				}
+				if err := nd.fanout.Schedule(ic, tasks...); err != nil {
 					return err
 				}
 				// Detached, so the work overlaps with the nodes that follow — the shape this benchmark measures.

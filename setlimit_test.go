@@ -118,15 +118,18 @@ func TestSetLimitRaisePoolStartsQueuedWork(t *testing.T) {
 	g := &gauge{}
 
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasks(8, func(ic context.Context, _ int) error {
-			return g.hold(func() error {
-				select {
-				case <-release:
-				case <-ic.Done():
-				}
-				return nil
-			})
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasks(8, func(ic context.Context, _ int) error {
+				return g.hold(func() error {
+					select {
+					case <-release:
+					case <-ic.Done():
+					}
+					return nil
+				})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -162,20 +165,23 @@ func TestSetLimitLowerPoolDrainsOversubscribed(t *testing.T) {
 	var done atomic.Int64
 
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasks(total, func(ic context.Context, i int) error {
-			if i < 4 {
-				select {
-				case <-gate:
-				case <-ic.Done():
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasks(total, func(ic context.Context, i int) error {
+				if i < 4 {
+					select {
+					case <-gate:
+					case <-ic.Done():
+					}
+					done.Add(1)
+					return nil
 				}
-				done.Add(1)
-				return nil
-			}
-			return later.hold(func() error {
-				done.Add(1)
-				return nil
-			})
-		})})
+				return later.hold(func() error {
+					done.Add(1)
+					return nil
+				})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -204,7 +210,8 @@ func TestSetLimitLowerPoolDrainsOversubscribed(t *testing.T) {
 }
 
 // TestSetLimitRaiseFanOutAdmitsMoreItems: raising a running fan-out's limit lets more items be inside it — items
-// parked at the next stage's door still occupy the node, so its occupancy grows to the new limit.
+// parked at the next stage's door still occupy the node, so its occupancy grows to the new limit. Each item schedules
+// right after entering, which is what opens the door to the item behind; the raise alone admits nobody.
 func TestSetLimitRaiseFanOutAdmitsMoreItems(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -226,7 +233,10 @@ func TestSetLimitRaiseFanOutAdmitsMoreItems(t *testing.T) {
 	}()
 
 	_ = c.Run(ctx, func(ic context.Context) error {
-		err := fo.MoveTo(ic, Tasks{pool.NewTask(func(context.Context) error { return nil })})
+		err := fo.MoveTo(ic)
+		if err == nil {
+			err = fo.Schedule(ic, pool.NewTask(func(context.Context) error { return nil }))
+		}
 		if err != nil {
 			return err
 		}
@@ -294,7 +304,10 @@ func TestSetLimitLowerFanOutDoesNotEvict(t *testing.T) {
 	_ = c.Run(ctx, func(ic context.Context) error {
 		no, _ := ItemNoFromContext(ic)
 		created.Add(1)
-		err := fo.MoveTo(ic, Tasks{pool.NewTask(func(context.Context) error { return nil })})
+		err := fo.MoveTo(ic)
+		if err == nil {
+			err = fo.Schedule(ic, pool.NewTask(func(context.Context) error { return nil }))
+		}
 		if err != nil {
 			return err
 		}
@@ -420,7 +433,10 @@ func TestSetLimitConcurrentWhileRunning(t *testing.T) {
 		if err := s.MoveTo(ctx); err != nil {
 			return err
 		}
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasks(3, func(context.Context, int) error { return nil })})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasks(3, func(context.Context, int) error { return nil }))
+		}
 		if err != nil {
 			return err
 		}
@@ -466,10 +482,13 @@ func TestLimitsAreAlwaysAtLeastOne(t *testing.T) {
 		if err := s.MoveTo(ctx); err != nil {
 			return err
 		}
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasks(total, func(context.Context, int) error {
-			done.Add(1)
-			return nil
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasks(total, func(context.Context, int) error {
+				done.Add(1)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}

@@ -180,10 +180,13 @@ func TestQueueOnFanOut(t *testing.T) {
 		if err := s1.MoveTo(ctx); err != nil {
 			return err
 		}
-		err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error {
-			done.Add(1)
-			return nil
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
+				done.Add(1)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -490,7 +493,10 @@ func TestFanOutQueueCreatedAtRuntime(t *testing.T) {
 			return err
 		}
 		atPrev.Add(1)
-		err := fo.MoveTo(ic, Tasks{pool.NewTask(func(context.Context) error { return nil })})
+		err := fo.MoveTo(ic)
+		if err == nil {
+			err = fo.Schedule(ic, pool.NewTask(func(context.Context) error { return nil }))
+		}
 		if err != nil {
 			return err
 		}

@@ -8,13 +8,15 @@ import "context"
 //
 // A wave whose error nobody observes still fails the item when it completes.
 type Wave interface {
-	// Started is closed once all the wave's work has been handed out — every task started, or the item canceled.
-	// Relevant mainly for streaming sources (NewTasksGen, NewTasksChan): state they read must not be mutated until
-	// it closes.
+	// Started is closed once the wave is sealed (detached, or its item moved on) and every task the ItemProcessor
+	// scheduled into it has been handed out — its streaming sources drained, or the item canceled. Work that tasks
+	// or lane children scheduled themselves does not count and does not delay it. Relevant mainly for streaming
+	// sources (NewTasksGen, NewTasksChan): state they read must not be mutated until it closes.
 	Started() <-chan struct{}
 
-	// Finished is closed once every task of this wave has finished, or was skipped because the item was canceled.
-	// After it is closed, Err reports the outcome.
+	// Finished is closed once the wave is sealed and every task of this wave has finished — including work those
+	// tasks scheduled themselves — or was skipped because the item was canceled. After it is closed, Err reports
+	// the outcome.
 	Finished() <-chan struct{}
 
 	// Err returns the first error the wave's work produced, or nil. It is only final once Finished is closed.

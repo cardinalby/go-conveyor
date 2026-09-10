@@ -302,7 +302,10 @@ func (top *propTopology) process(ctx context.Context, no int64, inj *propInjecti
 				return errPropBoom
 			}
 		} else {
-			err := nd.fanOut.fo.MoveTo(ctx, top.fanOutTasks(ctx, nd.fanOut, rnd, failing, inj, i), joins...)
+			err := nd.fanOut.fo.MoveTo(ctx, joins...)
+			if err == nil {
+				err = nd.fanOut.fo.Schedule(ctx, top.fanOutTasks(ctx, nd.fanOut, rnd, failing, inj, i)...)
+			}
 			if err != nil {
 				return err
 			}
@@ -331,8 +334,8 @@ func (top *propTopology) process(ctx context.Context, no int64, inj *propInjecti
 // everything else.
 func (top *propTopology) fanOutTasks(
 	ctx context.Context, pf *propFanOut, rnd *rand.Rand, failing bool, inj *propInjection, nodeIdx int,
-) Tasks {
-	var tasks Tasks
+) []Task {
+	var tasks []Task
 	for li, pl := range pf.lanes {
 		inject := failing && (inj.kind == injTask || inj.kind == injChild) && inj.node == nodeIdx && inj.lane == li
 		n := rnd.Intn(4)
@@ -404,7 +407,10 @@ func (top *propTopology) laneWork(pl *propLane, inject bool) func(context.Contex
 
 		var iw Wave
 		if pl.inner != nil {
-			if err := pl.inner.fo.MoveTo(cctx, top.innerTasks(pl.inner)); err != nil {
+			if err := pl.inner.fo.MoveTo(cctx); err != nil {
+				return err
+			}
+			if err := pl.inner.fo.Schedule(cctx, top.innerTasks(pl.inner)...); err != nil {
 				return err
 			}
 			iw = pl.inner.fo.Detach(cctx)
@@ -431,8 +437,8 @@ func (top *propTopology) laneWork(pl *propLane, inject bool) func(context.Contex
 
 // innerTasks schedules a fixed amount of work on an interior fan-out's lanes (fixed, because this runs on many child
 // goroutines at once and must not share a random source).
-func (top *propTopology) innerTasks(pf *propFanOut) Tasks {
-	var tasks Tasks
+func (top *propTopology) innerTasks(pf *propFanOut) []Task {
+	var tasks []Task
 	for _, pl := range pf.lanes {
 		top.scheduled.Add(2)
 		tasks = append(tasks, pl.branch.NewTasks(2, top.laneWork(pl, false)))

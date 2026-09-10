@@ -554,7 +554,7 @@ func runNodes(
 			blocked.Mark(n.ID, no, path) // path disambiguates this occurrence from another child's own visit here
 		case KindFanOut:
 			fo := built.Handles[n.ID].(conveyor.FanOut)
-			var tasks conveyor.Tasks
+			var tasks []conveyor.Task
 			for _, br := range n.Branches {
 				id := br.ID
 				switch br.Kind {
@@ -564,7 +564,7 @@ func runNodes(
 					// TaskCounts.Set) takes effect for the next item to reach this branch, never for one
 					// already running with a count it already committed to — mirrors how a delay change only
 					// affects a step not yet slept out.
-					tasks.Add(pool.NewTasks(taskCounts.Get(id), func(tctx context.Context, i int) error {
+					tasks = append(tasks, pool.NewTasks(taskCounts.Get(id), func(tctx context.Context, i int) error {
 						// Registered in lanePaths exactly like a lane child (see the KindLane case below), even
 						// though a pool task never walks any further nodes: two of the same item's tasks can run on
 						// this pool at once (TasksPerItem > 1), and without a path they would be indistinguishable
@@ -591,7 +591,7 @@ func runNodes(
 				case KindLane:
 					lane := built.Handles[id].(conveyor.Lane)
 					laneNodes := br.Nodes
-					tasks.Add(lane.NewTasks(taskCounts.Get(id), func(tctx context.Context, i int) error {
+					tasks = append(tasks, lane.NewTasks(taskCounts.Get(id), func(tctx context.Context, i int) error {
 						// A fresh backing array per call: concurrent siblings must never alias one another's
 						// path, and append below must not silently reuse (and corrupt) another call's slice.
 						childPath := append(append(make([]int, 0, len(path)+1), path...), i+1)
@@ -617,7 +617,13 @@ func runNodes(
 				}
 			}
 			entries.MarkPending(n.ID, no)
-			if err := fo.MoveTo(ctx, tasks); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
+				release()
+				releaseThis()
+				return err
+			}
+			// A Schedule error is the item's cancellation cause, the same thing a failed MoveTo would have reported.
+			if err := fo.Schedule(ctx, tasks...); err != nil {
 				release()
 				releaseThis()
 				return err

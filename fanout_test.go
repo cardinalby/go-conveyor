@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestFanOutLimitBoundsItemsInside is the central backpressure guarantee of a fan-out, and the reason its limit
@@ -59,12 +60,12 @@ func TestFanOutLimitBoundsItemsInside(t *testing.T) {
 		if err := write.MoveTo(ic); err != nil {
 			return err
 		}
-		tasks := Tasks{fast.NewTask(func(context.Context) error {
+		tasks := []Task{fast.NewTask(func(context.Context) error {
 			fastDone.Add(1)
 			return nil
 		})}
 		if no == 1 {
-			tasks.Add(slow.NewTask(func(context.Context) error {
+			tasks = append(tasks, slow.NewTask(func(context.Context) error {
 				select {
 				case <-block:
 				case <-ic.Done():
@@ -72,7 +73,10 @@ func TestFanOutLimitBoundsItemsInside(t *testing.T) {
 				return nil
 			}))
 		}
-		err := fo.MoveTo(ic, tasks)
+		err := fo.MoveTo(ic)
+		if err == nil {
+			err = fo.Schedule(ic, tasks...)
+		}
 		if err != nil {
 			return err
 		}
@@ -111,10 +115,13 @@ func TestFanOutSlotHeldUntilNextAdmission(t *testing.T) {
 	}()
 
 	_ = c.Run(ctx, func(ic context.Context) error {
-		err := fo.MoveTo(ic, Tasks{pool.NewTask(func(context.Context) error {
-			tasksDone.Add(1)
-			return nil
-		})})
+		err := fo.MoveTo(ic)
+		if err == nil {
+			err = fo.Schedule(ic, pool.NewTask(func(context.Context) error {
+				tasksDone.Add(1)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -132,45 +139,51 @@ func TestFanOutSlotHeldUntilNextAdmission(t *testing.T) {
 	})
 }
 
-// TestFanOutReleasesPreviousStageAtEnqueue: the previous stage is freed as soon as the item is admitted to the
-// fan-out and its work is queued — not when that work finishes.
-func TestFanOutReleasesPreviousStageAtEnqueue(t *testing.T) {
+// TestFanOutReleasesPreviousStageAtAdmission: the previous stage is freed as soon as the item is admitted to the
+// fan-out — before it schedules anything, and long before that work finishes. The fan-out's door is another matter:
+// the item behind cannot enter the node until the item ahead has scheduled once, whatever the limit says.
+func TestFanOutReleasesPreviousStageAtAdmission(t *testing.T) {
 	c := NewConveyor()
 	write := c.AddStage(OptName("write"))
 	fo := c.AddFanOut(OptName("fo")).SetLimit(4)
 	pool := fo.AddPool(OptName("pool")).SetLimit(4)
 
-	var inWrite atomic.Int64
-	var writeOps atomic.Int64
+	secondAtDoor := make(chan struct{})
+	secondInside := make(chan struct{})
 	block := make(chan struct{})
+	checked := make(chan struct{})
 
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
 	go func() {
-		// Every task blocks, yet write must keep admitting items — proof it was released at enqueue.
-		waitFor(t, "write to keep flowing while tasks are blocked", func() bool { return writeOps.Load() >= 4 })
-		close(block)
-		cancel()
+		defer close(checked)
+		<-secondAtDoor
+		// Item 2 has passed write (released at item 1's admission) and stands at the fan-out's door. It must stay
+		// there while item 1 has not scheduled: a limit of 4 does not open the door.
+		time.Sleep(20 * time.Millisecond)
+		if occ := occupancyOf(c, fo); occ != 1 {
+			t.Errorf("fan-out occupancy = %d before the first Schedule, want 1 (the door is closed)", occ)
+		}
+		close(block) // item 1 schedules now; the door opens
+		<-secondInside
 	}()
 
-	_ = c.Run(ctx, func(ic context.Context) error {
+	runNOK(t, c, 2, func(ic context.Context, no int64) error {
 		if err := write.MoveTo(ic); err != nil {
 			return err
 		}
-		if n := inWrite.Add(1); n > 1 {
-			t.Errorf("%d items inside the exclusive write stage", n)
+		if no == 2 {
+			// Only possible because item 1 released write when it entered the fan-out, not when it scheduled.
+			close(secondAtDoor)
 		}
-		writeOps.Add(1)
-		inWrite.Add(-1)
-		err := fo.MoveTo(ic, Tasks{pool.NewTask(func(context.Context) error {
-			select {
-			case <-block:
-			case <-ic.Done():
-			}
-			return nil
-		})})
-		return err
+		if err := fo.MoveTo(ic); err != nil {
+			return err
+		}
+		if no == 2 {
+			close(secondInside)
+		}
+		<-block // both items stay inside until the door check is done, so occupancy tells who got in
+		return fo.Schedule(ic, pool.NewTask(func(context.Context) error { return nil }))
 	})
+	<-checked
 }
 
 // TestPoolRunsTasksInParallelUpToLimit: a pool's limit is its task concurrency.
@@ -185,18 +198,21 @@ func TestPoolRunsTasksInParallelUpToLimit(t *testing.T) {
 	var opened atomic.Bool
 
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasks(8, func(_ context.Context, i int) error {
-			return g.hold(func() error {
-				if arrived.Add(1) == 4 && opened.CompareAndSwap(false, true) {
-					close(barrier)
-				}
-				select {
-				case <-barrier:
-				case <-ctx.Done():
-				}
-				return nil
-			})
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasks(8, func(_ context.Context, i int) error {
+				return g.hold(func() error {
+					if arrived.Add(1) == 4 && opened.CompareAndSwap(false, true) {
+						close(barrier)
+					}
+					select {
+					case <-barrier:
+					case <-ctx.Done():
+					}
+					return nil
+				})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -221,12 +237,15 @@ func TestPoolRunsSequentiallyByDefault(t *testing.T) {
 	g := &gauge{}
 	var order numbers
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasks(6, func(_ context.Context, i int) error {
-			return g.hold(func() error {
-				order.add(int64(i))
-				return nil
-			})
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasks(6, func(_ context.Context, i int) error {
+				return g.hold(func() error {
+					order.add(int64(i))
+					return nil
+				})
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -258,10 +277,13 @@ func TestPoolFIFOAcrossItems(t *testing.T) {
 
 	var order numbers
 	runNOK(t, c, 10, func(ctx context.Context, no int64) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasks(3, func(_ context.Context, i int) error {
-			order.add(no)
-			return nil
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasks(3, func(_ context.Context, i int) error {
+				order.add(no)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -290,10 +312,13 @@ func TestFanOutOverSubscribedPoolDrains(t *testing.T) {
 
 	var done atomic.Int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasks(50, func(_ context.Context, i int) error {
-			done.Add(1)
-			return nil
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasks(50, func(_ context.Context, i int) error {
+				done.Add(1)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -319,10 +344,13 @@ func TestFanOutMultiplePoolsDifferentLimits(t *testing.T) {
 
 	seqG, parG := &gauge{}, &gauge{}
 	runNOK(t, c, 8, func(ctx context.Context, no int64) error {
-		err := fo.MoveTo(ctx, Tasks{
-			seq.NewTasks(2, func(_ context.Context, i int) error { return seqG.hold(func() error { return nil }) }),
-			par.NewTasks(6, func(_ context.Context, i int) error { return parG.hold(func() error { return nil }) }),
-		})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx,
+				seq.NewTasks(2, func(_ context.Context, i int) error { return seqG.hold(func() error { return nil }) }),
+				par.NewTasks(6, func(_ context.Context, i int) error { return parG.hold(func() error { return nil }) }),
+			)
+		}
 		if err != nil {
 			return err
 		}
@@ -337,9 +365,9 @@ func TestFanOutMultiplePoolsDifferentLimits(t *testing.T) {
 	}
 }
 
-// TestFanOutEmptyMoveIsStillAMove: passing no tasks is legal — the item enters the node, releases the previous
-// one, and gets an already-finished wave.
-func TestFanOutEmptyMoveIsStillAMove(t *testing.T) {
+// TestFanOutEmptyScheduleIsLegal: scheduling nothing is legal — the item is inside the node with an empty body, and
+// detaching it hands back an already-finished wave.
+func TestFanOutEmptyScheduleIsLegal(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
@@ -347,16 +375,19 @@ func TestFanOutEmptyMoveIsStillAMove(t *testing.T) {
 
 	for _, tc := range []struct {
 		name  string
-		tasks Tasks
+		tasks []Task
 	}{
 		{name: "nil tasks", tasks: nil},
-		{name: "empty tasks", tasks: Tasks{}},
-		{name: "statically empty task", tasks: Tasks{pool.NewTasks(0, func(context.Context, int) error { return nil })}},
+		{name: "empty tasks", tasks: []Task{}},
+		{name: "statically empty task", tasks: []Task{pool.NewTasks(0, func(context.Context, int) error { return nil })}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var reached bool
 			err := runOnce(t, c, func(ctx context.Context) error {
-				err := fo.MoveTo(ctx, tc.tasks)
+				err := fo.MoveTo(ctx)
+				if err == nil {
+					err = fo.Schedule(ctx, tc.tasks...)
+				}
 				if err != nil {
 					return err
 				}
@@ -395,13 +426,16 @@ func TestFanOutSubsetOfPools(t *testing.T) {
 
 	var aRuns, bRuns atomic.Int64
 	runNOK(t, c, 12, func(ctx context.Context, no int64) error {
-		var tasks Tasks
+		var tasks []Task
 		if no%2 == 1 {
-			tasks.Add(a.NewTask(func(context.Context) error { aRuns.Add(1); return nil }))
+			tasks = append(tasks, a.NewTask(func(context.Context) error { aRuns.Add(1); return nil }))
 		} else {
-			tasks.Add(b.NewTask(func(context.Context) error { bRuns.Add(1); return nil }))
+			tasks = append(tasks, b.NewTask(func(context.Context) error { bRuns.Add(1); return nil }))
 		}
-		err := fo.MoveTo(ctx, tasks)
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, tasks...)
+		}
 		if err != nil {
 			return err
 		}
@@ -425,18 +459,24 @@ func TestFanOutJoinHappensBeforeNewWorkStarts(t *testing.T) {
 
 	var events recorder
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := first.MoveTo(ctx, Tasks{firstPool.NewTasks(3, func(_ context.Context, i int) error {
-			events.add("first-%d", i)
-			return nil
-		})})
+		err := first.MoveTo(ctx)
+		if err == nil {
+			err = first.Schedule(ctx, firstPool.NewTasks(3, func(_ context.Context, i int) error {
+				events.add("first-%d", i)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
 		w1 := first.Detach(ctx)
-		err = second.MoveTo(ctx, Tasks{secondPool.NewTasks(2, func(_ context.Context, i int) error {
-			events.add("second-%d", i)
-			return nil
-		})}, w1) // join w1 here: all of first's work must be done before second's starts
+		err = second.MoveTo(ctx, w1)
+		if err == nil {
+			err = second.Schedule(ctx, secondPool.NewTasks(2, func(_ context.Context, i int) error {
+				events.add("second-%d", i)
+				return nil
+			}))
+		} // join w1 here: all of first's work must be done before second's starts
 		if err != nil {
 			return err
 		}
@@ -475,11 +515,14 @@ func TestDeferredJoinOverlapsInlineWork(t *testing.T) {
 	var overlapped atomic.Bool
 
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error {
-			close(taskRunning)
-			<-inlineRan // the task is still running while the inline stage works
-			return nil
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
+				close(taskRunning)
+				<-inlineRan // the task is still running while the inline stage works
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -518,13 +561,16 @@ func TestFanOutTaskErrorFailsRun(t *testing.T) {
 	var committed atomic.Bool
 	err := c.Run(ctx, func(ic context.Context) error {
 		no, _ := ItemNoFromContext(ic)
-		var tasks Tasks
+		var tasks []Task
 		if no == 1 {
-			tasks.Add(pool.NewTask(func(context.Context) error { return boom }))
+			tasks = append(tasks, pool.NewTask(func(context.Context) error { return boom }))
 		} else {
-			tasks.Add(pool.NewTask(func(context.Context) error { return nil }))
+			tasks = append(tasks, pool.NewTask(func(context.Context) error { return nil }))
 		}
-		err := fo.MoveTo(ic, tasks)
+		err := fo.MoveTo(ic)
+		if err == nil {
+			err = fo.Schedule(ic, tasks...)
+		}
 		if err != nil {
 			return err
 		}
@@ -558,14 +604,17 @@ func TestFanOutSiblingTasksSeeCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	err := c.Run(ctx, func(ic context.Context) error {
-		err := fo.MoveTo(ic, Tasks{
-			failing.NewTask(func(context.Context) error { return boom }),
-			waiting.NewTask(func(context.Context) error {
-				<-ic.Done() // must be released by the fail-fast cancellation
-				close(sawCancel)
-				return nil
-			}),
-		})
+		err := fo.MoveTo(ic)
+		if err == nil {
+			err = fo.Schedule(ic,
+				failing.NewTask(func(context.Context) error { return boom }),
+				waiting.NewTask(func(context.Context) error {
+					<-ic.Done() // must be released by the fail-fast cancellation
+					close(sawCancel)
+					return nil
+				}),
+			)
+		}
 		if err != nil {
 			return err
 		}
@@ -580,7 +629,7 @@ func TestFanOutSiblingTasksSeeCancellation(t *testing.T) {
 	}
 }
 
-// TestFanOutTasksFromForeignBranchPanics: a wiring mistake must be loud.
+// TestFanOutTasksFromForeignBranchPanics: a wiring mistake must be loud; Schedule panics before touching the context.
 func TestFanOutTasksFromForeignBranchPanics(t *testing.T) {
 	c := NewConveyor()
 	fo1 := c.AddFanOut(OptName("fo1"))
@@ -590,7 +639,8 @@ func TestFanOutTasksFromForeignBranchPanics(t *testing.T) {
 
 	err := runOnce(t, c, func(ctx context.Context) error {
 		assertPanics(t, errInvalidUnit, func() {
-			_ = fo2.MoveTo(ctx, Tasks{pool1.NewTask(func(context.Context) error { return nil })})
+			_ = fo2.MoveTo(ctx)
+			_ = fo2.Schedule(ctx, pool1.NewTask(func(context.Context) error { return nil }))
 		})
 		return nil
 	})
@@ -599,7 +649,7 @@ func TestFanOutTasksFromForeignBranchPanics(t *testing.T) {
 	}
 }
 
-// TestTaskReusePanics: Tasks are single-use, even within one submission.
+// TestTaskReusePanics: tasks are single-use, even within one Schedule call.
 func TestTaskReusePanics(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -608,7 +658,8 @@ func TestTaskReusePanics(t *testing.T) {
 	err := runOnce(t, c, func(ctx context.Context) error {
 		task := pool.NewTask(func(context.Context) error { return nil })
 		assertPanics(t, errTaskReused, func() {
-			_ = fo.MoveTo(ctx, Tasks{task, task})
+			_ = fo.MoveTo(ctx)
+			_ = fo.Schedule(ctx, task, task)
 		})
 		return nil
 	})

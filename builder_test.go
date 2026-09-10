@@ -171,9 +171,12 @@ func TestPositionalNamesInStats(t *testing.T) {
 		if err := s.MoveTo(ctx); err != nil {
 			return err
 		}
-		err := fo.MoveTo(ctx, Tasks{lane.NewTask(func(cctx context.Context) error {
-			return in.MoveTo(cctx)
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTask(func(cctx context.Context) error {
+				return in.MoveTo(cctx)
+			}))
+		}
 		if err != nil {
 			return err
 		}

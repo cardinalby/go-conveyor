@@ -122,8 +122,8 @@ var (
 	// instead fails the item with it (fail-fast), since by then the misuse surfaces on an internal goroutine.
 	errNilTaskFunc = errors.New("nil callback")
 
-	// errTaskReused is panicked with by FanOut.MoveTo and FanOut.Schedule when a Task is submitted twice (tasks are
-	// lazy, stateful and single-use).
+	// errTaskReused is panicked with by FanOut.Schedule when a Task is submitted twice (tasks are lazy, stateful and
+	// single-use).
 	errTaskReused = errors.New("tasks are single-use")
 
 	// errForeignWave is panicked with when a wave is passed as a join target of an item that did not create it (or

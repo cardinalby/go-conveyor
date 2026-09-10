@@ -244,10 +244,13 @@ func TestWorkerPoolChurnStaysBounded(t *testing.T) {
 		if no%9 == 0 {
 			tasks = 12 // a slow item: more pool work than the pool can run at once
 		}
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasks(tasks, func(cctx context.Context, i int) error {
-			bg.Add(1)
-			return nil
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasks(tasks, func(cctx context.Context, i int) error {
+				bg.Add(1)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}

@@ -18,11 +18,14 @@ func TestFanOutWorkIsJoinedOnTheWayOut(t *testing.T) {
 
 	var events recorder
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, Tasks{pool.NewTasks(3, func(_ context.Context, i int) error {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, pool.NewTasks(3, func(_ context.Context, i int) error {
 			time.Sleep(10 * time.Millisecond)
 			events.add("task-%d", i)
 			return nil
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
 		events.add("scheduled")
@@ -54,11 +57,14 @@ func TestFanOutOverlapsLocalWorkWithItsTasks(t *testing.T) {
 	localDone := make(chan struct{})
 	var overlapped atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
 			close(taskRunning)
 			<-localDone // the item must be able to make progress while this task is still running
 			return nil
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
 		<-taskRunning
@@ -105,7 +111,10 @@ func TestFanOutWaitingRoomStartsNoWork(t *testing.T) {
 	}()
 
 	_ = c.Run(ctx, func(ic context.Context) error {
-		if err := fo.MoveTo(ic, Tasks{pool.NewTask(func(tctx context.Context) error {
+		if err := fo.MoveTo(ic); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ic, pool.NewTask(func(tctx context.Context) error {
 			n := live.Add(1)
 			for {
 				p := peak.Load()
@@ -121,7 +130,7 @@ func TestFanOutWaitingRoomStartsNoWork(t *testing.T) {
 				}
 			}
 			return nil
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
 		return commit.MoveTo(ic)
@@ -143,17 +152,23 @@ func TestFanOutToFanOutJoinsTheFirst(t *testing.T) {
 
 	var events recorder
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := first.MoveTo(ctx, Tasks{firstPool.NewTask(func(context.Context) error {
+		if err := first.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := first.Schedule(ctx, firstPool.NewTask(func(context.Context) error {
 			time.Sleep(10 * time.Millisecond)
 			events.add("first")
 			return nil
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
-		if err := second.MoveTo(ctx, Tasks{secondPool.NewTask(func(context.Context) error {
+		if err := second.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := second.Schedule(ctx, secondPool.NewTask(func(context.Context) error {
 			events.add("second")
 			return nil
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
 		return nil
@@ -176,11 +191,14 @@ func TestFanOutWorkJoinedWhenTheProcessorReturns(t *testing.T) {
 
 	var ran atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		return fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		return fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
 			time.Sleep(10 * time.Millisecond)
 			ran.Store(true)
 			return boom
-		})})
+		}))
 	})
 	if !errors.Is(err, boom) {
 		t.Fatalf("run error = %v, want the task's %v", err, boom)
@@ -202,7 +220,10 @@ func TestFanOutWorkErrorSurfacesFromTheMoveOut(t *testing.T) {
 	var moveErr error
 	var entered atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error { return boom })}); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return boom })); err != nil {
 			return err
 		}
 		moveErr = commit.MoveTo(ctx)
@@ -237,10 +258,13 @@ func TestTryMoveToDeclinesWhileFanOutWorkRuns(t *testing.T) {
 	release := make(chan struct{})
 	var declines atomic.Int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
 			<-release
 			return nil
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
 		entered, err := commit.TryMoveTo(ctx)
@@ -275,7 +299,10 @@ func TestTryMoveToReportsFinishedFanOutFailure(t *testing.T) {
 	var tryErr error
 	var tryEntered atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error { return boom })}); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return boom })); err != nil {
 			return err
 		}
 		// Wait for the work to settle: the failure poisons the item, and a poisoned item is what the call declines
@@ -308,10 +335,13 @@ func TestFanOutWorkPerPoolOrderSurvivesTheWaitingRoom(t *testing.T) {
 
 	var order recorder
 	runNOK(t, c, items, func(ctx context.Context, no int64) error {
-		if err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
 			order.add("%d", no)
 			return nil
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
 		return commit.MoveTo(ctx)
@@ -348,11 +378,14 @@ func TestShutdownReleasesAnItemWaitingForItsWork(t *testing.T) {
 	}()
 
 	_ = c.Run(ctx, func(ic context.Context) error {
-		if err := fo.MoveTo(ic, Tasks{pool.NewTask(func(tctx context.Context) error {
+		if err := fo.MoveTo(ic); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ic, pool.NewTask(func(tctx context.Context) error {
 			close(inWork)
 			<-tctx.Done() // only the shutdown can end this work
 			return context.Cause(tctx)
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
 		err := commit.MoveTo(ic) // blocks joining the item's own work
@@ -384,18 +417,24 @@ func TestTravellingLaneWorkCompletesWhileTheItemWaits(t *testing.T) {
 
 	var done atomic.Int64
 	runNOK(t, c, items, func(ctx context.Context, no int64) error {
-		if err := fo.MoveTo(ctx, Tasks{lane.NewTasks(children, func(cctx context.Context, i int) error {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, lane.NewTasks(children, func(cctx context.Context, i int) error {
 			if err := inner.MoveTo(cctx); err != nil {
 				return err
 			}
-			if err := nested.MoveTo(cctx, Tasks{nestedPool.NewTasks(2, func(context.Context, int) error {
+			if err := nested.MoveTo(cctx); err != nil {
+				return err
+			}
+			if err := nested.Schedule(cctx, nestedPool.NewTasks(2, func(context.Context, int) error {
 				return nil
-			})}); err != nil {
+			})); err != nil {
 				return err
 			}
 			done.Add(1)
 			return nil
-		})}); err != nil {
+		})); err != nil {
 			return err
 		}
 		return commit.MoveTo(ctx)

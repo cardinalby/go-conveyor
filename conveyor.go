@@ -11,8 +11,9 @@ import (
 // NewConveyor, build the nodes, then call Run with an ItemProcessor: the conveyor runs one ItemProcessor per item,
 // each on its own goroutine, and handles ordering, capacity and backpressure between nodes.
 //
-// A node is either a Stage (AddStage), whose code runs inline in the ItemProcessor, or a FanOut (AddFanOut), which
-// schedules work onto branches (Pool or Lane) that run it in parallel. An item advances between nodes with MoveTo.
+// A node is either a Stage (AddStage), whose code runs inline in the ItemProcessor, or a FanOut (AddFanOut), where
+// the item schedules work onto branches (Pool or Lane) that run it in parallel. An item advances between nodes with
+// MoveTo.
 //
 // Background work started with Stage.Retain or FanOut.Detach is represented by a Wave, joined with a later MoveTo.
 type Conveyor interface {

@@ -21,7 +21,7 @@ func TestWaitOnEmptyBodyReturnsAtOnce(t *testing.T) {
 
 	var ran atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := fo.Wait(ctx); err != nil {
@@ -66,7 +66,7 @@ func TestWaitReturnsWhenTheWholeTreeIsDone(t *testing.T) {
 	}
 	var atWait int64
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := fo.Schedule(ctx, pool.NewTask(func(ctx context.Context) error { return level(ctx, 0) })); err != nil {
@@ -96,7 +96,7 @@ func TestWaitReportsTheBodyErrorAndKeepsIt(t *testing.T) {
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return boom })); err != nil {
@@ -144,7 +144,7 @@ func TestWaitWithStrippedContextOnCanceledItem(t *testing.T) {
 				<-trigger
 				return boom
 			})
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			close(trigger)
@@ -170,7 +170,7 @@ func TestWaitWithStrippedContextOnCanceledItem(t *testing.T) {
 
 		var checked atomic.Bool
 		err := runOnce(t, c, func(ctx context.Context) error {
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return boom })); err != nil {
@@ -225,7 +225,7 @@ func TestStrippedContextWaitWakesOnItemCancellation(t *testing.T) {
 	}()
 
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
@@ -262,7 +262,7 @@ func TestUnclosedChannelSourceBlocksWait(t *testing.T) {
 	waited := make(chan error, 1)
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := fo.Schedule(ctx, pool.NewTasksChan(ch)); err != nil {
@@ -311,7 +311,7 @@ func TestWaitOutsideAnOpenBodyPanics(t *testing.T) {
 		_ = fo.AddPool(OptName("pool"))
 		commit := c.AddStage(OptName("commit"))
 		panicsInItem(t, c, errBodyClosed, func(ctx context.Context) {
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				t.Fatalf("move failed: %v", err)
 			}
 			if err := commit.MoveTo(ctx); err != nil {
@@ -325,7 +325,7 @@ func TestWaitOutsideAnOpenBodyPanics(t *testing.T) {
 		fo := c.AddFanOut(OptName("fo"))
 		_ = fo.AddPool(OptName("pool"))
 		panicsInItem(t, c, errWorkDetached, func(ctx context.Context) {
-			if err := fo.MoveTo(ctx, nil); err != nil {
+			if err := fo.MoveTo(ctx); err != nil {
 				t.Fatalf("move failed: %v", err)
 			}
 			_ = fo.Detach(ctx)
@@ -343,7 +343,7 @@ func TestWaitFromPoolTaskPanics(t *testing.T) {
 
 	got := make(chan error, 1)
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := fo.Schedule(ctx, pool.NewTask(func(tctx context.Context) error {
@@ -372,7 +372,7 @@ func TestWaitFromLaneChildOnParentsFanOutPanics(t *testing.T) {
 
 	got := make(chan error, 1)
 	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx, nil); err != nil {
+		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
 		if err := fo.Schedule(ctx, lane.NewTask(func(cctx context.Context) error {

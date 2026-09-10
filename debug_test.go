@@ -58,10 +58,13 @@ func TestDebugUnitOccupantsOneEntryPerNodeAndBranch(t *testing.T) {
 		if err := s1.MoveTo(ctx); err != nil {
 			return err
 		}
-		err := fo.MoveTo(ctx, Tasks{
-			l1.NewTask(func(cctx context.Context) error { return in.MoveTo(cctx) }),
-			l2.NewTask(func(context.Context) error { return nil }),
-		})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx,
+				l1.NewTask(func(cctx context.Context) error { return in.MoveTo(cctx) }),
+				l2.NewTask(func(context.Context) error { return nil }),
+			)
+		}
 		if err != nil {
 			return err
 		}
@@ -228,13 +231,16 @@ func TestDebugUnitOccupantsPoolBodyAndQueue(t *testing.T) {
 	}()
 
 	_ = c.Run(ctx, func(ic context.Context) error {
-		return fo.MoveTo(ic, Tasks{pool.NewTask(func(tctx context.Context) error {
+		if err := fo.MoveTo(ic); err != nil {
+			return err
+		}
+		return fo.Schedule(ic, pool.NewTask(func(tctx context.Context) error {
 			select {
 			case <-release:
 			case <-tctx.Done():
 			}
 			return nil
-		})})
+		}))
 	})
 	<-sampled
 

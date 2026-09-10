@@ -34,14 +34,17 @@ func TestCanceledItemsQueuedWorkIsSkipped(t *testing.T) {
 		if no > 1 {
 			return nil
 		}
-		err := fo.MoveTo(ic, Tasks{pool.NewTasks(scheduled, func(tctx context.Context, i int) error {
-			ran.Add(1)
-			if once.CompareAndSwap(false, true) {
-				close(firstRunning)
-				<-tctx.Done() // released by the shutdown cancellation
-			}
-			return nil
-		})})
+		err := fo.MoveTo(ic)
+		if err == nil {
+			err = fo.Schedule(ic, pool.NewTasks(scheduled, func(tctx context.Context, i int) error {
+				ran.Add(1)
+				if once.CompareAndSwap(false, true) {
+					close(firstRunning)
+					<-tctx.Done() // released by the shutdown cancellation
+				}
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -125,10 +128,13 @@ func TestRetainReleasesWhileItemSitsInFanOut(t *testing.T) {
 		})
 		// Joining w here means the item is admitted to the fan-out and then waits, before its own work is enqueued:
 		// exactly the window where its published rank still says "write".
-		err := fo.MoveTo(ic, Tasks{pool.NewTask(func(context.Context) error {
-			taskRan.Store(true)
-			return nil
-		})}, w)
+		err := fo.MoveTo(ic, w)
+		if err == nil {
+			err = fo.Schedule(ic, pool.NewTask(func(context.Context) error {
+				taskRan.Store(true)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -147,29 +153,45 @@ func TestRetainReleasesWhileItemSitsInFanOut(t *testing.T) {
 }
 
 // TestEmptyFanOutIsAUsableNode: a fan-out with no branches is a degenerate but legal node — it still occupies a
-// position, can be entered (releasing the previous node), and hands back an already-finished wave.
+// position and can be entered (releasing the previous node). An empty visit never schedules, so it holds the item
+// behind at the door until the visitor leaves: the node behaves as if its limit were one.
 func TestEmptyFanOutIsAUsableNode(t *testing.T) {
 	c := NewConveyor()
 	write := c.AddStage(OptName("write"))
-	empty := c.AddFanOut(OptName("empty"))
+	empty := c.AddFanOut(OptName("empty")).SetLimit(4)
 	commit := c.AddStage(OptName("commit"))
+
+	secondInWrite := make(chan struct{}) // item 2 left the start: item 1 is inside empty and released write
+	release := make(chan struct{})
+	go func() {
+		<-secondInWrite
+		// Item 2 tries to enter the fan-out next. The door is closed, and write has no waiting room, so item 2 is
+		// held in write while item 1 stays inside alone.
+		time.Sleep(20 * time.Millisecond)
+		if occ := occupancyOf(c, empty); occ != 1 {
+			t.Errorf("empty fan-out occupancy = %d during an unscheduled visit, want 1 (the door is closed)", occ)
+		}
+		if occ := occupancyOf(c, write); occ != 1 {
+			t.Errorf("write occupancy = %d while the door is closed, want 1 (item 2 is held there)", occ)
+		}
+		close(release)
+	}()
 
 	var seen numbers
 	runNOK(t, c, 8, func(ctx context.Context, no int64) error {
 		if err := write.MoveTo(ctx); err != nil {
 			return err
 		}
-		err := empty.MoveTo(ctx, nil)
-		if err != nil {
+		if no == 2 {
+			close(secondInWrite)
+		}
+		if err := empty.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := empty.Detach(ctx)
-		select {
-		case <-w.Finished():
-		default:
-			t.Errorf("an empty fan-out's wave should be born finished")
+		if no == 1 {
+			<-release
 		}
-		if err := commit.MoveTo(ctx); err != nil {
+		if err := commit.MoveTo(ctx); err != nil { // leaving with an empty body opens the door
 			return err
 		}
 		seen.add(no)

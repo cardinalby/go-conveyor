@@ -80,10 +80,13 @@ func TestErrForeignContextFromFanOutMoveTo(t *testing.T) {
 	pool := fo.AddPool(OptName("pool"))
 
 	var ran atomic.Bool
-	err := fo.MoveTo(context.Background(), Tasks{pool.NewTask(func(context.Context) error {
-		ran.Store(true)
-		return nil
-	})})
+	err := fo.MoveTo(context.Background())
+	if err == nil {
+		err = fo.Schedule(context.Background(), pool.NewTask(func(context.Context) error {
+			ran.Store(true)
+			return nil
+		}))
+	}
 	if !errors.Is(err, ErrForeignContext) || !errors.Is(err, ErrInvalidContext) {
 		t.Fatalf("MoveTo with a foreign context = %v, want ErrForeignContext", err)
 	}
@@ -155,7 +158,10 @@ func TestErrStaleContextFromFinishedItem(t *testing.T) {
 			if !errors.Is(err, ErrStaleContext) || !errors.Is(err, ErrInvalidContext) {
 				t.Errorf("Stage.MoveTo with a stale context = %v, want ErrStaleContext", err)
 			}
-			err = fo.MoveTo(stale, Tasks{pool.NewTask(func(context.Context) error { return nil })})
+			err = fo.MoveTo(stale)
+			if err == nil {
+				err = fo.Schedule(stale, pool.NewTask(func(context.Context) error { return nil }))
+			}
 			if !errors.Is(err, ErrStaleContext) {
 				t.Errorf("FanOut.MoveTo with a stale context = %v, want ErrStaleContext", err)
 			}
@@ -303,7 +309,10 @@ func TestWaveErrorSurfacesFromJoinAndFromErr(t *testing.T) {
 	boom := errors.New("boom")
 
 	runErr := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error { return boom })})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return boom }))
+		}
 		if err != nil {
 			return err
 		}
@@ -361,7 +370,8 @@ func TestErrWrongEnterOrderFanOutBehindItem(t *testing.T) {
 			return err
 		}
 		assertPanics(t, errWrongEnterOrder, func() {
-			_ = fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error { return nil })})
+			_ = fo.MoveTo(ctx)
+			_ = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
 		})
 		checked.Store(true)
 		return nil
@@ -406,13 +416,17 @@ func TestErrNodeAlreadyEnteredFanOut(t *testing.T) {
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error { return nil })})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
+		}
 		if err != nil {
 			return err
 		}
 		w := fo.Detach(ctx)
 		assertPanics(t, errNodeAlreadyEntered, func() {
-			_ = fo.MoveTo(ctx, Tasks{pool.NewTask(func(context.Context) error { return nil })})
+			_ = fo.MoveTo(ctx)
+			_ = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
 		})
 		checked.Store(true)
 		<-w.Finished()
@@ -472,7 +486,8 @@ func TestErrInvalidUnitItemContextFromAnotherConveyor(t *testing.T) {
 	<-otherDone
 }
 
-// TestErrInvalidUnitTaskFromAnotherFanOut: a task may only be submitted to the fan-out that owns its lane.
+// TestErrInvalidUnitTaskFromAnotherFanOut: a task may only be scheduled at the fan-out that owns its branch; the
+// panic is Schedule's, before it touches the context.
 func TestErrInvalidUnitTaskFromAnotherFanOut(t *testing.T) {
 	c := NewConveyor()
 	fo1 := c.AddFanOut(OptName("fo1"))
@@ -481,11 +496,13 @@ func TestErrInvalidUnitTaskFromAnotherFanOut(t *testing.T) {
 	_ = fo2.AddPool(OptName("lane2"))
 
 	panicsInItem(t, c, errInvalidUnit, func(ctx context.Context) {
-		_ = fo2.MoveTo(ctx, Tasks{pool1.NewTask(func(context.Context) error { return nil })})
+		_ = fo2.MoveTo(ctx)
+		_ = fo2.Schedule(ctx, pool1.NewTask(func(context.Context) error { return nil }))
 	})
 }
 
-// TestErrTaskReusedOnSecondSubmission: a Task is lazy, stateful and single-use, so submitting one twice is misuse.
+// TestErrTaskReusedOnSecondSubmission: a Task is lazy, stateful and single-use, so scheduling one twice is misuse;
+// the panic is Schedule's.
 func TestErrTaskReusedOnSecondSubmission(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -493,7 +510,8 @@ func TestErrTaskReusedOnSecondSubmission(t *testing.T) {
 
 	panicsInItem(t, c, errTaskReused, func(ctx context.Context) {
 		task := pool.NewTask(func(context.Context) error { return nil })
-		_ = fo.MoveTo(ctx, Tasks{task, task})
+		_ = fo.MoveTo(ctx)
+		_ = fo.Schedule(ctx, task, task)
 	})
 }
 
@@ -518,9 +536,12 @@ func TestErrNilTaskFuncFromGeneratorFailsItem(t *testing.T) {
 	pool := fo.AddPool(OptName("pool"))
 
 	runErr := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-			yield(nil)
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
+				yield(nil)
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -544,7 +565,10 @@ func TestErrNilTaskFuncFromChannelFailsItem(t *testing.T) {
 	close(ch)
 
 	runErr := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTasksChan(ch)})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTasksChan(ch))
+		}
 		if err != nil {
 			return err
 		}
@@ -569,32 +593,47 @@ func TestErrStageNotEnteredOnUnenteredStage(t *testing.T) {
 }
 
 // TestErrStageNotEnteredAfterLeaving: the same once the item has moved on — the stage was entered, but is no longer
-// occupied.
+// occupied. A fan-out left behind answers with its body state instead: closed by the leave (errBodyClosed), or handed
+// over by Detach (errWorkDetached), whether or not the item still occupies the node.
 func TestErrStageNotEnteredAfterLeaving(t *testing.T) {
-	c := NewConveyor()
-	first := c.AddStage(OptName("first"))
-	second := c.AddStage(OptName("second"))
+	t.Run("leave", func(t *testing.T) {
+		c := NewConveyor()
+		first := c.AddStage(OptName("first"))
+		fo := c.AddFanOut(OptName("fo"))
+		pool := fo.AddPool(OptName("pool"))
+		second := c.AddStage(OptName("second"))
 
-	var checked atomic.Bool
-	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := first.MoveTo(ctx); err != nil {
-			return err
-		}
-		if err := second.MoveTo(ctx); err != nil { // releases the first stage
-			return err
-		}
-		assertPanics(t, errStageNotEntered, func() {
+		panicsInItem(t, c, errStageNotEntered, func(ctx context.Context) {
+			if err := first.MoveTo(ctx); err != nil {
+				return
+			}
+			if err := fo.MoveTo(ctx); err != nil {
+				return
+			}
+			if err := second.MoveTo(ctx); err != nil { // releases the stage and closes the fan-out's body
+				return
+			}
+			assertPanics(t, errBodyClosed, func() {
+				_ = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
+			})
+			assertPanics(t, errBodyClosed, func() { _ = fo.Wait(ctx) })
 			_ = first.Retain(ctx, func() error { return nil })
 		})
-		checked.Store(true)
-		return nil
 	})
-	if err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatalf("run failed: %v", err)
-	}
-	if !checked.Load() {
-		t.Fatalf("the occupancy check did not run")
-	}
+	t.Run("detach", func(t *testing.T) {
+		c := NewConveyor()
+		fo := c.AddFanOut(OptName("fo"))
+		pool := fo.AddPool(OptName("pool"))
+
+		panicsInItem(t, c, errWorkDetached, func(ctx context.Context) {
+			if err := fo.MoveTo(ctx); err != nil {
+				return
+			}
+			_ = fo.Detach(ctx) // the item still occupies the node, but its body is gone
+			assertPanics(t, errWorkDetached, func() { _ = fo.Wait(ctx) })
+			_ = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
+		})
+	})
 }
 
 // TestErrWrongScopeChildMovingToConveyorNode: a child item travels its lane's interior only; a node of the
@@ -608,14 +647,17 @@ func TestErrWrongScopeChildMovingToConveyorNode(t *testing.T) {
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{lane.NewTask(func(cctx context.Context) error {
-			if err := inner.MoveTo(cctx); err != nil {
-				return err
-			}
-			assertPanics(t, errWrongScope, func() { _ = commit.MoveTo(cctx) })
-			checked.Store(true)
-			return nil
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, lane.NewTask(func(cctx context.Context) error {
+				if err := inner.MoveTo(cctx); err != nil {
+					return err
+				}
+				assertPanics(t, errWrongScope, func() { _ = commit.MoveTo(cctx) })
+				checked.Store(true)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -658,10 +700,11 @@ func TestErrWrongScopeIsCheckedOnEveryEntryPoint(t *testing.T) {
 			_ = s.Retain(ctx, func() error { return nil })
 		}},
 		{"FanOut.MoveTo", func(_ Stage, f FanOut, b Branch, ctx context.Context) {
-			_ = f.MoveTo(ctx, Tasks{b.NewTask(func(context.Context) error { return nil })})
+			_ = f.MoveTo(ctx)
+			_ = f.Schedule(ctx, b.NewTask(func(context.Context) error { return nil }))
 		}},
 		{"FanOut.TryMoveTo", func(_ Stage, f FanOut, b Branch, ctx context.Context) {
-			_, _ = f.TryMoveTo(ctx, Tasks{b.NewTask(func(context.Context) error { return nil })})
+			_, _ = f.TryMoveTo(ctx)
 		}},
 		{"FanOut.Detach", func(_ Stage, f FanOut, _ Branch, ctx context.Context) { _ = f.Detach(ctx) }},
 		{"FanOut.Schedule", func(_ Stage, f FanOut, b Branch, ctx context.Context) {
@@ -684,8 +727,9 @@ func TestErrWrongScopeIsCheckedOnEveryEntryPoint(t *testing.T) {
 	}
 }
 
-// TestErrCannotMoveFromNonTravellingWork: work on a lane without interior nodes has nowhere to go, and its context
-// carries the item that scheduled it — moving with it would move that item from a lane goroutine.
+// TestErrCannotMoveFromNonTravellingWork: a pool's work has nowhere to go, and its context carries the item that
+// scheduled it — moving or waiting with it would move or park that item from a pool goroutine. Schedule at the pool's
+// own fan-out is the one thing that context is good for.
 func TestErrCannotMoveFromNonTravellingWork(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -693,13 +737,25 @@ func TestErrCannotMoveFromNonTravellingWork(t *testing.T) {
 	commit := c.AddStage(OptName("commit"))
 
 	var checked atomic.Bool
+	var spawned atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx, Tasks{pool.NewTask(func(cctx context.Context) error {
-			assertPanics(t, errCannotMove, func() { _ = commit.MoveTo(cctx) })
-			assertPanics(t, errCannotMove, func() { _ = commit.Retain(cctx, func() error { return nil }) })
-			checked.Store(true)
-			return nil
-		})})
+		err := fo.MoveTo(ctx)
+		if err == nil {
+			err = fo.Schedule(ctx, pool.NewTask(func(cctx context.Context) error {
+				assertPanics(t, errCannotMove, func() { _ = commit.MoveTo(cctx) })
+				assertPanics(t, errCannotMove, func() { _, _ = commit.TryMoveTo(cctx) })
+				assertPanics(t, errCannotMove, func() { _ = commit.Retain(cctx, func() error { return nil }) })
+				assertPanics(t, errCannotMove, func() { _ = fo.Wait(cctx) })
+				if err := fo.Schedule(cctx, pool.NewTask(func(context.Context) error {
+					spawned.Store(true)
+					return nil
+				})); err != nil {
+					t.Errorf("Schedule from a pool task = %v, want nil", err)
+				}
+				checked.Store(true)
+				return nil
+			}))
+		}
 		if err != nil {
 			return err
 		}
@@ -712,6 +768,9 @@ func TestErrCannotMoveFromNonTravellingWork(t *testing.T) {
 	}
 	if !checked.Load() {
 		t.Fatalf("the cannot-move check did not run")
+	}
+	if !spawned.Load() {
+		t.Fatalf("the task scheduled from a pool task did not run")
 	}
 }
 
@@ -732,7 +791,10 @@ func TestErrForeignWaveFromAnotherItem(t *testing.T) {
 		no, _ := ItemNoFromContext(ic)
 		switch no {
 		case 1:
-			err := fo.MoveTo(ic, Tasks{pool.NewTask(func(context.Context) error { return nil })})
+			err := fo.MoveTo(ic)
+			if err == nil {
+				err = fo.Schedule(ic, pool.NewTask(func(context.Context) error { return nil }))
+			}
 			if err != nil {
 				return err
 			}
