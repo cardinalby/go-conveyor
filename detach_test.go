@@ -36,7 +36,10 @@ func TestDetachLetsTheItemMoveOnWithoutWaiting(t *testing.T) {
 		}
 		events.add("mid")
 		close(pastMid)
-		if err := commit.MoveTo(ctx, w); err != nil {
+		if err := commit.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := w.Wait(ctx); err != nil {
 			return err
 		}
 		events.add("commit")
@@ -102,7 +105,10 @@ func TestDetachedSlotOutlivesTheItemsPresence(t *testing.T) {
 			close(inCommit)
 			<-release
 		}
-		return final.MoveTo(ic, w)
+		if err := final.MoveTo(ic); err != nil {
+			return err
+		}
+		return w.Wait(ic)
 	})
 
 	if got := occWhileInCommit.Load(); got != 1 {
@@ -135,7 +141,10 @@ func TestDetachedWorkStillBoundedByTheLimit(t *testing.T) {
 		}
 		wave := fo.Detach(ctx)
 		w.scheduled()
-		return commit.MoveTo(ctx, wave)
+		if err := commit.MoveTo(ctx); err != nil {
+			return err
+		}
+		return wave.Wait(ctx)
 	})
 
 	if peak := wg.peakValue(); peak > limit {
@@ -204,7 +213,10 @@ func TestDetachAfterWorkAlreadyFinished(t *testing.T) {
 		if err := w.Err(); err != nil {
 			t.Fatalf("wave err = %v, want nil", err)
 		}
-		return commit.MoveTo(ctx, w)
+		if err := commit.MoveTo(ctx); err != nil {
+			return err
+		}
+		return w.Wait(ctx)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -364,7 +376,10 @@ func TestDetachedSlotFreedWhenTheWorkFinishes(t *testing.T) {
 		<-w.Finished()
 		close(taskDone)
 		<-stay // hold commit while the slot is checked
-		return final.MoveTo(ic, w)
+		if err := final.MoveTo(ic); err != nil {
+			return err
+		}
+		return w.Wait(ic)
 	})
 
 	if !freed.Load() {
@@ -390,8 +405,11 @@ func TestDetachTwiceAfterMovingOnPanics(t *testing.T) {
 		}
 		w := fo.Detach(ctx)
 		<-w.Finished()
-		if err := commit.MoveTo(ctx, w); err != nil {
+		if err := commit.MoveTo(ctx); err != nil {
 			t.Fatalf("move failed: %v", err)
+		}
+		if err := w.Wait(ctx); err != nil {
+			t.Fatalf("wait failed: %v", err)
 		}
 		if occ := occupancyOf(c, fo); occ != 0 {
 			t.Errorf("fan-out occupancy = %d after the item moved on, want 0", occ)

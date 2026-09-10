@@ -83,7 +83,7 @@ var (
 	// errCannotMove is panicked with when a context handed to a Pool's work is used to move or wait: there is nowhere
 	// to go, the work holds a slot it must not wait on, and the context carries the item that scheduled the work,
 	// which must not be moved from a task goroutine. Such a context may only Schedule at its own fan-out.
-	errCannotMove = errors.New("this work cannot move")
+	errCannotMove = errors.New("pool work cannot move or wait")
 
 	// errConveyorRunning is panicked with when the topology is extended while the conveyor is running.
 	errConveyorRunning = errors.New("cannot change the topology while the conveyor is running")
@@ -126,7 +126,7 @@ var (
 	// single-use).
 	errTaskReused = errors.New("tasks are single-use")
 
-	// errForeignWave is panicked with when a wave is passed as a join target of an item that did not create it (or
-	// a nil/foreign Wave implementation). A wave is only meaningful to its own item.
+	// errForeignWave is panicked with when Wave.Wait is called with the context of an item that did not create the
+	// wave (or on a nil wave). A wave is only meaningful to its own item.
 	errForeignWave = errors.New("wave belongs to another item")
 )

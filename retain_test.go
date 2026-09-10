@@ -143,11 +143,14 @@ func TestRetainJoinWaitsForBgOp(t *testing.T) {
 			bgDone.Store(true)
 			return nil
 		})
-		if err := commit.MoveTo(ctx, w); err != nil {
+		if err := commit.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := w.Wait(ctx); err != nil {
 			return err
 		}
 		if !bgDone.Load() {
-			t.Errorf("the join returned before the retained work had finished")
+			t.Errorf("Wait returned before the retained work had finished")
 		}
 		joined.Store(true)
 		return nil
@@ -156,12 +159,12 @@ func TestRetainJoinWaitsForBgOp(t *testing.T) {
 		t.Fatalf("run failed: %v", err)
 	}
 	if !joined.Load() {
-		t.Fatalf("the item never reached the joining stage")
+		t.Fatalf("the item never waited for the wave")
 	}
 }
 
-// TestRetainJoinObservesBackgroundEffect: by the time the joining MoveTo returns nil, the retained work's effect
-// is visible to the code that runs in that stage.
+// TestRetainJoinObservesBackgroundEffect: by the time Wave.Wait returns nil, the retained work's effect is visible
+// to the code that runs in that stage.
 func TestRetainJoinObservesBackgroundEffect(t *testing.T) {
 	c := NewConveyor()
 	write := c.AddStage(OptName("write"))
@@ -180,7 +183,10 @@ func TestRetainJoinObservesBackgroundEffect(t *testing.T) {
 			mu.Unlock()
 			return nil
 		})
-		if err := commit.MoveTo(ctx, w); err != nil {
+		if err := commit.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := w.Wait(ctx); err != nil {
 			return err
 		}
 		mu.Lock()
@@ -208,7 +214,11 @@ func TestRetainJoinReturnsBgOpError(t *testing.T) {
 			return err
 		}
 		w := write.Retain(ctx, func() error { return boom })
-		joinErr = commit.MoveTo(ctx, w)
+		<-w.Finished() // the bgOp may fail while the item waits for admission; the wave's error is what we want
+		if err := commit.MoveTo(ctx); err != nil && !errors.Is(err, boom) {
+			return err
+		}
+		joinErr = w.Wait(ctx)
 		if joinErr != nil {
 			return joinErr
 		}
@@ -220,7 +230,7 @@ func TestRetainJoinReturnsBgOpError(t *testing.T) {
 		t.Fatalf("join error = %v, want %v", joinErr, boom)
 	}
 	if committed.Load() {
-		t.Fatalf("the joining stage ran its work although the retained work had failed")
+		t.Fatalf("the stage ran its work although the retained work had failed")
 	}
 	if !errors.Is(err, boom) {
 		t.Fatalf("Run error = %v, want %v", err, boom)
@@ -450,11 +460,17 @@ func TestRetainSeveralStagesJoinedTogether(t *testing.T) {
 			bDone.Store(true)
 			return nil
 		})
-		if err := commit.MoveTo(ctx, wa, wb); err != nil {
+		if err := commit.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := wa.Wait(ctx); err != nil {
+			return err
+		}
+		if err := wb.Wait(ctx); err != nil {
 			return err
 		}
 		if !aDone.Load() || !bDone.Load() {
-			t.Errorf("the join returned with a=%v b=%v, want both done", aDone.Load(), bDone.Load())
+			t.Errorf("the waits returned with a=%v b=%v, want both done", aDone.Load(), bDone.Load())
 		}
 		if got := occupancyOf(c, a); got != 0 {
 			t.Errorf("stage a occupancy = %d after its retained work finished and the item moved on, want 0", got)
@@ -501,11 +517,17 @@ func TestRetainTwiceOnSameStageBothJoined(t *testing.T) {
 		if err := b.MoveTo(ctx); err != nil {
 			return err
 		}
-		if err := commit.MoveTo(ctx, fast, slow); err != nil {
+		if err := commit.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fast.Wait(ctx); err != nil {
+			return err
+		}
+		if err := slow.Wait(ctx); err != nil {
 			return err
 		}
 		if !fastDone.Load() || !slowDone.Load() {
-			t.Errorf("the join returned with fast=%v slow=%v, want both done", fastDone.Load(), slowDone.Load())
+			t.Errorf("the waits returned with fast=%v slow=%v, want both done", fastDone.Load(), slowDone.Load())
 		}
 		if got := occupancyOf(c, a); got != 0 {
 			t.Errorf("stage a occupancy = %d after both retains finished, want 0", got)
@@ -610,7 +632,10 @@ func TestRetainByChildHoldsLaneInteriorStage(t *testing.T) {
 					rec.add("bg-done")
 					return nil
 				})
-				if err := tail.MoveTo(cctx, rw); err != nil {
+				if err := tail.MoveTo(cctx); err != nil {
+					return err
+				}
+				if err := rw.Wait(cctx); err != nil {
 					return err
 				}
 				joinSawBgOp.Store(bgRan.Load())

@@ -167,7 +167,7 @@ func (b *branch) Limit() int { return int(b.start.limit.Load()) }
 
 func (b *branch) NewTask(fn TaskFunc) Task {
 	if fn == nil {
-		panic(errNilTaskFunc)
+		panic(fmt.Errorf("%s.NewTask: %w", b, errNilTaskFunc))
 	}
 	return Task{branch: b, src: &singleSource{fn: fn}}
 }
@@ -177,7 +177,7 @@ func (b *branch) NewTasks(count int, fn func(ctx context.Context, index int) err
 		return Task{branch: b}
 	}
 	if fn == nil {
-		panic(errNilTaskFunc)
+		panic(fmt.Errorf("%s.NewTasks: %w", b, errNilTaskFunc))
 	}
 	return Task{branch: b, src: &countSource{count: count, fn: fn}}
 }

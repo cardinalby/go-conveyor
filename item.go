@@ -132,7 +132,7 @@ func (it *item) hasLiveWaves() bool {
 	return false
 }
 
-// firstUnackedWaveErr returns the first error from a wave whose outcome nobody observed (no join, no Err call after
+// firstUnackedWaveErr returns the first error from a wave whose outcome nobody observed (no Wait, no Err call after
 // it finished). Caller holds run.mu, after every wave has finished.
 func (it *item) firstUnackedWaveErr() error {
 	for _, w := range it.waves {

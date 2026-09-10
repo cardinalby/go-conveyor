@@ -31,9 +31,14 @@ c.Run(ctx, func(ctx context.Context) error {
     }
     // (3) write to db2
     
-    // Release "db2", enter "commit" and wait for db1.Retain callback to finish (joins the waves) 
-    // Any error returned by the callback will be returned by MoveTo and stops the conveyor
-    if err := commit.MoveTo(ctx, db1wave); err != nil {
+    // Release "db2" and enter "commit"
+    if err := commit.MoveTo(ctx); err != nil {
+        return err
+    }
+    // Wait for the db1.Retain callback to finish, holding the "commit" slot meanwhile. Put the Wait before
+    // commit.MoveTo to hold the "db2" slot instead. An error returned by the callback is returned here as
+    // "db1 work: <err>" and stops the conveyor.
+    if err := db1wave.Wait(ctx); err != nil {
         return err
     }
 
@@ -43,6 +48,11 @@ c.Run(ctx, func(ctx context.Context) error {
 ```
 
 ![retain previous stage](./res/readme/retain.svg)
+
+`Wave.Wait` may be called only by the item that created the wave. A wave nobody waits for is not lost: an error on it
+fails the item when it completes. If the callback fails while other work of the item is still winding down, `Wait`
+returns the item's cancellation cause instead; wait for `Finished` and read `Err`, or call `Wait` again after
+`Finished` is closed, to observe the wave's own error.
 
 ---
 

@@ -252,8 +252,8 @@ order, then argument order within one call, then index / yield order within one 
 
 ## FanOut.Detach()
 
-If you don't need to wait for the results of the fan-out's tasks at the next stage's `MoveTo()` call, you can detach
-the body and wait for the tasks to finish later
+If you don't need to wait for the results of the fan-out's tasks when leaving it, you can detach the body and wait
+for the tasks to finish later with `Wave.Wait`
 (similar to [Retain](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Stage.Retain)):
 
 ```go
@@ -271,18 +271,29 @@ if err := report.MoveTo(ctx); err != nil {
 }
 // work in another stage
 
-// - Wait for the whole tree to finish and return an error if any of it failed
-if err := commit.MoveTo(ctx, wave); err != nil {
+// - Wait for the whole tree to finish and return an error if any of it failed ("crawl work: <err>")
+if err := commit.MoveTo(ctx); err != nil {
+    return err
+}
+if err := wave.Wait(ctx); err != nil {
     return err
 }
 // commit
 ```
 
+Where the item stands while it waits is your choice: `Wait` after `commit.MoveTo` holds the **commit** slot, `Wait`
+before it holds the **report** slot. Only the item that created the wave may `Wait` on it.
+
 Detaching moves the wait, not the ceiling: the **crawl** slot is still held until the work finishes (it follows the
 work instead of the item), so `SetLimit` keeps bounding how many items have work outstanding. The detached tasks may
 still `Schedule` follow-ups into the wave while it runs; `Finished` closes when the whole tree is done. After
 `Detach` the ItemProcessor may not `Schedule` or `Wait` at this fan-out again (that panics). And an error on a wave
-that nobody ever joins is not lost — it fails the item when it completes.
+that nobody ever waits for is not lost — it fails the item when it completes.
+
+A failing task cancels the item, so a `Wave.Wait` in progress wakes at once. If the wave is finished by then, `Wait`
+returns its error. If other tasks of the tree are still winding down, `Wait` returns the item's cancellation cause
+instead and the wave's error stays unobserved; wait for `Finished` and read `Err`, or call `Wait` again after
+`Finished` is closed.
 
 **`Wave.Started`** closes once the wave is sealed (detached) and every task the *ItemProcessor* scheduled has been
 handed out — its streaming sources (`NewTasksGen`, `NewTasksChan`) drained. Follow-ups scheduled by tasks do not

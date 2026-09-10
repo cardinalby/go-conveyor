@@ -126,9 +126,12 @@ func TestRetainReleasesWhileItemSitsInFanOut(t *testing.T) {
 			bgDone.Store(true)
 			return nil
 		})
-		// Joining w here means the item is admitted to the fan-out and then waits, before its own work is enqueued:
-		// exactly the window where its published rank still says "write".
-		err := fo.MoveTo(ic, w)
+		// Waiting for w inside the fan-out means the item is admitted and then waits, before its own work is
+		// enqueued: exactly the window where its published rank still says "write".
+		err := fo.MoveTo(ic)
+		if err == nil {
+			err = w.Wait(ic)
+		}
 		if err == nil {
 			err = fo.Schedule(ic, pool.NewTask(func(context.Context) error {
 				taskRan.Store(true)
@@ -338,7 +341,10 @@ func TestRetainedStageFillsItsWaitingRoom(t *testing.T) {
 				return nil
 			})
 			// Moving on does NOT give up s: the retained slot outlives the move, so the queue stays blocked.
-			return after.MoveTo(ic, w)
+			if err := after.MoveTo(ic); err != nil {
+				return err
+			}
+			return w.Wait(ic)
 		}
 		return after.MoveTo(ic)
 	})

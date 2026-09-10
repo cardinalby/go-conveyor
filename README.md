@@ -154,7 +154,7 @@ See the [docs](docs/README.md) for guides on these features:
 - [Retain previous stage longer](docs/1_retain-previous-stage.md)
 - [Queues](docs/2_queues.md)
 - [Shared Stages](docs/3_shared-stages.md)
-- [Fan-out (scatter/gather)](docs/4_fan-out.md): pools, `Schedule` / `Wait` rounds, tasks that spawn follow-ups, `Detach`
+- [Fan-out (scatter/gather)](docs/4_fan-out.md): pools, `Schedule` / `Wait` rounds, tasks that spawn follow-ups, `Detach` and `Wave.Wait`
 - [Lanes: when a branch is a pipeline](docs/5_lanes.md)
 - [Conditional MoveTo](docs/6_conditional-move-to.md)
 - [Observability](docs/7_observability.md)

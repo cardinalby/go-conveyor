@@ -9,7 +9,7 @@ import (
 
 // This file pins FanOut.Schedule: adding work to an open body from the ItemProcessor (roots and rounds), from a
 // running task or a lane child (spawns), the place spawned work takes in a branch queue, and the calls that are
-// refused. Every test enters with MoveTo(ctx, nil) and adds work with Schedule — the shape the API is moving to.
+// refused. Every test enters with MoveTo(ctx) and adds work with Schedule.
 
 // assertEvents fails unless got is exactly want, in order.
 func assertEvents(t *testing.T, got, want []string) {

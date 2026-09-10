@@ -1,10 +1,13 @@
 package conveyor
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // Wave is a handle to background work an item started: a Stage.Retain operation, or work at a fan-out taken over
-// with FanOut.Detach. Join it by naming it in a later MoveTo — commit.MoveTo(ctx, wave) — which waits for it and
-// returns its error.
+// with FanOut.Detach. Wait for it with Wait, before or after the next MoveTo — the choice decides which node's slot
+// the item holds meanwhile — or read Finished and Err.
 //
 // A wave whose error nobody observes still fails the item when it completes.
 type Wave interface {
@@ -22,6 +25,21 @@ type Wave interface {
 	// Err returns the first error the wave's work produced, or nil. It is only final once Finished is closed.
 	// Reading it counts as observing the outcome.
 	Err() error
+
+	// Wait blocks until the wave is finished and returns its error, named after the node the work belongs to
+	// ("<node> work: ..."), or nil. Only the item that created the wave may call it, with its own context or one
+	// derived from it.
+	//
+	// A failing task poisons the item, so a wait in progress wakes at once. If the wave is finished by then, its
+	// error is returned and counts as observed. If the wave is still winding down (other tasks running), the
+	// item's cancellation cause is returned and the outcome stays unobserved: wait for Finished and read Err, or
+	// call Wait again after Finished is closed. A canceled item never gets nil. A canceled call context (a deadline
+	// the caller added) ends the wait the same way.
+	//
+	// It returns ErrForeignContext for a context without an item and ErrStaleContext once the item has finished.
+	// It panics on misuse: a wave of another item (a lane child may wait only on its own waves), or a task's
+	// context (a task must never wait for other work).
+	Wait(ctx context.Context) error
 }
 
 // wave is the Wave implementation. All fields are guarded by run.mu (the channels are created up front, so
@@ -59,8 +77,8 @@ type wave struct {
 	// err is the first error produced by the wave's work; it is also set as the cancellation cause of the
 	// owning item's context (fail-fast).
 	err error
-	// acked records that the error was observed — by a join in MoveTo, or by an Err call after the wave
-	// finished. An unacked error fails the item at completion.
+	// acked records that the error was observed — by Wait, by an Err call after the wave finished, by FanOut.Wait
+	// on the open body, or by the leave that closes it. An unacked error fails the item at completion.
 	acked bool
 	// abandoned records that err is a cancellation cause stored by recordAbandoned, not a failure of the wave's own
 	// work. A later real failure replaces it (see recordErr); a callback error is never replaced.
@@ -266,30 +284,54 @@ func (w *wave) releaseRetained() {
 	w.run.releaseBelow(w.it, w.it.reachedRank)
 }
 
-// join waits for every listed wave (in order), marks their errors observed and returns the first error. The
-// caller holds run.mu; on return the lock is still held. A wave from another item is misuse and panics — a wave
-// is only meaningful to the item that created it.
-func (r *run) join(ctx context.Context, it *item, waves []Wave) error {
-	for _, jw := range waves {
-		w, ok := jw.(*wave)
-		if !ok || w == nil {
-			panic(errForeignWave)
-		}
-		// A standalone wave (it == nil) is one a failed call handed back instead of real work: it is already
-		// finished, so joining it just surfaces the reason rather than punishing a caller who ignored the error.
-		if w.it != nil && w.it != it {
-			panic(errForeignWave)
-		}
-		// A failing task poisons its item, so the join wakes through the cancellation branch; the finished wave's
-		// own error is what the caller is told and so what counts as observed. A finished clean wave, or one still
-		// running, leaves the cancellation cause as the answer.
-		if err := r.waitUntil(ctx, it, w.isFinished); err != nil && (!w.isFinished() || w.err == nil) {
-			return err
-		}
-		w.acked = true
-		if w.err != nil {
-			return w.err
-		}
+// owner describes the wave for messages: "the wave of <node>" for a body or a Retain, "the wave" otherwise.
+func (w *wave) owner() string {
+	u := w.atNode
+	if u == nil {
+		u = w.retainUnit
+	}
+	if u == nil {
+		return "the wave"
+	}
+	return fmt.Sprintf("the wave of %s", u.owner)
+}
+
+// Wait blocks until the wave is finished and reports its outcome (see the Wave interface). Only the wave's own item
+// may wait for it — a wave is only meaningful to the item that created it.
+func (w *wave) Wait(ctx context.Context) error {
+	if w == nil {
+		panic(fmt.Errorf("cannot wait for a nil wave: %w", errForeignWave))
+	}
+	// A standalone wave is one a failed call handed back instead of real work: it is already finished and belongs to
+	// no item, so waiting just surfaces the reason rather than punishing a caller who ignored the error.
+	if w.run == nil {
+		return w.err
+	}
+	if m, ok := ctx.Value(poolWorkCtxKey).(poolWorkMarker); ok {
+		panic(poolWorkPanic("wait for", w.owner(), m.col.branch))
+	}
+	it, err := itemFromContext(ctx)
+	if err != nil {
+		return err
+	}
+	if it != w.it {
+		panic(fmt.Errorf("cannot wait for %s: %w", w.owner(), errForeignWave))
+	}
+	r := w.run
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if it.finished {
+		return ErrStaleContext // a context decoupled from cancellation; normally waitUntil catches the cancel first
+	}
+	// A failing task poisons its item, so the wait wakes through the cancellation branch; the finished wave's own
+	// error is what the caller is told and so what counts as observed. A finished clean wave, or one still running,
+	// leaves the cancellation cause as the answer.
+	if err := r.waitUntil(ctx, it, w.isFinished); err != nil && (!w.isFinished() || w.err == nil) {
+		return err
+	}
+	w.acked = true
+	if w.err != nil {
+		return joinedErr(w)
 	}
 	return nil
 }

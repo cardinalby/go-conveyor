@@ -15,7 +15,8 @@ import (
 // the item schedules work onto branches (Pool or Lane) that run it in parallel. An item advances between nodes with
 // MoveTo.
 //
-// Background work started with Stage.Retain or FanOut.Detach is represented by a Wave, joined with a later MoveTo.
+// Background work started with Stage.Retain or FanOut.Detach is represented by a Wave, waited for with Wave.Wait or
+// read through its Finished and Err.
 type Conveyor interface {
 	// AddStage adds a Stage to the end of the conveyor, admitting one item at a time by default. Chain SetLimit and
 	// SetQueueSize to adjust its capacity, and pass OptName to name it.
@@ -194,17 +195,17 @@ func (c *conveyor) validateUnit(u *unit) {
 // validateUnit only proves the handle belongs to its own conveyor, not that it matches the acting item.
 func (c *conveyor) validateItemConveyor(it *item) {
 	if it.run.conveyor != c {
-		panic(fmt.Errorf("node used with a context from a different conveyor: %w", errInvalidUnit))
+		panic(fmt.Errorf("context of an item from a different conveyor used with a node of this one: %w", errInvalidUnit))
 	}
 }
 
-// validateScope panics if the acting item cannot move to u because u lives in a different part of the topology:
-// a child item running inside a lane may only move through that lane's own nodes, and an item of the root series
-// may not reach into a lane. Both are wiring mistakes with no benign occurrence.
-func (c *conveyor) validateScope(it *item, u *unit) {
+// validateScope panics if the acting item cannot use u because u lives in a different part of the topology: a child
+// item running inside a lane may only use that lane's own nodes, and an item of the root series may not reach into a
+// lane. Both are wiring mistakes with no benign occurrence. verb names the refused call ("move to", "wait at", ...).
+func (c *conveyor) validateScope(it *item, verb string, u *unit) {
 	if it.scope != u.scope {
-		panic(fmt.Errorf("cannot move to %s: it belongs to %s, but this item runs in %s: %w",
-			u, c.scopeName(u.scope), c.scopeName(it.scope), errWrongScope))
+		panic(fmt.Errorf("cannot %s %s: it belongs to %s, but this item runs in %s: %w",
+			verb, u, c.scopeName(u.scope), c.scopeName(it.scope), errWrongScope))
 	}
 }
 

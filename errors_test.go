@@ -308,8 +308,8 @@ func TestShutdownErrorFromItemError(t *testing.T) {
 	}
 }
 
-// TestWaveErrorSurfacesFromJoinAndFromErr: a wave's error reaches the item through the MoveTo that joins it and
-// through Wave.Err, and from there it fails the run.
+// TestWaveErrorSurfacesFromJoinAndFromErr: a wave's error reaches the item through Wave.Wait and through Wave.Err,
+// and from there it fails the run.
 func TestWaveErrorSurfacesFromJoinAndFromErr(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -326,9 +326,15 @@ func TestWaveErrorSurfacesFromJoinAndFromErr(t *testing.T) {
 			return err
 		}
 		w := fo.Detach(ctx)
-		joinErr := commit.MoveTo(ctx, w)
+		// The task may fail before or after this move: the move then returns the poison, or nil. Either way the
+		// wave's own error is what Wait reports once the wave is finished.
+		if err := commit.MoveTo(ctx); err != nil && !errors.Is(err, boom) {
+			t.Errorf("MoveTo = %v, want nil or the task error as the cause", err)
+		}
+		<-w.Finished()
+		joinErr := w.Wait(ctx)
 		if !errors.Is(joinErr, boom) {
-			t.Errorf("join error = %v, want the task error", joinErr)
+			t.Errorf("Wait error = %v, want the task error", joinErr)
 		}
 		<-w.Finished()
 		if !errors.Is(w.Err(), boom) {
@@ -813,7 +819,7 @@ func TestErrForeignWaveFromAnotherItem(t *testing.T) {
 		case 2:
 			defer cancel()
 			foreign := <-waves
-			assertPanics(t, errForeignWave, func() { _ = commit.MoveTo(ic, foreign) })
+			assertPanics(t, errForeignWave, func() { _ = foreign.Wait(ic) })
 			checked.Store(true)
 			return nil
 		default:
@@ -828,14 +834,11 @@ func TestErrForeignWaveFromAnotherItem(t *testing.T) {
 	}
 }
 
-// TestErrForeignWaveFromNilWave: a nil (or otherwise foreign) Wave implementation is caught by the same check.
+// TestErrForeignWaveFromNilWave: Wait on a nil *wave is caught by the same check (a nil Wave interface value cannot
+// be: there is nothing to dispatch on).
 func TestErrForeignWaveFromNilWave(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
-
-	panicsInItem(t, c, errForeignWave, func(ctx context.Context) {
-		_ = s.MoveTo(ctx, nil)
-	})
+	var w *wave
+	assertPanics(t, errForeignWave, func() { _ = w.Wait(context.Background()) })
 }
 
 // TestErrConveyorRunningOnTopologyChange: the topology may not be extended while the conveyor is running.

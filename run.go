@@ -32,6 +32,7 @@ type run struct {
 	nextItemNo int64 // last number assigned to a root item this run; a child inherits its parent's (see item.no)
 	nextSeq    int64 // last creation sequence number handed to any item of this run, root or child (see item.seq)
 	idle       int   // workers parked in acquireItem waiting for the start stage (0 or 1; extras retire)
+	parked     int   // callers blocked in waitUntil (a node method or Wave.Wait); read by tests to sync on a wait
 	// spawning counts workers that have been started but have not yet reached acquireItem. Together with idle it
 	// answers "is a worker already on its way to take the next item", which is what the replacement decision in
 	// acquireItem needs. Counting only idle would ignore a worker that exists but has not been scheduled yet, so a

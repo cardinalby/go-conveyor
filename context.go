@@ -62,18 +62,17 @@ func itemFromContext(ctx context.Context) (*item, error) {
 
 // resolveItem returns the item acting under ctx for a node method of this conveyor. It combines the checks every
 // such method needs:
-//   - it panics (errCannotMove) if ctx belongs to a Pool's work, which has nowhere to move — the context
-//     carries the scheduling item, so without this check the work would move that item from under its own
-//     ItemProcessor;
+//   - it panics (errCannotMove) if ctx belongs to a Pool's work, which has nowhere to move and must not wait — the
+//     context carries the scheduling item, so without this check the work would move that item from under its own
+//     ItemProcessor; verb names the refused call ("move to", "wait at", ...) so the hint fits it;
 //   - it returns ErrForeignContext if ctx carries no conveyor item;
 //   - it panics (errInvalidUnit) if the item belongs to a different conveyor — a handle from this conveyor may only
 //     be used with one of its own items.
 //
 // Callers still hold their own it.finished / cancellation handling.
-func (c *conveyor) resolveItem(ctx context.Context) (*item, error) {
+func (c *conveyor) resolveItem(ctx context.Context, verb string, u *unit) (*item, error) {
 	if m, ok := ctx.Value(poolWorkCtxKey).(poolWorkMarker); ok {
-		panic(fmt.Errorf("this context belongs to work on %s, which has no nodes of its own to move through "+
-			"(use AddLane for a branch whose work travels): %w", m.col.branch, errCannotMove))
+		panic(poolWorkPanic(verb, u, m.col.branch))
 	}
 	it, err := itemFromContext(ctx)
 	if err != nil {
@@ -81,6 +80,24 @@ func (c *conveyor) resolveItem(ctx context.Context) (*item, error) {
 	}
 	c.validateItemConveyor(it)
 	return it, nil
+}
+
+// poolWorkPanic builds the errCannotMove panic for a node method called with a pool task's context. A move gets the
+// AddLane hint; a wait gets the hold-and-wait reason and the continuation hint; anything else is refused plainly.
+// target is the node or the wave the call was about.
+func poolWorkPanic(verb string, target any, pool fmt.Stringer) error {
+	at := fmt.Sprintf(" %s", target)
+	switch verb {
+	case "move to", "try move to":
+		return fmt.Errorf("cannot %s%s with the context of a task on %s: a task has no nodes of its own to move "+
+			"through (use AddLane for a branch whose work travels): %w", verb, at, pool, errCannotMove)
+	case "wait at", "wait for":
+		return fmt.Errorf("cannot %s%s with the context of a task on %s: a running task holds a slot and must not "+
+			"wait for other work (schedule the follow-up as a new task instead): %w", verb, at, pool, errCannotMove)
+	default:
+		return fmt.Errorf("cannot %s%s with the context of a task on %s: only the ItemProcessor may: %w",
+			verb, at, pool, errCannotMove)
+	}
 }
 
 // resolveCaller returns who acts under ctx for FanOut.Schedule, the one node method open to a pool's work: the
@@ -101,9 +118,8 @@ func (c *conveyor) resolveCaller(ctx context.Context) (*taskCollection, *item, e
 }
 
 // actingItem is the preamble every node method shares: it validates the handle and the acting item, then takes the
-// run's lock. On success it returns the item and its run WITH r.mu HELD — the caller must unlock it (the package
-// already returns under a held lock in run.join; the alternative, a closure, does not fit the four different return
-// shapes of the node methods).
+// run's lock. On success it returns the item and its run WITH r.mu HELD — the caller must unlock it (the alternative,
+// a closure, does not fit the four different return shapes of the node methods).
 //
 // checkCancel additionally declines a canceled item — canceled on the call context or on its own context, see
 // item.cancelCause. The blocking paths leave it false: they get the cancellation check from waitUntil, which tests it
@@ -113,14 +129,15 @@ func (c *conveyor) resolveCaller(ctx context.Context) (*taskCollection, *item, e
 //
 // It panics on the same static misuse the individual methods used to check inline: a foreign handle (errInvalidUnit),
 // a context belonging to a pool's non-movable work (errCannotMove), or a node outside the item's series (errWrongScope).
-// Errors — a foreign or stale context — are returned for the caller to wrap with its own operation prefix.
-func (c *conveyor) actingItem(ctx context.Context, u *unit, checkCancel bool) (*item, *run, error) {
+// verb names the call in those panics ("move to", "wait at", ...). Errors — a foreign or stale context — are returned
+// for the caller to wrap with its own operation prefix.
+func (c *conveyor) actingItem(ctx context.Context, verb string, u *unit, checkCancel bool) (*item, *run, error) {
 	c.validateUnit(u)
-	it, err := c.resolveItem(ctx)
+	it, err := c.resolveItem(ctx, verb, u)
 	if err != nil {
 		return nil, nil, err
 	}
-	c.validateScope(it, u)
+	c.validateScope(it, verb, u)
 	r := it.run
 	r.mu.Lock()
 	if it.finished {

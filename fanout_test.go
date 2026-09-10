@@ -471,13 +471,16 @@ func TestFanOutJoinHappensBeforeNewWorkStarts(t *testing.T) {
 			return err
 		}
 		w1 := first.Detach(ctx)
-		err = second.MoveTo(ctx, w1)
+		err = second.MoveTo(ctx)
+		if err == nil {
+			err = w1.Wait(ctx) // wait for w1 here: all of first's work must be done before second's starts
+		}
 		if err == nil {
 			err = second.Schedule(ctx, secondPool.NewTasks(2, func(_ context.Context, i int) error {
 				events.add("second-%d", i)
 				return nil
 			}))
-		} // join w1 here: all of first's work must be done before second's starts
+		}
 		if err != nil {
 			return err
 		}

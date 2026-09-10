@@ -102,8 +102,10 @@ The invariants from `impl_details.md` §13 stay in force:
 
 ### 4.1 Overview
 
-- `FanOut.MoveTo(ctx, joins...)` only enters the fan-out. It has the same shape as `Stage.MoveTo`. The item enters
-  with an **empty, open body**.
+- `FanOut.MoveTo(ctx)` only enters the fan-out. It has the same shape as `Stage.MoveTo`. The item enters with an
+  **empty, open body**. Neither `MoveTo` nor `TryMoveTo` takes waves any more.
+- `Wave.Wait(ctx)` blocks until a detached or retained wave is finished and returns its error. The processor decides
+  where the item stands meanwhile: before a move it holds the previous node's slot, after it the target's.
 - `FanOut.Schedule(ctx, tasks...)` adds work to a body. It never blocks. It can be called by the ItemProcessor while
   the item is inside with an open body, by a task running on one of the fan-out's pools before it returns, and by a
   child item of one of the fan-out's lanes before its callback returns.
@@ -155,21 +157,20 @@ type FanOut interface {
     AddPool(opts ...AnyUnitOption) Pool
     AddLane(opts ...AnyUnitOption) Lane
 
-    // MoveTo advances the item into this fan-out, releasing the previous node, and joins the listed waves.
-    // The item enters with an empty body; add work with Schedule. Until the item's first Schedule (or until it
+    // MoveTo advances the item into this fan-out, releasing the previous node. The item enters with an empty
+    // body; add work with Schedule. Until the item's first Schedule (or until it
     // leaves or detaches), the item behind it may step into this fan-out's waiting room but cannot enter the node.
     //
     // It returns ErrForeignContext, ErrStaleContext, or the item's cancellation cause, whether the cancellation
     // is visible on ctx or only on the item's own context. It panics on misuse: moving backward, re-entering this
-    // node, a node outside the item's own series, or a wave from another item.
-    MoveTo(ctx context.Context, joins ...Wave) error
+    // node, or a node outside the item's own series.
+    MoveTo(ctx context.Context) error
 
     // TryMoveTo is MoveTo without waiting: it enters the fan-out only if it can do so right now, and reports
     // whether it did. entered == false means nothing happened. It bypasses the waiting room and never jumps an
-    // item already waiting there. The joins are awaited only if the item entered. A canceled item returns
-    // (false, its cancellation cause), whether the cancellation is visible on ctx or only on the item's own
-    // context. It panics on the same misuse as MoveTo.
-    TryMoveTo(ctx context.Context, joins ...Wave) (entered bool, err error)
+    // item already waiting there. A canceled item returns (false, its cancellation cause), whether the
+    // cancellation is visible on ctx or only on the item's own context. It panics on the same misuse as MoveTo.
+    TryMoveTo(ctx context.Context) (entered bool, err error)
 
     // Schedule adds tasks to a body of this fan-out on behalf of the calling context and returns once they are
     // queued. It never blocks. Three callers are allowed:
@@ -202,7 +203,7 @@ type FanOut interface {
     Wait(ctx context.Context) error
 
     // Detach hands this fan-out's slot to the work already scheduled here, letting the item move on without
-    // waiting for it. Join the returned Wave in a later MoveTo, or read its channels. The detached work may still
+    // waiting for it. Wait for the returned Wave with Wave.Wait, or read its channels. The detached work may still
     // grow from its own running tasks; the wave finishes when all of it is done. After Detach the ItemProcessor
     // may not Schedule or Wait here again.
     //
@@ -243,7 +244,27 @@ type FanOut interface {
 
 ### 5.4 `Wave`
 
-Unchanged interface. Doc changes:
+One new method:
+
+```go
+    // Wait blocks until the wave is finished and returns its error, named after the node the work belongs to
+    // ("<node> work: ..."), or nil. Only the item that created the wave may call it, with its own context or one
+    // derived from it.
+    //
+    // A failing task poisons the item, so a wait in progress wakes at once. If the wave is finished by then, its
+    // error is returned and counts as observed. If the wave is still winding down (other tasks running), the
+    // item's cancellation cause is returned and the outcome stays unobserved: wait for Finished and read Err, or
+    // call Wait again after Finished is closed. A canceled item never gets nil. A canceled call context (a deadline
+    // the caller added) ends the wait the same way.
+    //
+    // It returns ErrForeignContext for a context without an item and ErrStaleContext once the item has finished.
+    // It panics on misuse: a wave of another item (a lane child may wait only on its own waves), or a task's
+    // context (a task must never wait for other work).
+    Wait(ctx context.Context) error
+```
+
+`Wait` replaces the `joins ...Wave` parameter of `MoveTo` and `TryMoveTo` (see §6.7 and `issue_join_before_admission.md`
+for why). Doc changes on the existing methods:
 
 - `Started`: closes once the wave is sealed and every **root source** (a source the ItemProcessor scheduled into its
   own body) has been handed out. Sources added by tasks or lane children do not count and do not delay it. The
@@ -266,7 +287,8 @@ finished.
 
 Existing sentinels keep their roles: `errStageNotEntered` (Schedule/Wait/Detach on a fan-out the item does not
 occupy), `errNothingToDetach`, `errTaskReused`, `errCannotMove` (Wait or a move with a task's context),
-`errWrongScope`, `errWrongEnterOrder`, `errNodeAlreadyEntered`, `errForeignWave`, `errNilTaskFunc`.
+`errWrongScope`, `errWrongEnterOrder`, `errNodeAlreadyEntered`, `errForeignWave` (now panicked by `Wave.Wait` on
+another item's wave), `errNilTaskFunc`.
 
 ---
 
@@ -274,7 +296,7 @@ occupy), `errNothingToDetach`, `errTaskReused`, `errCannotMove` (Wait or a move 
 
 ### 6.1 Entering
 
-`MoveTo(ctx, joins...)`:
+`MoveTo(ctx)`:
 
 1. Resolve the acting item. A task's context panics (`errCannotMove`). A foreign or stale context returns
    `ErrForeignContext` / `ErrStaleContext`.
@@ -287,10 +309,12 @@ occupy), `errNothingToDetach`, `errTaskReused`, `errCannotMove` (Wait or a move 
    publish the node's rank. Consequence: the item behind may step into the waiting room and release its previous
    node, but cannot enter the node.
 6. Create the body: a new wave, open, idle, `atNode` set to this fan-out. Record body state `open` for this fan-out.
-7. Join the listed waves (unchanged; may release the lock). A join error is returned as today ("join at <node>: ...").
-8. Return nil. The item is inside with an empty open body.
+7. Return nil. The item is inside with an empty open body.
 
-`TryMoveTo(ctx, joins...)`: the same, without waiting and bypassing the waiting room. Its preamble declines a
+`MoveTo` takes no waves. A detached or retained wave is waited for with `Wave.Wait`, before or after the move, at the
+processor's choice.
+
+`TryMoveTo(ctx)`: the same, without waiting and bypassing the waiting room. Its preamble declines a
 canceled item (§6.4 for the exact rule). On `entered == false` nothing happened. On success the body is created as
 in step 6.
 
@@ -421,8 +445,7 @@ Properties:
 2. If the body is busy: return `(false, nil)`. Nothing is touched. The body stays `open`.
 3. If the body is idle but the target has no room or the ordering gate is closed: return `(false, nil)`. Nothing is
    touched. The body stays `open`. The item may keep scheduling.
-4. Otherwise: seal the body, set its state to `closed`, take the target, publish, join. Return `(true, nil)` or a
-   join error.
+4. Otherwise: seal the body, set its state to `closed`, take the target, publish. Return `(true, nil)`.
 
 Today `tryEnterUnit` consumes the pending wave before it knows whether the item can enter. With a growable body that
 would leave the item inside with no body to add to, so the order of checks changes as above. Admission stays atomic:
@@ -511,12 +534,15 @@ Growth rules:
 
 Observation and acknowledgement:
 
-- `Wait` acknowledges an error it returns.
+- `FanOut.Wait` acknowledges an error it returns.
 - Leaving acknowledges (the idle check in §6.4 step 2).
-- A join of a detached wave acknowledges, as does `Err` after `Finished`. The join acknowledges also when it is
-  woken by the poison the failing task put on the item: the wave is finished and its error is what the caller is
-  told. A `MoveTo` that fails before reaching its joins (cancellation during the admission wait) acknowledges nothing.
-- An unacknowledged error fails the item at completion (unchanged).
+- `Wave.Wait` on a detached or retained wave acknowledges the error it returns, as does `Err` after `Finished`.
+  `Wave.Wait` acknowledges also when it is woken by the poison the failing task put on the item, if the wave is
+  finished by then: its error is what the caller is told. A wave still winding down returns the cause and stays
+  unacknowledged. `Finished` alone never acknowledges. `MoveTo` and `TryMoveTo` look at no waves, so an admission
+  wait can no longer swallow the wake-up of a finished failed wave.
+- An unacknowledged error fails the item at completion (unchanged). Acknowledging one wave says nothing about the
+  others and does not undo the item's cancellation.
 
 ### 6.8 Ordering guarantees
 
@@ -604,7 +630,9 @@ The argument is made per kind of slot holder, with its assumptions stated.
   argument recursively.
 - **Queued work** holds nothing.
 - **The item** holds its fan-out slot and waits, in `Wait` or when leaving, for the body to drain. The body drains
-  through the holders above.
+  through the holders above. In `Wave.Wait` the item holds the slot of the node it stands in and waits for work that
+  holds the slot of an earlier node; that work never waits on the item. Only the item that created a wave may wait
+  for it, so a lane child cannot wait on its parent's body wave, which cannot finish before the child completes.
 - **A younger item at the door** waits for the older item's first `Schedule`, leave, or `Detach`. The older item never
   waits on the younger one.
 - **Ordered insertion** moves queue positions only; it creates no waits.
@@ -620,15 +648,16 @@ The argument is made per kind of slot holder, with its assumptions stated.
 | `Schedule` / `Wait` through the own-body path at a fan-out whose body is `detached` | panic `errWorkDetached` |
 | `Detach` at a fan-out whose body is `closed` or `detached`, occupied or not | panic `errNothingToDetach` |
 | `Schedule` from a task for a fan-out it does not run under | panic `errInvalidUnit` (wrong target) |
-| `Wait`, `MoveTo`, `TryMoveTo`, `Retain`, `Detach` with a task's context | panic `errCannotMove` |
+| `Wait`, `MoveTo`, `TryMoveTo`, `Retain`, `Detach`, `Wave.Wait` with a task's context | panic `errCannotMove` |
 | Lane child calls `Wait` on the fan-out its lane belongs to | panic `errWrongScope` |
+| `Wave.Wait` on another item's wave (a lane child on its parent's wave included), or on a nil `*wave` | panic `errForeignWave` |
 | task for another fan-out's branch | panic `errInvalidUnit` |
 | `Task` submitted twice | panic `errTaskReused` |
 | backward move, re-entry, foreign wave, nil callback in eager constructors, topology change while running | unchanged panics |
 | foreign context | `ErrForeignContext` |
-| finished item's context; finished lane child's context; pool work whose wave has finished | `ErrStaleContext` |
+| finished item's context (`Wave.Wait` included); finished lane child's context; pool work whose wave has finished | `ErrStaleContext` |
 | canceled item (call context or canonical context) | the cancellation cause (`ShutdownError` on shutdown) |
-| body error observed by `Wait` or when leaving | "<node> work: <err>" |
+| body error observed by `Wait` or when leaving; a detached or retained wave's error observed by `Wave.Wait` | "<node> work: <err>" |
 | nil callback from a streaming source | fails the item (unchanged) |
 
 ### 6.12 Observability and dynamic limits
@@ -703,7 +732,7 @@ The argument is made per kind of slot holder, with its assumptions stated.
 30. **Item skips the fan-out entirely.** The younger item enters when the older one publishes a later node's rank.
     Unchanged.
 31. **Pool limit lowered while a tree grows.** Admission-only; running tasks keep their slots. Unchanged.
-32. **Detached tree keeps spawning.** The slot follows the tree; `Finished` closes when idle; the item joins it later
+32. **Detached tree keeps spawning.** The slot follows the tree; `Finished` closes when idle; the item waits for it later with `Wave.Wait`
     or an unobserved error fails the item at completion.
 33. **Spawn after the owning item finished.** Impossible: an item completes only after all its waves finished, and a
     finished wave refuses additions with `ErrStaleContext`.
@@ -910,10 +939,18 @@ if err := report.MoveTo(ctx); err != nil {
     return err
 }
 // ...
-if err := commit.MoveTo(ctx, wave); err != nil { // joins the whole tree
+if err := commit.MoveTo(ctx); err != nil {
+    return err
+}
+if err := wave.Wait(ctx); err != nil { // the whole tree, holding commit's slot meanwhile
     return err
 }
 ```
+
+Put the `Wait` before `commit.MoveTo` to hold `report`'s slot instead while the tree finishes. A `MoveTo` that
+returns the item's cancellation cause while the tree fails does not acknowledge the wave; the `Wait` after it does,
+if the wave is finished. If sibling tasks are still winding down, `Wait` returns the cause and the processor that
+wants a clean completion waits for `Finished` and reads `Err`, or calls `Wait` again.
 
 ### 8.9 Optional fan-out with `TryMoveTo`
 
@@ -936,10 +973,13 @@ if entered {
 
 API:
 
-- `FanOut.MoveTo(ctx, tasks, joins...)` becomes `MoveTo(ctx, joins...)`.
-- `FanOut.TryMoveTo(ctx, tasks, joins...)` becomes `TryMoveTo(ctx, joins...)`.
+- `FanOut.MoveTo(ctx, tasks, joins...)` becomes `MoveTo(ctx)`.
+- `FanOut.TryMoveTo(ctx, tasks, joins...)` becomes `TryMoveTo(ctx)`.
+- `Stage.MoveTo(ctx, joins...)` and `Stage.TryMoveTo(ctx, joins...)` lose the `joins` parameter too.
 - `Tasks` and `Tasks.Add` are removed.
-- New: `FanOut.Schedule(ctx, tasks...)`, `FanOut.Wait(ctx)`.
+- New: `FanOut.Schedule(ctx, tasks...)`, `FanOut.Wait(ctx)`, `Wave.Wait(ctx)`.
+- A `Retain` wave's error is now node-qualified when reported by `Wave.Wait` (`<stage> work: <err>`), as a fan-out
+  wave's is. Item completion still reports raw errors.
 - A pool task's context is accepted by `Schedule` of its own fan-out. Every other node method still panics with it.
 - `ErrStaleContext` also covers a finished lane child's context and pool work whose wave has finished.
 
@@ -973,10 +1013,10 @@ Documentation and examples to revise:
 ## 10. Open questions
 
 1. **Names.** `Schedule` matches the existing vocabulary ("MoveTo schedules tasks", `scheduleWave`). Alternatives:
-   `Add`, `Submit`, `Spawn`. `Wait` matches `sync.WaitGroup`; alternative: `Join`, which risks confusion with the
-   `joins ...Wave` parameter.
-2. **`Wait(ctx, joins ...Wave)`.** Mirrors `MoveTo` and costs little because `run.join` exists. Not included in this
-   version.
+   `Add`, `Submit`, `Spawn`. `Wait` matches `sync.WaitGroup`; alternative: `Join`.
+2. **`Wait(ctx, joins ...Wave)`.** Answered in phase 12 by `Wave.Wait(ctx)` on the wave itself, which also serves
+   `Retain` waves; the `joins` parameter is removed from `MoveTo` and `TryMoveTo` (see §11.14 and
+   `issue_join_before_admission.md`).
 3. **Opening the door without work.** This version uses `Schedule` with no tasks. A dedicated method would be more
    discoverable but adds surface.
 4. **Depth-first spawning.** Inserting a spawn at the front of the item's own segment would give depth-first order
@@ -986,8 +1026,8 @@ Documentation and examples to revise:
 
 ## 11. Implementation plan
 
-**Progress (2026-09-10):** phases 0 to 8, 10 and 11 are done and committed on branch `fanout-schedule` (one commit
-each). Phase 9 is not planned. Remaining: the v0.10.0 tag. Process notes: from phase 3 on the phases are self-reviewed, not
+**Progress (2026-09-10):** phases 0 to 8, 10, 11 and 12 are done on branch `fanout-schedule` (one commit each).
+Phase 9 is not planned. Remaining: the v0.10.0 tag. Process notes: from phase 3 on the phases are self-reviewed, not
 sent to Codex; nothing is pushed. Each phase's record sits under its checklist.
 
 ### 11.1 Ground rules
@@ -1518,6 +1558,42 @@ that returns plain `ctx.Err()` after a shutdown already turns the shutdown into 
 task-context misuse of fan-out `MoveTo` / `TryMoveTo` / `Detach`, foreign and stale contexts on `Detach`, and a
 refused `Schedule` leaving its task unclaimed; not added.
 
+### 11.14 Phase 12: `Wave.Wait` replaces the `joins` parameter
+
+Trigger: `TestJoinOfFailedWaveAcknowledgesIt` (phase 11) exposed a timing dependency. `MoveTo` waited for admission
+first and joined the listed waves second, so a task failure during the admission wait returned the cause without
+acknowledging the wave, and a processor that handled the error still failed at completion. The same held for a
+`Retain` wave. Analysis, the declined options and the decision are in `issue_join_before_admission.md`.
+
+Decision: remove `joins ...Wave` from `MoveTo` and `TryMoveTo` on `Stage` and `FanOut`; add `Wave.Wait(ctx) error`.
+A wait on the wave has no admission wait in front of it, so the wake-up on poison lands in the call that owns the
+wave. Where the item stands while it waits (previous node or target) is the processor's choice, not the library's.
+
+Runtime:
+
+- [x] `wave.go`: `Wait` on the `Wave` interface and `*wave`. Caller resolution in order: standalone wave (no run)
+      returns its stored error; pool-work context panics `errCannotMove`; no item returns `ErrForeignContext`; another
+      item's wave panics `errForeignWave` (covers a lane child on its parent's wave); under `run.mu`, a finished item
+      returns `ErrStaleContext`. Then `waitUntil(ctx, it, w.isFinished)`; after a cancellation wake-up a finished wave
+      with an error is acknowledged and returned, otherwise the cause is returned unacknowledged. A nil `*wave`
+      receiver panics `errForeignWave`. `run.join` deleted.
+- [x] `state.go`: `joinedErr` falls back to `retainUnit`, so a `Retain` wave reads `<stage> work: <err>`.
+- [x] `stage.go`, `fanout.go`, `context.go`, `conveyor.go`, `errors.go`: signatures and doc comments.
+
+Tests: every `MoveTo(ctx, w...)` / `TryMoveTo(ctx, w...)` call site migrated (a move, then `w.Wait(ctx)`; for
+`TryMoveTo` only after `entered`), the property suite's `mover` included. Rewritten: `TestTryMoveToReportsEnteredWithJoinError`,
+`TestTryMoveToFanOutJoinErrorPoisonsBody`, `TestJoinSeveralWavesReportsFirstFailure`, `TestJoinForeignWavePanics` (plus
+pool-work, no-item, stripped finished-item and lane-child cases), `TestJoinOfFailedWaveAcknowledgesIt`. New
+(`wave_wait_test.go`): the failure during the admission wait, for a fan-out wave and a `Retain` wave; a failed wave
+still winding down (cause, unacknowledged, then acknowledged by a second `Wait`); `Wait` before the move holds the
+previous slot and after it the target's; a standalone wave, a clean wave of a canceled item, a derived deadline.
+
+Documentation: this document (§4.1, §5.1, §5.4, §5.5, §6.1, §6.4, §6.7, §6.10, §6.11, §7 case 32, §8.8, §9, §10,
+§12), `impl_details.md` §8, `docs/1`, `docs/4`, `docs/6`, `docs/README.md`, `README.md`, and the bench pipeline
+(`Detach` waves are waited for with `Wait` at the next node).
+
+- [x] Root suite green under `-race`; `gofmt`, `go vet` clean; bench and demo modules vet, test and build.
+
 ## 12. Release notes draft (v0.10.0)
 
 **Fan-out bodies that grow: `Schedule` and `Wait`.** An item now enters a fan-out with `MoveTo(ctx)` and adds work
@@ -1528,8 +1604,11 @@ scheduled so far is done and lets the item schedule again. See `docs/4_fan-out.m
 
 ### Breaking changes
 
-- `FanOut.MoveTo(ctx, tasks, joins...)` is now `MoveTo(ctx, joins...)`; `FanOut.TryMoveTo` likewise. Add work with
-  the new `FanOut.Schedule(ctx, tasks...)`.
+- `FanOut.MoveTo(ctx, tasks, joins...)` is now `MoveTo(ctx)`; `FanOut.TryMoveTo` likewise. Add work with the new
+  `FanOut.Schedule(ctx, tasks...)`.
+- `MoveTo` and `TryMoveTo` on both `Stage` and `FanOut` no longer take waves. Wait for a `Retain` or `Detach` wave
+  with the new `Wave.Wait(ctx)`, before the move (holding the previous node's slot) or after it (holding the
+  target's). `Wave.Wait` reports a `Retain` wave's error with the stage name: `<stage> work: <err>`.
 - `Tasks` and `Tasks.Add` are removed. Build a `[]Task` and pass it with `...`.
 - The item behind a fan-out can enter it only after the item ahead has called `Schedule` once (or left, or
   detached), not at the item ahead's `MoveTo`. It may wait in the fan-out's waiting room meanwhile. Keep the code
@@ -1551,10 +1630,12 @@ scheduled so far is done and lets the item schedule again. See `docs/4_fan-out.m
 
 | v0.9                                              | v0.10                                                                |
 |---------------------------------------------------|----------------------------------------------------------------------|
-| `f.MoveTo(ctx, conveyor.Tasks{a, b}, joins...)`   | `f.MoveTo(ctx, joins...)` then `f.Schedule(ctx, a, b)`               |
+| `f.MoveTo(ctx, conveyor.Tasks{a, b})`             | `f.MoveTo(ctx)` then `f.Schedule(ctx, a, b)`                         |
 | `f.MoveTo(ctx, nil)`                              | `f.MoveTo(ctx)`                                                      |
 | `f.TryMoveTo(ctx, tasks)`                         | `entered, err := f.TryMoveTo(ctx)`; `if entered { f.Schedule(...) }` |
 | `var t conveyor.Tasks; t.Add(x)`                  | `var t []conveyor.Task; t = append(t, x)`                            |
+| `commit.MoveTo(ctx, w1, w2)`                      | `commit.MoveTo(ctx)` then `w1.Wait(ctx)`, `w2.Wait(ctx)`; or the waits first, to hold the previous slot |
+| `entered, err := s.TryMoveTo(ctx, w)`             | `entered, err := s.TryMoveTo(ctx)`; `if entered { err = w.Wait(ctx) }` |
 
 ### New
 
@@ -1564,6 +1645,10 @@ scheduled so far is done and lets the item schedule again. See `docs/4_fan-out.m
 - `FanOut.Wait(ctx)`: blocks until the body (including spawned work) is idle, returns the first error with the node's
   name, keeps the slot; repeated calls return the same error.
 - `FanOut.Detach` returns a wave that may still grow from its own running tasks; the slot follows the whole tree.
+- `Wave.Wait(ctx)`: blocks until a `Retain` or `Detach` wave is finished and returns its error with the node's name.
+  If a task failure wakes it while sibling tasks are still winding down, it returns the item's cancellation cause and
+  leaves the outcome unobserved; wait for `Finished` and read `Err`, or call `Wait` again. Only the item that created
+  the wave may call it.
 - Two fixes on the way: a `MoveTo` retried from a waiting room after a failed move no longer takes a second queued
   slot, and a queued slot left in front of an earlier node by a failed move is given back when the item waits
   elsewhere.
@@ -1580,6 +1665,14 @@ scheduled so far is done and lets the item schedule again. See `docs/4_fan-out.m
 ---
 
 ## Change log
+
+Revision 8, phase 12 (`issue_join_before_admission.md`):
+
+- `MoveTo` and `TryMoveTo` take no waves on either node kind; `Wave.Wait(ctx)` added (§4.1, §5.1, §5.4, §6.1, §6.4,
+  §8.8, §9, §12). Open question 2 answered (§10).
+- §6.7: the acknowledgement list; a `Wave.Wait` woken by the poison acknowledges a finished failed wave; an admission
+  wait can no longer swallow that wake-up. §6.10 and §6.11: who may wait on a wave and the panics.
+- §11.14 added (phase 12).
 
 Revision 7, after an external review of the implementation:
 

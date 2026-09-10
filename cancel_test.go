@@ -221,10 +221,9 @@ func TestStrippedContextAdmissionWaitWakesOnItemCancellation(t *testing.T) {
 	})
 }
 
-// TestStrippedContextJoinWaitWakesOnItemCancellation: a MoveTo blocked in the join of a listed wave with a stripped
-// context wakes when the item's own context is canceled, with nothing else waking the run. The join starts under the
-// same lock hold that took the target stage, so the stage's occupancy is only readable once the wait has released the
-// lock; then the item's own context is canceled directly, with no broadcast.
+// TestStrippedContextJoinWaitWakesOnItemCancellation: a Wave.Wait with a stripped context wakes when the item's own
+// context is canceled, with nothing else waking the run. The item is inside the target stage when it starts the
+// wait; once it is parked there, the item's own context is canceled directly, with no broadcast.
 func TestStrippedContextJoinWaitWakesOnItemCancellation(t *testing.T) {
 	boom := errors.New("boom")
 	c := NewConveyor()
@@ -238,16 +237,17 @@ func TestStrippedContextJoinWaitWakesOnItemCancellation(t *testing.T) {
 
 	go func() {
 		it := <-itemCh
-		waitFor(t, "the item to take b and block on the join", func() bool { return occupancyOf(c, b) == 1 })
+		waitFor(t, "the item to take b and block in Wait", func() bool {
+			return occupancyOf(c, b) == 1 && parkedOf(c) == 1
+		})
 		it.cancel(boom) // the item's own context only; the call context hides it, and nothing broadcasts
 		select {
 		case err := <-returned:
 			if !errors.Is(err, boom) {
-				t.Errorf("MoveTo joining a parked wave with a stripped context = %v, want the item's cancellation "+
-					"cause", err)
+				t.Errorf("Wait on a parked wave with a stripped context = %v, want the item's cancellation cause", err)
 			}
 		case <-time.After(wakeTimeout):
-			t.Errorf("MoveTo did not wake within %v after the item's own context was canceled", wakeTimeout)
+			t.Errorf("Wait did not wake within %v after the item's own context was canceled", wakeTimeout)
 		}
 		checked.Store(true)
 		close(park)
@@ -262,7 +262,11 @@ func TestStrippedContextJoinWaitWakesOnItemCancellation(t *testing.T) {
 			return nil
 		})
 		itemCh <- itemOf(ctx)
-		returned <- b.MoveTo(context.WithoutCancel(ctx), w)
+		stripped := context.WithoutCancel(ctx)
+		if err := b.MoveTo(stripped); err != nil {
+			return err
+		}
+		returned <- w.Wait(stripped)
 		<-w.Finished()
 		return w.Err()
 	})

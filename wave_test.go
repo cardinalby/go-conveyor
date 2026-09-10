@@ -3,6 +3,7 @@ package conveyor
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -171,7 +172,13 @@ func TestWaveJoinedAtLaterNodeSurfacesThere(t *testing.T) {
 		}
 		midReached.Store(true)
 		close(pastMid)
-		joinErr = commit.MoveTo(ctx, w) // joined here
+		// The task fails once mid is passed, possibly while this move waits for admission; either way the wave's own
+		// error is what the wait reports once the wave is finished.
+		if err := commit.MoveTo(ctx); err != nil && !errors.Is(err, boom) {
+			return err
+		}
+		<-w.Finished()
+		joinErr = w.Wait(ctx) // waited for here
 		if joinErr != nil {
 			return joinErr
 		}
@@ -183,7 +190,7 @@ func TestWaveJoinedAtLaterNodeSurfacesThere(t *testing.T) {
 		t.Fatalf("the un-joined stage should have been reached")
 	}
 	if commitReached.Load() {
-		t.Fatalf("the joining stage ran its work despite the failed wave")
+		t.Fatalf("the stage ran its work despite the failed wave")
 	}
 	if !errors.Is(joinErr, boom) {
 		t.Fatalf("join error = %v, want %v", joinErr, boom)
@@ -193,8 +200,10 @@ func TestWaveJoinedAtLaterNodeSurfacesThere(t *testing.T) {
 	}
 }
 
-// TestJoinSeveralWavesReportsFirstFailure: joins are processed in the order listed.
-func TestJoinSeveralWavesReportsFirstFailure(t *testing.T) {
+// TestWaitSeveralWavesEachReportsItsOwnFailure: every wave answers for its own work. Two detached waves fail; the
+// item is poisoned by whichever failed first, but each Wait reports its own wave's error, named after its fan-out,
+// and acknowledges only that wave. Once both were waited for, the processor may end the item clean.
+func TestWaitSeveralWavesEachReportsItsOwnFailure(t *testing.T) {
 	first := errors.New("first boom")
 	second := errors.New("second boom")
 	c := NewConveyor()
@@ -204,11 +213,11 @@ func TestJoinSeveralWavesReportsFirstFailure(t *testing.T) {
 	poolB := foB.AddPool(OptName("poolB"))
 	commit := c.AddStage(OptName("commit"))
 
-	var joinErr error
-	_ = runOnce(t, c, func(ctx context.Context) error {
+	release := make(chan struct{}) // both tasks fail only once both waves exist and the item is in commit
+	err := runOnce(t, c, func(ctx context.Context) error {
 		err := foA.MoveTo(ctx)
 		if err == nil {
-			err = foA.Schedule(ctx, poolA.NewTask(func(context.Context) error { return first }))
+			err = foA.Schedule(ctx, poolA.NewTask(func(context.Context) error { <-release; return first }))
 		}
 		if err != nil {
 			return err
@@ -216,23 +225,49 @@ func TestJoinSeveralWavesReportsFirstFailure(t *testing.T) {
 		wa := foA.Detach(ctx)
 		err = foB.MoveTo(ctx)
 		if err == nil {
-			err = foB.Schedule(ctx, poolB.NewTask(func(context.Context) error { return second }))
+			err = foB.Schedule(ctx, poolB.NewTask(func(context.Context) error { <-release; return second }))
 		}
 		if err != nil {
-			// foB's move joins nothing, but the item's ctx may already be poisoned by foA's failure.
 			return err
 		}
 		wb := foB.Detach(ctx)
-		joinErr = commit.MoveTo(ctx, wa, wb)
-		return joinErr
+		if err := commit.MoveTo(ctx); err != nil {
+			return err
+		}
+		close(release)
+		<-wa.Finished()
+		<-wb.Finished()
+
+		if err := wa.Wait(ctx); !errors.Is(err, first) {
+			t.Errorf("wa.Wait = %v, want %v", err, first)
+		} else if !strings.HasPrefix(err.Error(), "foA work: ") {
+			t.Errorf("wa.Wait = %q, want it named after foA", err)
+		}
+		if ackedOf(ctx, wb) {
+			t.Errorf("wb was acknowledged by waiting for wa")
+		}
+		if err := wb.Wait(ctx); !errors.Is(err, second) {
+			t.Errorf("wb.Wait = %v, want %v", err, second)
+		} else if !strings.HasPrefix(err.Error(), "foB work: ") {
+			t.Errorf("wb.Wait = %q, want it named after foB", err)
+		}
+		return nil // both errors were reported to us
 	})
-	if joinErr != nil && !errors.Is(joinErr, first) && !errors.Is(joinErr, second) {
-		t.Fatalf("join error = %v, want one of the two task errors", joinErr)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v; both wave errors were acknowledged, completion must not raise them", err)
 	}
 }
 
-// TestJoinForeignWavePanics: a wave is only meaningful to the item that created it.
-func TestJoinForeignWavePanics(t *testing.T) {
+// ackedOf reports whether w's outcome counts as observed. Caller passes the wave's item context.
+func ackedOf(ctx context.Context, w Wave) bool {
+	r := itemOf(ctx).run
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return w.(*wave).acked
+}
+
+// TestWaitForeignWavePanics: a wave is only meaningful to the item that created it.
+func TestWaitForeignWavePanics(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
@@ -258,10 +293,10 @@ func TestJoinForeignWavePanics(t *testing.T) {
 			waves <- w
 			return commit.MoveTo(ic)
 		case 2:
-			// Item 2 tries to join item 1's wave.
+			// Item 2 tries to wait for item 1's wave.
 			foreign := <-waves
 			assertPanics(t, errForeignWave, func() {
-				_ = commit.MoveTo(ic, foreign)
+				_ = foreign.Wait(ic)
 			})
 			checked.Store(true)
 			cancel()
@@ -329,7 +364,10 @@ func TestRetainWaveJoined(t *testing.T) {
 			order.add("bg-%d", no)
 			return nil
 		})
-		if err := commit.MoveTo(ctx, w); err != nil {
+		if err := commit.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := w.Wait(ctx); err != nil {
 			return err
 		}
 		order.add("commit-%d", no)
@@ -465,10 +503,11 @@ func TestWaveNeverReportsCleanFinishForSkippedWork(t *testing.T) {
 	}
 }
 
-// TestJoinOfFailedWaveAcknowledgesIt: the failing task poisons the item, so the join wakes through the cancellation
-// branch — it must still count as the observation of the wave's error. A processor that handles the reported error and
-// returns nil has dealt with it; completion must not fail the item with it a second time.
-func TestJoinOfFailedWaveAcknowledgesIt(t *testing.T) {
+// TestWaitOnFailedWaveAcknowledgesIt: the failing task poisons the item, so the wait wakes through the cancellation
+// branch (or finds the cancellation on entry) — either way it counts as the observation of the wave's error. A
+// processor that handles the reported error and returns nil has dealt with it; completion must not fail the item with
+// it a second time.
+func TestWaitOnFailedWaveAcknowledgesIt(t *testing.T) {
 	boom := errors.New("joined boom")
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -482,8 +521,7 @@ func TestJoinOfFailedWaveAcknowledgesIt(t *testing.T) {
 			return err
 		}
 		err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
-			// Fail only once the item is inside commit, that is, blocked in the join: a failure during the admission
-			// wait would end MoveTo there with the poison, before any join could observe the wave.
+			// Fail only once the item is inside commit: the move succeeds and the Wait is what hears the failure.
 			waitFor(t, "the item to enter commit", func() bool { return occupancyOf(c, commit) == 1 })
 			return boom
 		}))
@@ -494,14 +532,17 @@ func TestJoinOfFailedWaveAcknowledgesIt(t *testing.T) {
 		if err := mid.MoveTo(ctx); err != nil {
 			return err
 		}
-		if err := commit.MoveTo(ctx, w); !errors.Is(err, boom) {
-			t.Errorf("join = %v, want %v", err, boom)
+		if err := commit.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := w.Wait(ctx); !errors.Is(err, boom) {
+			t.Errorf("Wait = %v, want %v", err, boom)
 		}
 		handled.Store(true)
 		return nil // the error was reported to us and we handled it
 	})
 	if !handled.Load() {
-		t.Fatalf("the item never joined the wave")
+		t.Fatalf("the item never waited for the wave")
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run = %v; the joined error was already reported to the item, completion must not raise it again", err)

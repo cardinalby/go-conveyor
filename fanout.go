@@ -27,22 +27,21 @@ type FanOut interface {
 	// It panics if the conveyor is running or has already run.
 	AddLane(opts ...AnyUnitOption) Lane
 
-	// MoveTo advances the item into this fan-out, releasing the previous node, and joins the listed waves. The item
-	// enters with an empty body; add work with Schedule. Until the item's first Schedule (or until it leaves or
+	// MoveTo advances the item into this fan-out, releasing the previous node. The item enters with an empty body;
+	// add work with Schedule. Until the item's first Schedule (or until it leaves or
 	// detaches), the item behind it may step into this fan-out's waiting room but cannot enter the node.
 	//
 	// It returns ErrForeignContext, ErrStaleContext, or the item's cancellation cause — whether the cancellation is
 	// visible on ctx or only on the item's own context (see ItemProcessor). It panics on misuse: moving backward,
-	// re-entering this node, a node outside the item's own series, or a wave from another item.
-	MoveTo(ctx context.Context, joins ...Wave) error
+	// re-entering this node, or a node outside the item's own series.
+	MoveTo(ctx context.Context) error
 
 	// TryMoveTo is MoveTo without waiting: it enters the fan-out only if it can do so right now, and reports
 	// whether it did. It bypasses the waiting room and never jumps an item already waiting there.
 	//
-	// When entered is false nothing happened. The joins are awaited only if the item entered. A canceled item
-	// returns (false, its cancellation cause), whether the cancellation is visible on ctx or only on the item's own
-	// context. It panics on the same misuse as MoveTo.
-	TryMoveTo(ctx context.Context, joins ...Wave) (entered bool, err error)
+	// When entered is false nothing happened. A canceled item returns (false, its cancellation cause), whether the
+	// cancellation is visible on ctx or only on the item's own context. It panics on the same misuse as MoveTo.
+	TryMoveTo(ctx context.Context) (entered bool, err error)
 
 	// Schedule adds tasks to a body of this fan-out on behalf of the calling context and returns once they are
 	// queued. It never blocks. Three callers are allowed:
@@ -75,7 +74,8 @@ type FanOut interface {
 	Wait(ctx context.Context) error
 
 	// Detach hands this fan-out's slot to the work already scheduled here, letting the item move on without
-	// waiting for it. Join the returned Wave in a later MoveTo, or read its channels. The detached work may still
+	// waiting for it. Wait for the returned Wave (before or after a later MoveTo), or read its channels. The
+	// detached work may still
 	// grow from its own running tasks; the wave finishes when all of it is done. After Detach the ItemProcessor
 	// may not Schedule or Wait here again.
 	//
@@ -135,10 +135,10 @@ func (f *fanOut) addBranch(opts []AnyUnitOption) *branch {
 	return b
 }
 
-// MoveTo enters this fan-out (through its queue, if it has one) with an empty open body and joins the listed waves.
-// See the FanOut interface for the full contract.
-func (f *fanOut) MoveTo(ctx context.Context, joins ...Wave) error {
-	it, r, err := f.series.conveyor.actingItem(ctx, f.node, false)
+// MoveTo enters this fan-out (through its queue, if it has one) with an empty open body. See the FanOut interface
+// for the full contract.
+func (f *fanOut) MoveTo(ctx context.Context) error {
+	it, r, err := f.series.conveyor.actingItem(ctx, "move to", f.node, false)
 	if err != nil {
 		return fmt.Errorf("move to %s: %w", f, err)
 	}
@@ -151,16 +151,13 @@ func (f *fanOut) MoveTo(ctx context.Context, joins ...Wave) error {
 		return fmt.Errorf("move to %s: %w", f, err)
 	}
 	r.newBody(it, f)
-	if err := r.join(ctx, it, joins); err != nil {
-		return fmt.Errorf("join at %s: %w", f, err)
-	}
 	return nil
 }
 
 // TryMoveTo enters this fan-out only if that needs no waiting, with an empty open body if it did. See the FanOut
 // interface for the full contract.
-func (f *fanOut) TryMoveTo(ctx context.Context, joins ...Wave) (entered bool, err error) {
-	it, r, err := f.series.conveyor.actingItem(ctx, f.node, true)
+func (f *fanOut) TryMoveTo(ctx context.Context) (entered bool, err error) {
+	it, r, err := f.series.conveyor.actingItem(ctx, "try move to", f.node, true)
 	if err != nil {
 		return false, fmt.Errorf("try move to %s: %w", f, err)
 	}
@@ -172,9 +169,6 @@ func (f *fanOut) TryMoveTo(ctx context.Context, joins ...Wave) (entered bool, er
 		return false, err
 	}
 	r.newBody(it, f)
-	if err := r.join(ctx, it, joins); err != nil {
-		return true, fmt.Errorf("join at %s: %w", f, err)
-	}
 	return true, nil
 }
 
@@ -222,14 +216,14 @@ func (f *fanOut) bodyFor(col *taskCollection, it *item) (w *wave, root bool) {
 	if pw := it.parentWave; pw != nil && pw.atNode == f.node {
 		return pw, false
 	}
-	f.series.conveyor.validateScope(it, f.node)
+	f.series.conveyor.validateScope(it, "schedule at", f.node)
 	return f.openBody(it, "schedule"), true
 }
 
 // Wait blocks until the item's body at this fan-out is idle and reports its outcome. See the FanOut interface for the
 // full contract.
 func (f *fanOut) Wait(ctx context.Context) error {
-	it, r, err := f.series.conveyor.actingItem(ctx, f.node, false)
+	it, r, err := f.series.conveyor.actingItem(ctx, "wait at", f.node, false)
 	if err != nil {
 		return fmt.Errorf("wait at %s: %w", f, err)
 	}
@@ -267,7 +261,7 @@ func (f *fanOut) openBody(it *item, verb string) *wave {
 func (f *fanOut) Detach(ctx context.Context) Wave {
 	// checkCancel is false: a canceled item is handed its own wave (the work is already scheduled and will settle with
 	// the cancellation cause), not an error — the same choice Stage.Retain makes.
-	it, r, err := f.series.conveyor.actingItem(ctx, f.node, false)
+	it, r, err := f.series.conveyor.actingItem(ctx, "detach", f.node, false)
 	if err != nil {
 		// No item to charge: hand back a standalone finished wave carrying the reason.
 		return standaloneWave(fmt.Errorf("detach %s: %w", f, err))

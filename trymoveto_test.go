@@ -3,6 +3,7 @@ package conveyor
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -136,9 +137,9 @@ func TestTryMoveToFanOutDeclinedLeavesItemInPlace(t *testing.T) {
 	}
 }
 
-// TestTryMoveToJoinsWavesOnEntry: the joins are the one part of a TryMoveTo that may still block, and they are
-// awaited exactly as in MoveTo once the item is in — so by the time it returns true, the named work is done.
-func TestTryMoveToJoinsWavesOnEntry(t *testing.T) {
+// TestTryMoveToThenWaitOnEntry: a non-blocking entry followed by Wave.Wait is the old "TryMoveTo with joins": once
+// the item is in, the wait for the named work happens inside the target, and by the time it returns the work is done.
+func TestTryMoveToThenWaitOnEntry(t *testing.T) {
 	t.Parallel()
 	c := NewConveyor()
 	first := c.AddStage(OptName("first"))
@@ -153,15 +154,18 @@ func TestTryMoveToJoinsWavesOnEntry(t *testing.T) {
 			bgDone.Store(true)
 			return nil
 		})
-		entered, err := second.TryMoveTo(ctx, w)
+		entered, err := second.TryMoveTo(ctx)
 		if err != nil {
 			return err
 		}
 		if !entered {
 			t.Error("expected to enter an empty stage")
 		}
+		if err := w.Wait(ctx); err != nil {
+			return err
+		}
 		if !bgDone.Load() {
-			t.Error("TryMoveTo returned before the joined wave had finished")
+			t.Error("Wait returned before the wave had finished")
 		}
 		return nil
 	})
@@ -170,10 +174,10 @@ func TestTryMoveToJoinsWavesOnEntry(t *testing.T) {
 	}
 }
 
-// TestTryMoveToReportsEnteredWithJoinError pins the one return shape a non-blocking entry can produce that MoveTo
-// cannot describe: the item DID enter (so the previous node is released and the stage is spent), and the error comes
-// from the join that followed. A caller that reads only the error would otherwise assume nothing happened.
-func TestTryMoveToReportsEnteredWithJoinError(t *testing.T) {
+// TestTryMoveToEnteredThenWaitFails: the entry and the wait are two results. The item DID enter (so the previous node
+// is released and the stage is spent) and the Wait that follows reports the wave's error, named after the retained
+// stage. The processor sees a clean (true, nil) entry and a separate failure, not one mixed answer.
+func TestTryMoveToEnteredThenWaitFails(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
 	c := NewConveyor()
@@ -196,12 +200,15 @@ func TestTryMoveToReportsEnteredWithJoinError(t *testing.T) {
 			close(inSecond)
 		}()
 
-		entered, err := second.TryMoveTo(ctx, w)
-		if !entered {
-			t.Error("expected entered == true: the stage was free, and only the join failed afterwards")
+		entered, err := second.TryMoveTo(ctx)
+		if !entered || err != nil {
+			t.Errorf("TryMoveTo = (%v, %v), want (true, nil): the stage was free and the item was not yet poisoned",
+				entered, err)
 		}
-		if !errors.Is(err, boom) {
-			t.Errorf("error = %v, want the joined wave's %v", err, boom)
+		if err := w.Wait(ctx); !errors.Is(err, boom) {
+			t.Errorf("Wait = %v, want the wave's %v", err, boom)
+		} else if !strings.HasPrefix(err.Error(), "first work: ") {
+			t.Errorf("Wait = %q, want it named after the retained stage", err)
 		}
 		if occ := occupancyOf(c, first); occ != 0 {
 			t.Errorf("first occupancy = %d, want 0 — entering second released it", occ)
@@ -213,10 +220,10 @@ func TestTryMoveToReportsEnteredWithJoinError(t *testing.T) {
 	}
 }
 
-// TestTryMoveToFanOutJoinErrorPoisonsBody: a fan-out entered with a failing join leaves the item inside the node with
-// an open, empty body — a state no other path produces, since the node is entered but its rank is never published.
-// The join error poisons the item, so a following Schedule returns the cause and the tasks never run.
-func TestTryMoveToFanOutJoinErrorPoisonsBody(t *testing.T) {
+// TestTryMoveToFanOutThenWaitFailsPoisonsBody: a fan-out entered and then a failing Wait leaves the item inside the
+// node with an open, empty body — the node is entered but its rank is never published. The wave's error poisons the
+// item, so a following Schedule returns the cause and the tasks never run.
+func TestTryMoveToFanOutThenWaitFailsPoisonsBody(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
 	c := NewConveyor()
@@ -243,15 +250,16 @@ func TestTryMoveToFanOutJoinErrorPoisonsBody(t *testing.T) {
 			ran.Add(1)
 			return nil
 		})}
-		entered, err := fan.TryMoveTo(ctx, w)
-		if !entered {
-			t.Error("expected entered == true: the fan-out was free, and only the join failed afterwards")
+		entered, err := fan.TryMoveTo(ctx)
+		if !entered || err != nil {
+			t.Errorf("TryMoveTo = (%v, %v), want (true, nil): the fan-out was free and the item was not yet poisoned",
+				entered, err)
 		}
-		if !errors.Is(err, boom) {
-			t.Errorf("error = %v, want the joined wave's %v", err, boom)
+		if err := w.Wait(ctx); !errors.Is(err, boom) {
+			t.Errorf("Wait = %v, want the wave's %v", err, boom)
 		}
 		if err := fan.Schedule(ctx, tasks...); !errors.Is(err, boom) {
-			t.Errorf("Schedule after the failed join = %v, want the item's cause %v", err, boom)
+			t.Errorf("Schedule after the failed wait = %v, want the item's cause %v", err, boom)
 		}
 		return nil
 	})
@@ -259,6 +267,6 @@ func TestTryMoveToFanOutJoinErrorPoisonsBody(t *testing.T) {
 		t.Fatalf("run failed: %v", err)
 	}
 	if got := ran.Load(); got != 0 {
-		t.Fatalf("%d tasks ran, want 0 — the failed join poisoned the item before anything was scheduled", got)
+		t.Fatalf("%d tasks ran, want 0 — the failed wave poisoned the item before anything was scheduled", got)
 	}
 }

@@ -189,20 +189,33 @@ func (top *propTopology) captureRun() {
 
 // mover is what Stage and FanOut share for entering: the property processor tries some moves first (see moveTo).
 type mover interface {
-	MoveTo(ctx context.Context, joins ...Wave) error
-	TryMoveTo(ctx context.Context, joins ...Wave) (entered bool, err error)
+	MoveTo(ctx context.Context) error
+	TryMoveTo(ctx context.Context) (entered bool, err error)
 }
 
-// moveTo enters m, sometimes trying first. A declined TryMoveTo — the item's body is still busy, or the target has no
-// room — must leave the item exactly where it was, so the MoveTo that follows still works.
-func moveTo(ctx context.Context, m mover, try bool, joins []Wave) error {
+// moveTo enters m, sometimes trying first, then waits for the listed waves. A declined TryMoveTo — the item's body
+// is still busy, or the target has no room — must leave the item exactly where it was, so the MoveTo that follows
+// still works.
+func moveTo(ctx context.Context, m mover, try bool, waves []Wave) error {
+	entered := false
 	if try {
-		entered, err := m.TryMoveTo(ctx, joins...)
-		if err != nil || entered {
+		var err error
+		entered, err = m.TryMoveTo(ctx)
+		if err != nil {
 			return err
 		}
 	}
-	return m.MoveTo(ctx, joins...)
+	if !entered {
+		if err := m.MoveTo(ctx); err != nil {
+			return err
+		}
+	}
+	for _, w := range waves {
+		if err := w.Wait(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (top *propTopology) newGauge(name string, limit int) *propGauge {
@@ -333,15 +346,15 @@ func (top *propTopology) process(ctx context.Context, no int64, inj *propInjecti
 		if inj == nil && rnd.Intn(6) == 0 {
 			continue // skip this node entirely
 		}
-		var joins []Wave
+		var waves []Wave
 		if inj == nil && len(pending) > 0 && rnd.Intn(2) == 0 {
-			joins, pending = pending, nil // join here; otherwise the join is deferred to a later node
+			waves, pending = pending, nil // wait here; otherwise the wait is deferred to a later node
 		}
 
 		try := inj == nil && rnd.Intn(4) == 0
 
 		if nd.stage != nil {
-			if err := moveTo(ctx, nd.stage.st, try, joins); err != nil {
+			if err := moveTo(ctx, nd.stage.st, try, waves); err != nil {
 				return err
 			}
 			// The instrumented region lies between two moves, so it is strictly inside the stage's slot.
@@ -364,7 +377,7 @@ func (top *propTopology) process(ctx context.Context, no int64, inj *propInjecti
 			}
 		} else {
 			fo := nd.fanOut.fo
-			if err := moveTo(ctx, fo, try, joins); err != nil {
+			if err := moveTo(ctx, fo, try, waves); err != nil {
 				return err
 			}
 			// The failing item takes the plain shape, so its failure is always scheduled. Otherwise the body is either
@@ -493,12 +506,13 @@ func (top *propTopology) laneWork(pl *propLane, inject bool, depth int) func(con
 			top.addWave(iw)
 		}
 		for k, si := range pl.stages {
-			var joins []Wave
-			if k == 0 && iw != nil {
-				joins = append(joins, iw)
-			}
-			if err := si.st.MoveTo(cctx, joins...); err != nil {
+			if err := si.st.MoveTo(cctx); err != nil {
 				return err
+			}
+			if k == 0 && iw != nil {
+				if err := iw.Wait(cctx); err != nil {
+					return err
+				}
 			}
 			si.g.enter()
 			spin()

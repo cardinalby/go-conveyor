@@ -3,6 +3,7 @@ package conveyor
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -357,8 +358,13 @@ func TestWaitFromPoolTaskPanics(t *testing.T) {
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
 	}
-	if perr := <-got; !errors.Is(perr, errCannotMove) {
+	perr := <-got
+	if !errors.Is(perr, errCannotMove) {
 		t.Fatalf("Wait from a pool task panicked with %v, want errCannotMove", perr)
+	}
+	// The hint must fit a wait, not a move: the generic AddLane advice would point the user the wrong way.
+	if !strings.Contains(perr.Error(), "must not wait for other work") {
+		t.Fatalf("Wait from a pool task panicked with %q, want the hold-and-wait hint", perr)
 	}
 }
 

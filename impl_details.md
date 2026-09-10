@@ -354,8 +354,8 @@ once the wave has finished). Those two halves are the "whichever happens last" c
 node holding nothing, and a slot never outlives the work it was kept for. A detached wave's tasks may keep spawning
 into it; the slot follows the whole tree.
 
-`atNode` names the fan-out whose body the wave is. It supplies the node name in the error of `Wait` and of an
-implicit join (`joinedErr`), lets `Schedule` tell a lane child's spawn into its parent's fan-out from a move into
+`atNode` names the fan-out whose body the wave is. It supplies the node name in the error of `FanOut.Wait`, the leave
+and `Wave.Wait` (`joinedErr`, which falls back to `retainUnit` for a `Retain` wave), lets `Schedule` tell a lane child's spawn into its parent's fan-out from a move into
 another node, and is what `sealBody` indexes the body state by.
 
 Two ways an error reaches a wave:
@@ -370,11 +370,20 @@ Two ways an error reaches a wave:
   was thrown away" — which is the one thing a wave must never be ambiguous about, since it is what a pipeline uses
   to decide whether the item's effects are complete.
 
-`acked` records that the outcome was observed — by `Wait`, by the leave's `closeBody`, by a join, or by an `Err()`
-call after the wave finished. An unacked error fails the item at completion, so a failure can be delayed but never
-lost. `Wait`, `closeBody` and `join` all share one rule for a cancellation wake-up: a finished (for `Wait`: idle)
-wave with an error is acknowledged and its error returned, because the poison that woke them is that error; a clean
-or unfinished wave leaves the cancellation cause as the answer.
+`acked` records that the outcome was observed — by `FanOut.Wait` on the open body, by the leave's `closeBody`, by
+`Wave.Wait` on a detached or retained wave, or by an `Err()` call after the wave finished. `Finished` alone never
+acknowledges. An unacked error fails the item at completion, so a failure can be delayed but never lost.
+`FanOut.Wait`, `closeBody` and `Wave.Wait` all share one rule for a cancellation wake-up: a finished (for
+`FanOut.Wait`: idle) wave with an error is acknowledged and its error returned, because the poison that woke them is
+that error; a clean or unfinished wave leaves the cancellation cause as the answer.
+
+`Wave.Wait` is the only way to wait on a `Retain` or `Detach` wave inside the runtime; `MoveTo` and `TryMoveTo` take
+no waves. The reason is the wake-up order: a wait that first asks for admission and only then looks at the wave lets
+the poison of a finished failed wave land in the admission wait, which returns the cause without acknowledging
+anything. A wait that owns the wave has no such gap. `Wave.Wait` resolves its caller before taking the lock: a
+standalone wave (no run) returns its stored error; a pool-work context panics `errCannotMove`; a context without an
+item returns `ErrForeignContext`; another item's wave panics `errForeignWave` (a lane child may wait only on waves it
+created); under the lock a finished item returns `ErrStaleContext`. Then `waitUntil(isFinished)` and the rule above.
 
 `FanOut.Wait` is `waitUntil(idle)` on the open body, then the acknowledged node-qualified error; it never seals, so
 the item may schedule again. Its cancellation nuance mirrors `joinPending`: an idle body with an error reports the
@@ -409,7 +418,7 @@ is dropped at the head, a failing tree terminates: running tasks finish, nothing
 
 **Cancellation is judged by the item, not by the context passed.** `item.cancelCause` reads the cancellation cause
 of the item's own context first, then the call context's, and every node method decides with it: the admission waits
-and joins (`waitUntil`), the `TryMoveTo` preamble (`actingItem` with `checkCancel`), `Schedule`, `Wait`, and
+and `Wave.Wait` (`waitUntil`), the `TryMoveTo` preamble (`actingItem` with `checkCancel`), `Schedule`, `Wait`, and
 `Retain`'s decision to run its callback. A context with cancellation stripped (`context.WithoutCancel`) therefore
 cannot move, schedule, wait or retain for a canceled item, which is what keeps a canceled item from committing past
 a failed older one; a derived context with a shorter deadline still works, since it inherits the item's cancellation
@@ -462,7 +471,7 @@ static wiring or a dynamic per-item contract violation is irrelevant.
   fan-out (`errWrongScope`). They are unexported because a caller must not branch on them — they exist so the
   package's own tests can assert via `errors.Is`. The checks that run under `run.mu` are safe: the deferred `Unlock`
   still fires during the panic unwind.
-- **Return**: context cancellation and `ShutdownError`, fail-fast work errors surfacing at `Wait` or a join,
+- **Return**: context cancellation and `ShutdownError`, fail-fast work errors surfacing at `FanOut.Wait`, a leave or `Wave.Wait`,
   `ErrForeignContext` / `ErrStaleContext` (both wrapping `ErrInvalidContext`), and `ErrConveyorAlreadyRunning`.
 
 The context cases are the deliberate carve-out. A **stale** context — a finished item's, a lane child's whose

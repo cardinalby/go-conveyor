@@ -403,13 +403,18 @@ func (r *run) closeBody(it *item, w *wave) error {
 	return nil
 }
 
-// joinedErr names the fan-out whose work failed, so the error reads for the node the work belongs to rather than for
-// the node the item was trying to enter when it heard about it.
+// joinedErr names the node whose work failed — the fan-out of a body, or the stage of a Retain — so the error reads
+// for the node the work belongs to rather than for the node the item stood at when it heard about it. A wave with
+// neither (the finished wave a canceled Retain hands back) reports its error as is.
 func joinedErr(w *wave) error {
-	if w.atNode == nil {
+	u := w.atNode
+	if u == nil {
+		u = w.retainUnit
+	}
+	if u == nil {
 		return w.err
 	}
-	return fmt.Errorf("%s work: %w", w.atNode.owner, w.err)
+	return fmt.Errorf("%s work: %w", u.owner, w.err)
 }
 
 // takeUnit is the mutation half of a move: occupy u, release everything the item held behind it, wake the waiters
@@ -878,6 +883,8 @@ func (r *run) waitUntil(ctx context.Context, it *item, admissible func() bool) e
 		stopItem := context.AfterFunc(it.ctx, wake)
 		defer stopItem()
 	}
+	r.parked++
+	defer func() { r.parked-- }()
 	for {
 		r.cond.Wait()
 		if err := it.cancelCause(ctx); err != nil {

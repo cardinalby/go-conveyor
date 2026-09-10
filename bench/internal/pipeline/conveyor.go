@@ -86,14 +86,17 @@ func (p *conveyorPipeline) Run(ctx context.Context, n int) error {
 		if no > n {
 			return nil // overrun item created before cancellation took effect
 		}
-		// A fan-out's work is joined at the next node, so its wave rides along until
-		// there is a MoveTo to name it in.
+		// A fan-out's work is waited for at the next node, after entering it, so its wave rides along until
+		// there is a node to wait in.
 		var pending []conveyor.Wave
 		for i := range p.nodes {
 			nd := &p.nodes[i]
 			switch nd.kind {
 			case Exclusive, Shared:
-				if err := nd.stage.MoveTo(ic, pending...); err != nil {
+				if err := nd.stage.MoveTo(ic); err != nil {
+					return err
+				}
+				if err := waitAll(ic, pending); err != nil {
 					return err
 				}
 				pending = pending[:0]
@@ -107,7 +110,10 @@ func (p *conveyorPipeline) Run(ctx context.Context, n int) error {
 						return nil
 					}))
 				}
-				if err := nd.fanout.MoveTo(ic, pending...); err != nil {
+				if err := nd.fanout.MoveTo(ic); err != nil {
+					return err
+				}
+				if err := waitAll(ic, pending); err != nil {
 					return err
 				}
 				if err := nd.fanout.Schedule(ic, tasks...); err != nil {
@@ -117,12 +123,9 @@ func (p *conveyorPipeline) Run(ctx context.Context, n int) error {
 				pending = append(pending[:0], nd.fanout.Detach(ic))
 			}
 		}
-		// A trailing fan-out has no later node to be joined at.
-		for _, w := range pending {
-			<-w.Finished()
-			if err := w.Err(); err != nil {
-				return err
-			}
+		// A trailing fan-out has no later node to wait in.
+		if err := waitAll(ic, pending); err != nil {
+			return err
 		}
 		p.obs.itemFinished(no)
 		if no >= n {
@@ -134,4 +137,14 @@ func (p *conveyorPipeline) Run(ctx context.Context, n int) error {
 		return nil
 	}
 	return err
+}
+
+// waitAll waits for the detached waves in order and returns the first error.
+func waitAll(ctx context.Context, waves []conveyor.Wave) error {
+	for _, w := range waves {
+		if err := w.Wait(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }

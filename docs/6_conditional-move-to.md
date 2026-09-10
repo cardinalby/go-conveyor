@@ -64,8 +64,8 @@ if entered {
 // not entered: the item is still in the previous node; enrich may be entered later with MoveTo
 ```
 
-Waves passed to either variant are joined only if the item entered, so a `TryMoveTo` that declines never waits on
-anything.
+Neither variant takes waves, so a `TryMoveTo` that declines never waits on anything. To wait for a `Retain` or
+`Detach` wave after a conditional move, call `Wave.Wait` once `entered` is true.
 
 ## Out of a fan-out
 

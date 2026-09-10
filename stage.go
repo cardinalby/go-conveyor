@@ -10,13 +10,13 @@ import (
 type Stage interface {
 	Unit
 
-	// MoveTo advances the item into this stage, releasing the previous node, and joins the listed waves before the
-	// stage's code runs. It blocks until the stage (or its waiting room) has room and it is the item's turn.
+	// MoveTo advances the item into this stage, releasing the previous node. It blocks until the stage (or its
+	// waiting room) has room and it is the item's turn.
 	//
 	// It returns ErrForeignContext, ErrStaleContext, or the item's cancellation cause — whether the cancellation is
 	// visible on ctx or only on the item's own context (see ItemProcessor). It panics on misuse: moving backward,
-	// re-entering an already-entered stage, a handle from another conveyor or series, or a wave from another item.
-	MoveTo(ctx context.Context, joins ...Wave) error
+	// re-entering an already-entered stage, or a handle from another conveyor or series.
+	MoveTo(ctx context.Context) error
 
 	// TryMoveTo is MoveTo without waiting: it enters the stage only if a slot is free right now, and reports
 	// whether it did. Use it to make a stage optional under load — skip it, or take a different path — instead of
@@ -26,14 +26,13 @@ type Stage interface {
 	// may be tried again or entered later with a blocking MoveTo. It bypasses the stage's waiting room
 	// (SetQueueSize) and never jumps an item already waiting there.
 	//
-	// The joins are awaited only if the item entered. A canceled item returns (false, its cancellation cause),
-	// whether the cancellation is visible on ctx or only on the item's own context. It panics on the same misuse as
-	// MoveTo.
-	TryMoveTo(ctx context.Context, joins ...Wave) (entered bool, err error)
+	// A canceled item returns (false, its cancellation cause), whether the cancellation is visible on ctx or only on
+	// the item's own context. It panics on the same misuse as MoveTo.
+	TryMoveTo(ctx context.Context) (entered bool, err error)
 
 	// Retain runs bgOp in the background while keeping this stage's slot held, letting the item move on without
-	// releasing the stage. The slot is freed once bgOp returns and the item has moved on. Join the returned Wave
-	// in a later MoveTo to wait for bgOp; an error from bgOp cancels the item.
+	// releasing the stage. The slot is freed once bgOp returns and the item has moved on. Wait for bgOp with the
+	// returned Wave (before or after a later MoveTo); an error from bgOp cancels the item.
 	//
 	// On a canceled item — canceled on ctx or on its own context — bgOp does not run and the returned wave is
 	// already finished, carrying the cancellation cause.
@@ -89,10 +88,9 @@ func (s *stage) String() string {
 
 func (s *stage) unit() *unit { return s.work }
 
-// MoveTo enters this stage (through its queue, if it has one) and joins the listed waves. See the Stage
-// interface for the full contract.
-func (s *stage) MoveTo(ctx context.Context, joins ...Wave) error {
-	it, r, err := s.series.conveyor.actingItem(ctx, s.work, false)
+// MoveTo enters this stage (through its queue, if it has one). See the Stage interface for the full contract.
+func (s *stage) MoveTo(ctx context.Context) error {
+	it, r, err := s.series.conveyor.actingItem(ctx, "move to", s.work, false)
 	if err != nil {
 		return fmt.Errorf("move to %s: %w", s, err)
 	}
@@ -101,29 +99,19 @@ func (s *stage) MoveTo(ctx context.Context, joins ...Wave) error {
 	if err := r.enterUnit(ctx, it, s.work, true); err != nil {
 		return fmt.Errorf("move to %s: %w", s, err)
 	}
-	if err := r.join(ctx, it, joins); err != nil {
-		return fmt.Errorf("join at %s: %w", s, err)
-	}
 	return nil
 }
 
 // TryMoveTo enters this stage only if that needs no waiting, and reports whether it did. See the Stage interface
 // for the full contract.
-func (s *stage) TryMoveTo(ctx context.Context, joins ...Wave) (bool, error) {
-	it, r, err := s.series.conveyor.actingItem(ctx, s.work, true)
+func (s *stage) TryMoveTo(ctx context.Context) (bool, error) {
+	it, r, err := s.series.conveyor.actingItem(ctx, "try move to", s.work, true)
 	if err != nil {
 		return false, fmt.Errorf("try move to %s: %w", s, err)
 	}
 	defer r.mu.Unlock()
 	r.checkEnterOrder(it, s.work) // panics on backward / repeat entry (misuse)
-	entered, err := r.tryEnterUnit(it, s.work, true)
-	if err != nil || !entered {
-		return false, err
-	}
-	if err := r.join(ctx, it, joins); err != nil {
-		return true, fmt.Errorf("join at %s: %w", s, err)
-	}
-	return true, nil
+	return r.tryEnterUnit(it, s.work, true)
 }
 
 func (s *stage) SetLimit(limit int) Stage {
@@ -144,7 +132,7 @@ func (s *stage) QueueSize() int { return int(s.work.queueSize.Load()) }
 func (s *stage) Retain(ctx context.Context, bgOp func() error) Wave {
 	// checkCancel is false: a canceled item is answered with a wave of this item's own (below), not an error, which
 	// needs the lock this call takes.
-	it, r, err := s.series.conveyor.actingItem(ctx, s.work, false)
+	it, r, err := s.series.conveyor.actingItem(ctx, "retain", s.work, false)
 	if err != nil {
 		// No item to charge: hand back a standalone finished wave carrying the reason.
 		return standaloneWave(fmt.Errorf("retain %s: %w", s, err))

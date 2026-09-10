@@ -341,6 +341,18 @@ func occupancyOf(c Conveyor, u Unit) int {
 	return r.occupancy[u.unit().index].val
 }
 
+// parkedOf reports how many callers are blocked in waitUntil, for tests that must cancel or fail only once a wait has
+// really started (a check on occupancy alone cannot tell "inside the node" from "inside the node and waiting").
+func parkedOf(c Conveyor) int {
+	r := implOf(c).currentRun.Load()
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.parked
+}
+
 // unitStatByName finds a Stats entry by node name.
 func unitStatByName(s Stats, name string) (UnitStat, bool) {
 	for _, u := range s.Units {
