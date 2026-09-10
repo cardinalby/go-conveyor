@@ -308,3 +308,95 @@ func TestStatsReportsPoolBacklog(t *testing.T) {
 			e.Occupied.Last, e.Limit)
 	}
 }
+
+// TestStatsQueuedCountsSpawnedCollections: work a running task schedules for its own item counts as the branch's
+// backlog like any other queued collection — one entry per Schedule call — and the gauge returns to 0 once it is
+// handed out.
+func TestStatsQueuedCountsSpawnedCollections(t *testing.T) {
+	c := NewConveyor()
+	fo := c.AddFanOut(OptName("fo"))
+	pool := fo.AddPool(OptName("pool")) // limit 1: the spawns queue behind the spawner
+	commit := c.AddStage(OptName("commit"))
+
+	release := make(chan struct{})
+	sampled := make(chan struct{})
+	var busy, drained Stats
+
+	go func() {
+		defer close(sampled)
+		waitFor(t, "the two spawned collections to queue behind the spawner", func() bool {
+			return queuedOf(c, pool) == 2
+		})
+		busy = c.Stats()
+		close(release)
+		waitFor(t, "the backlog to drain", func() bool { return queuedOf(c, pool) == 0 })
+		drained = c.Stats()
+	}()
+
+	noop := func(context.Context) error { return nil }
+	err := runOnce(t, c, func(ctx context.Context) error {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		err := fo.Schedule(ctx, pool.NewTask(func(tctx context.Context) error {
+			for i := 0; i < 2; i++ {
+				if err := fo.Schedule(tctx, pool.NewTask(noop)); err != nil {
+					return err
+				}
+			}
+			<-release
+			return nil
+		}))
+		if err != nil {
+			return err
+		}
+		<-sampled // stay inside until both samples are taken, so the second one still sees a live run
+		return commit.MoveTo(ctx)
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("run failed: %v", err)
+	}
+	<-sampled
+
+	if e := statOf(t, busy, pool); e.Queued.Last != 2 || e.Occupied.Last != 1 {
+		t.Errorf("pool while the spawner runs: Queued.Last=%d Occupied.Last=%d, want 2 and 1", e.Queued.Last, e.Occupied.Last)
+	}
+	if e := statOf(t, drained, pool); e.Queued.Last != 0 {
+		t.Errorf("pool after the spawns were handed out: Queued.Last=%d, want 0", e.Queued.Last)
+	}
+}
+
+// TestStatsFanOutOccupancyCountsAnEmptyVisit: an item inside a fan-out that has scheduled nothing still holds a slot,
+// and the fan-out's Occupied says so.
+func TestStatsFanOutOccupancyCountsAnEmptyVisit(t *testing.T) {
+	c := NewConveyor()
+	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
+	fo.AddPool(OptName("pool"))
+	commit := c.AddStage(OptName("commit"))
+
+	release := make(chan struct{})
+	sampled := make(chan struct{})
+	var got Stats
+	go func() {
+		defer close(sampled)
+		waitFor(t, "the item to be inside the fan-out", func() bool { return occupancyOf(c, fo) == 1 })
+		got = c.Stats()
+		close(release)
+	}()
+
+	err := runOnce(t, c, func(ctx context.Context) error {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		<-release
+		return commit.MoveTo(ctx)
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("run failed: %v", err)
+	}
+	<-sampled
+
+	if e := statOf(t, got, fo); e.Occupied.Last != 1 || e.Limit != 2 {
+		t.Errorf("fo during an empty visit: Occupied.Last=%d Limit=%d, want 1 and 2", e.Occupied.Last, e.Limit)
+	}
+}

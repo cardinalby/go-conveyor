@@ -654,6 +654,9 @@ func (r *run) grabNext(branchIdx int) (g grabbed, asyncCol *taskCollection, ok b
 			r.dropCollection(branchIdx, col, cause)
 			continue
 		}
+		if h := r.conveyor.assignHook; h != nil {
+			h(branchIdx, col, r.taskQueues[branchIdx]) // the slot is handed out here, for a sync pull or a reservation
+		}
 		src := col.curSource()
 		if !src.isSync() {
 			// Reserve the slot for the duration of the user pull, so admission and SetLimit see the lane as busy

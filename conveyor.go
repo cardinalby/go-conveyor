@@ -103,6 +103,11 @@ type conveyor struct {
 	// unlimited, the default. Atomic because SetItemsLimit may change it from any goroutine while a run is
 	// active; every read otherwise happens under run.mu (see run.hasItemsRoom).
 	itemsLimit atomic.Int64
+
+	// assignHook, when set by an in-package test before Run, observes every hand-out of a branch slot (see
+	// run.grabNext). Nil in production; read without a lock, so it must be set before Run and never changed during
+	// one.
+	assignHook func(branchIdx int, col *taskCollection, queue []*taskCollection)
 }
 
 // Option configures a Conveyor at creation. See NewConveyor and OptShutdownContext.

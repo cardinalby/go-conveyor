@@ -34,10 +34,16 @@ func optShutdownGracePeriod(d time.Duration) Option {
 
 // runUntil runs c until `want` items have been created, then cancels the run context and returns Run's error.
 // proc receives the item's number, so a test can vary behavior per item.
+//
+// Items beyond want take no part: they park on the start stage until the cancellation instead of returning at once.
+// Returning would free the start stage for the next such item, and a worker churning items in a tight loop starves the
+// items under test of CPU — badly enough under the race detector with GOMAXPROCS=1 to turn sub-second tests into
+// minutes.
 func runUntil(t *testing.T, c Conveyor, want int64, proc func(ctx context.Context, no int64) error) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
+	stopped := make(chan struct{})
 
 	return c.Run(ctx, func(ic context.Context) error {
 		no, ok := ItemNoFromContext(ic)
@@ -45,7 +51,7 @@ func runUntil(t *testing.T, c Conveyor, want int64, proc func(ctx context.Contex
 			return errors.New("item context carries no item number")
 		}
 		if no > want {
-			// An extra item or two may be created before the cancellation lands; they take no part in the test.
+			<-stopped
 			return nil
 		}
 		err := proc(ic, no)
@@ -53,6 +59,7 @@ func runUntil(t *testing.T, c Conveyor, want int64, proc func(ctx context.Contex
 			// Stop creating items only after the last interesting one has done its work. Items still in flight
 			// are left to finish (no OptShutdownContext, so nothing bounds them), so their assertions still hold.
 			cancel()
+			close(stopped)
 		}
 		return err
 	})
@@ -69,19 +76,26 @@ func runNOK(t *testing.T, c Conveyor, want int64, proc func(ctx context.Context,
 }
 
 // runOnce runs a single item through c and returns Run's error. Used for the many tests that only need one
-// journey.
+// journey. Later items take no part; they park until the first one is done, for the reason given at runUntil.
 func runOnce(t *testing.T, c Conveyor, proc func(ctx context.Context) error) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	var once sync.Once
+	stopped := make(chan struct{})
 	return c.Run(ctx, func(ic context.Context) error {
 		var err error
+		ran := false
 		once.Do(func() {
+			ran = true
 			err = proc(ic)
 			cancel()
+			close(stopped)
 		})
-		return err // later items (created before the cancellation landed) take no part
+		if !ran {
+			<-stopped
+		}
+		return err
 	})
 }
 

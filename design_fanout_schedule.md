@@ -971,8 +971,8 @@ Documentation and examples to revise:
 
 ## 11. Implementation plan
 
-**Progress (2026-09-10):** phases 0 to 5 are done and committed on branch `fanout-schedule` (one commit each).
-Next: phase 6 (§11.8). Process notes: from phase 3 on the phases are self-reviewed, not sent to Codex; nothing is
+**Progress (2026-09-10):** phases 0 to 6 are done and committed on branch `fanout-schedule` (one commit each).
+Next: phase 7 (§11.9). Process notes: from phase 3 on the phases are self-reviewed, not sent to Codex; nothing is
 pushed. Each phase's record sits under its checklist.
 
 ### 11.1 Ground rules
@@ -1004,7 +1004,7 @@ pushed. Each phase's record sits under its checklist.
   drops the package's helpers):
 
   ```
-  go test -race -cpu=1,4 -count=10 -run 'Test(Schedule|Wait|Spawn|Door|Property)' .
+  go test -race -cpu=1,4 -count=10 -run 'Test(Schedule|Wait|Spawn|Door|Property|Completion|Stats)' .
   ```
 - Panics inside task callbacks crash the test binary. A test that asserts a panic from a task or a lane child must
   recover inside the callback and hand the recovered value back through a channel.
@@ -1280,41 +1280,69 @@ rank at entry (mutation check). The waiting-room-during-closed-door case and the
 
 ### 11.8 Phase 6: tests that need the door rule, and the property suite
 
-- [ ] Door: the next item cannot enter the fan-out until the item ahead schedules; it can enter the waiting room
+- [x] Door: the next item cannot enter the fan-out until the item ahead schedules; it can enter the waiting room
       meanwhile (publish of the waiting-room rank on admission); `Schedule` with zero tasks opens the door; leaving
       without scheduling opens it; `Detach` opens it; `Wait` does not.
-- [ ] Failed leave, before the waiting room: a derived call context with a short deadline, the next stage full and
+- [x] Failed leave, before the waiting room: a derived call context with a short deadline, the next stage full and
       without a waiting room; `MoveTo` returns `context.DeadlineExceeded`; the item still occupies the fan-out with a
       `closed` body; `Schedule` and `Wait` panic `errBodyClosed`; `Detach` panics `errNothingToDetach`; a second
       `MoveTo` succeeds once the stage frees.
-- [ ] Failed leave, after the waiting room: the next stage full but its waiting room open; the deadline expires while
+- [x] Failed leave, after the waiting room: the next stage full but its waiting room open; the deadline expires while
       the item waits there; the fan-out slot is already free (`occupancyOf`), the item holds one queued slot; a
       retried `MoveTo` takes no second queued slot (`Stats` `Queued` of the stage stays 1) and enters when the stage
       frees.
-- [ ] Completion: the processor returns nil while the body is busy; the tree finishes and an unobserved task error
+- [x] Completion: the processor returns nil while the body is busy; the tree finishes and an unobserved task error
       fails the item. The processor returns an error while the tree spawns; the run terminates with that error;
       `Schedule` from the still-running tasks returns the cause; queued spawns are dropped and the wave records the
       abandonment. Do not assert that no callback runs after cancellation: a callback assigned just before the
       cancellation still runs and sees a canceled context, by design.
-- [ ] Completion, error policy: the processor returns a `ShutdownError` while a wave holds an unobserved real error;
+- [x] Completion, error policy: the processor returns a `ShutdownError` while a wave holds an unobserved real error;
       the wave error becomes the item's error (§7.44). `TestShutdownErrorFromProcessorIsNotAFailure` does not cover
       this.
-- [ ] Shutdown while blocked in `Wait`: returns the shutdown cause; in-flight tasks finish; queued spawns are dropped
+- [x] Shutdown while blocked in `Wait`: returns the shutdown cause; in-flight tasks finish; queued spawns are dropped
       and the wave records the abandonment.
-- [ ] Stats: the branch `Queued` gauge counts spawned collections and returns to 0; fan-out occupancy counts an empty
+- [x] Stats: the branch `Queued` gauge counts spawned collections and returns to 0; fan-out occupancy counts an empty
       visit and an item that failed to leave.
-- [ ] `property_test.go`: extend the random processor with rounds (`Schedule` then `Wait`, 0 to 2 times), spawn depth
+- [x] `property_test.go`: extend the random processor with rounds (`Schedule` then `Wait`, 0 to 2 times), spawn depth
       (0 to 2 follow-ups per task, bounded depth), `Detach` of growing waves, and `TryMoveTo` out of a fan-out. Extend
       the invariants: every scheduled callback runs exactly once unless its item was canceled; every wave finishes;
       no unit keeps occupancy after the run; `Run` leaves no goroutines; on every branch, at the moment a slot is
       handed out, the branch had no queued work of an older item than the one receiving it (measure at assignment
       inside `grabNext` through an in-package test hook, not at callback invocation).
-- [ ] `property_test.go` (`assertNoLeaks`): today it reads `Stats` after `Run`, which is the zero value once
+- [x] `property_test.go` (`assertNoLeaks`): today it reads `Stats` after `Run`, which is the zero value once
       `currentRun` is nil, so it proves nothing about occupancy. Capture the `*run` through `implOf` while the run is
       active and inspect its `occupancy` and `queued` counters after `Run` returns; include fan-out occupancy.
-- [ ] `fanout_bench_test.go`: migrate `BenchmarkFanOutSchedule`; add a benchmark for spawning from a task and one for
+- [x] `fanout_bench_test.go`: migrate `BenchmarkFanOutSchedule`; add a benchmark for spawning from a task and one for
       `Wait` between rounds; compare with the phase-0 numbers.
-- [ ] Run the root suite with `-count=20` on the new ordering tests to shake out races.
+- [x] Run the root suite with `-count=20` on the new ordering tests to shake out races.
+
+Phase 6 record: root suite green under `-race -cpu=1,4`; the new tests and the property suite also pass `-count=20`.
+New files: `door_test.go` (door rule, waiting room during a closed door, failed leave before and after the waiting
+room) and `completion_test.go` (processor returns with a busy body, clean and failing; processor error while the tree
+spawns, open and detached; `ShutdownError` yielding to an unobserved wave error; shutdown while blocked in `Wait`);
+two Stats tests in `stats_test.go`. One spec nuance: after a leave failed **from the waiting room** the item no longer
+occupies the fan-out, so `Detach` there panics `errStageNotEntered` (§6.11 row 1), not `errNothingToDetach`; §6.4 step
+4 and §7.9 describe the case where the item is still inside. Property suite: `process` draws a body shape per fan-out
+(schedule once and detach, or 0 to 2 rounds of `Schedule` then `Wait` with the body left open for the next move or
+for completion), tries some moves with `TryMoveTo` first (declined attempts fall back to `MoveTo`), and every piece
+of branch work spawns 0 to 2 follow-ups down to depth 2 — pool tasks through their own context, lane children into the
+parent's fan-out after their first move. New invariants: every detached wave is finished after the run; the captured
+`*run` (through `implOf`, taken by the first item) holds no occupancy, no queued item, no queued collection and no
+item in flight; and `conveyor.assignHook` (an in-package hook read by `grabNext` at the moment a slot is handed out,
+for a sync pull or a streaming reservation) never sees an older item's collection still queued on the branch. Mutation
+check: inserting collections at the tail instead of the item's place fails that invariant on almost every seed.
+Test harness fix found on the way: `runUntil` and `runOnce` returned at once for the items beyond the ones under
+test, which freed the start stage for the next such item, so one worker churned items in a tight loop that starved the
+test's goroutines; under the race detector with `GOMAXPROCS=1` the jitter property test took 50 s on HEAD and timed
+out with the new shapes. The extra items now park until the run is stopped; the whole root suite runs in 16 s under
+the CI command. A test assertion that runs on an item's goroutine must use `Errorf` (see
+`assertClosedBodyRefusesEverything`): a `Fatalf` there ends the worker, not the test, and the run hangs.
+Benchmarks (`-count 5`, medians, same machine as phase 0): `BenchmarkFanOutSchedule` lanes1 ~4600 ns/op, 1622 B/op,
+27 allocs/op; lanes2 ~6300 / 1909 / 33; lanes4 ~8800 / 2446 / 45; lanes8 ~19400 / 3568 / 70 (noisy). Against phase 0:
+time equal or better, one more allocation and 4-6% more bytes per item for the body wave created at entry.
+`BenchmarkFanOutSpawnChain` depth1 ~6000 ns/op / 1690 B / 28 allocs, depth4 ~10600 / 2587 / 50, depth16 ~23500 / 5932
+/ 132 (about 1200 ns and 22 allocs per link). `BenchmarkFanOutRounds` rounds1 ~5500 / 1634 / 27, rounds2 ~8400 / 2040
+/ 37, rounds4 ~14400 / 2815 / 57 (about 3000 ns and 10 allocs per round).
 
 ### 11.9 Phase 7: documentation
 
