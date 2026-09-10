@@ -977,9 +977,9 @@ Documentation and examples to revise:
 
 ## 11. Implementation plan
 
-**Progress (2026-09-10):** phases 0 to 7 are done and committed on branch `fanout-schedule` (one commit each).
-Next: phase 8 (§11.10). Process notes: from phase 3 on the phases are self-reviewed, not sent to Codex; nothing is
-pushed. Each phase's record sits under its checklist.
+**Progress (2026-09-10):** phases 0 to 8 are done and committed on branch `fanout-schedule` (one commit each).
+Next: phase 10 (§11.12); phase 9 is not planned. Process notes: from phase 3 on the phases are self-reviewed, not
+sent to Codex; nothing is pushed. Each phase's record sits under its checklist.
 
 ### 11.1 Ground rules
 
@@ -1405,29 +1405,44 @@ pass.
 
 ### 11.10 Phase 8: demo and bench migration (required)
 
-- [ ] `demo/internal/topology/process.go`: the mechanical change was made in phase 5; keep task construction between
+- [x] `demo/internal/topology/process.go`: the mechanical change was made in phase 5; keep task construction between
       `MoveTo` and `Schedule` short, since the door is closed in that window, which is the "pending" state the UI
       already draws.
-- [ ] `demo/internal/topology/process.go` (`FanOutEntry` doc): the pending window is now "admitted, `Schedule` not
+- [x] `demo/internal/topology/process.go` (`FanOutEntry` doc): the pending window is now "admitted, `Schedule` not
       yet returned".
-- [ ] `demo/internal/runtime/manager.go` (`NodeState.PendingEntry` doc): same wording change.
-- [ ] `demo/web/src/codegen/generateGoCode.ts`: migrated in phase 5; review the emitted snippet once more against
+- [x] `demo/internal/runtime/manager.go` (`NodeState.PendingEntry` doc): same wording change.
+- [x] `demo/web/src/codegen/generateGoCode.ts`: migrated in phase 5; review the emitted snippet once more against
       §8.1 for formatting.
-- [ ] `demo/web/src/types/state.ts` (`pendingEntry` doc), `demo/web/src/pipeline/itemPositions.ts` (`ItemFill` doc and
+- [x] `demo/web/src/types/state.ts` (`pendingEntry` doc), `demo/web/src/pipeline/itemPositions.ts` (`ItemFill` doc and
       `classifyFanOutEntries` comment), `demo/web/src/components/nodes/FanOutBox.tsx` (comment): replace the
       `FanOut.MoveTo` wording with the two-call wording, and describe the fills by what they are derived from
       (some of the item's work still queued on a branch; some running; none left) instead of as equivalents of
       `Wave.Started` and `Wave.Finished`. The channels are not observable for an open body, and `Started` now
       counts roots only, so the equivalence would be false as soon as the demo spawns (phase 9).
-- [ ] `demo/web/src/components/LegendPanel.tsx`: check the "Item (waiting at MoveTo)" label still reads right.
-- [ ] Rebuild the WASM binary and the site: `cd demo/web && npm run build`; run `npm run lint`.
-- [ ] `demo/internal/runtime/manager_test.go`: all tests pass; add one that asserts the `PendingEntry` marker is set
+- [x] `demo/web/src/components/LegendPanel.tsx`: check the "Item (waiting at MoveTo)" label still reads right.
+- [x] Rebuild the WASM binary and the site: `cd demo/web && npm run build`; run `npm run lint`.
+- [x] `demo/internal/runtime/manager_test.go`: all tests pass; add one that asserts the `PendingEntry` marker is set
       before `MoveTo` and cleared after `Schedule` returns. Do not relate it to the next item's admission: the marker
       is cleared outside the library lock after `Schedule` returned, while the door opened inside `Schedule`, so the
       follower may be admitted before the marker clears.
-- [ ] `bench/internal/pipeline/conveyor.go`: migrated in phase 5; `TestPipelinesEquivalent` passes. Re-run the
+- [x] `bench/internal/pipeline/conveyor.go`: migrated in phase 5; `TestPipelinesEquivalent` passes. Re-run the
       benchmark scenarios and refresh `docs/8_benchmarks.md` numbers only if they moved outside noise.
-- [ ] Check `bench/README.md` and `demo/web/README.md` for API snippets (none found at the time of writing).
+- [x] Check `bench/README.md` and `demo/web/README.md` for API snippets (none found at the time of writing).
+
+Phase 8 record: task construction already happens before `MoveTo` in `runNodes`, so the admission-to-`Schedule`
+window holds no user work; a comment at the call site says why. `FanOutEntry`, `MarkPending`, `MarkConfirmed`,
+`runNodes` and `NodeState.PendingEntry` docs now say "until `Schedule` returns"; the marker also covers an item still
+waiting for admission in `MoveTo`. `state.ts`, `itemPositions.ts` (`ItemFill`, `classifyFanOutEntries`) and
+`FanOutBox.tsx` describe the three fan-out fills by their derivation (queued somewhere / running somewhere / nothing
+left, plus the pending marker) with a note on why the Wave channels are not the source. `LegendPanel.tsx` needed no
+change: "waiting at MoveTo" is the stage fill, and the fan-out labels do not name an API. The generated snippet
+already matches §8.1 (`MoveTo`, then one multi-line `Schedule` call). New test
+`TestPendingEntryCoversTheWindowUntilScheduleReturns` (stable under `-count=5`): item 2 is marked while parked in
+`MoveTo` and not in the body; the mark is gone once its task runs. Demo and bench modules vet and pass under
+`-race`; `npm run lint` and `npm run build` (WASM rebuilt) pass. Bench re-run with `run_medium.sh` settings (one repeat):
+every nonzero-delay point is within about 15% of the previous CSVs, in both directions, and the D=0 points (raw
+overhead, tens of microseconds) swing widely both ways as they always do at one repeat; nothing moved outside noise,
+so `docs/8_benchmarks.md` and its charts are unchanged. No API snippets in `bench/README.md` or `demo/web/README.md`.
 
 ### 11.11 Phase 9: demo visualization of a growing body (not planned)
 

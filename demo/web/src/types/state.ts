@@ -10,9 +10,10 @@ export interface LanePathEntry {
 }
 
 /** One node's live state: its current dials and exactly who occupies it (null once nothing is running).
- * pendingEntry is only ever non-empty for a fan-out: the InBody items admitted but whose FanOut.MoveTo call has
- * not returned yet (tasks not dispatched). blockedLeaving is only ever non-empty for the start stage or a plain
- * stage: the InBody items that finished this node's own work and are now trying to advance into the next one.
+ * pendingEntry is only ever non-empty for a fan-out: the items entering it (MoveTo) or admitted but whose
+ * Schedule call has not returned yet (tasks not dispatched). blockedLeaving is only ever non-empty for the start
+ * stage or a plain stage: the InBody items that finished this node's own work and are now trying to advance into
+ * the next one.
  * See pipeline/itemPositions.ts's ItemFill for how both feed the item circle's fill. */
 export interface NodeState {
   id: string;

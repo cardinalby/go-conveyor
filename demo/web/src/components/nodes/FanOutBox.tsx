@@ -22,9 +22,9 @@ interface Props {
 /** The visual content shared by a top-level fan-out node (FanOutNodeView) and a fan-out nested inside some lane's
  * interior chain (see NodeBox) — matching the library's own model directly, a fan-out is one node containing its
  * branches, not sibling nodes. Its own entry slot strip (top) is where an item parks for as long as its branches'
- * work is outstanding, filled to reflect how far it's progressed — dashed outline ("pending": not every branch has
- * started its task yet), solid ("every branch started, at least one still running"), solid outline ("blocked":
- * every branch's task has finished, waiting to advance) — see pipeline/itemPositions.ts's ItemFill. */
+ * work is outstanding, filled to reflect how far it's progressed — dashed outline ("pending": Schedule not returned
+ * yet, or some of its work still queued on a branch), solid ("nothing queued, some of it running"), solid outline
+ * ("blocked": none of its work left on any branch, waiting to advance) — see pipeline/itemPositions.ts's ItemFill. */
 export function FanOutBox({ fanout, callbacks, handles, shellRef }: Props) {
   const queueSlots = queueSlotCount(fanout.queueSize, fanout.inQueue);
   // Where each item sitting at this fan-out's entry actually is, by slot — the origin a branch's task badge flies in

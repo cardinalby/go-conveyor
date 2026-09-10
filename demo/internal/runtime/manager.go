@@ -31,9 +31,9 @@ type NodeState struct {
 	TasksPerItem int     `json:"tasksPerItem"`
 	InBody       []int64 `json:"inBody"`
 	InQueue      []int64 `json:"inQueue"`
-	// PendingEntry lists the InBody items of a fan-out node that have been admitted but whose FanOut.MoveTo call
-	// has not returned yet (tasks not dispatched). Always empty for a stage, a pool or the start stage — see
-	// topology.FanOutEntry.
+	// PendingEntry lists the items of a fan-out node that are entering it (MoveTo, possibly still waiting for
+	// admission) or have been admitted but whose Schedule call has not returned yet (tasks not dispatched). Always
+	// empty for a stage, a pool or the start stage — see topology.FanOutEntry.
 	PendingEntry []int64 `json:"pendingEntry"`
 	// BlockedLeaving lists the InBody items of a start/stage node — or a lane's own entrance, which behaves exactly
 	// like one — that have finished this node's own work and are now trying to advance into the next one. Always

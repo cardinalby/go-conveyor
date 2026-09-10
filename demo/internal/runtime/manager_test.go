@@ -474,3 +474,39 @@ func TestSecondLaneChildIsNotWronglyReportedBlocked(t *testing.T) {
 			"bleeding onto it", found.BlockedLeaving)
 	}
 }
+
+func TestPendingEntryCoversTheWindowUntilScheduleReturns(t *testing.T) {
+	// Item 1 holds the fan-out (limit 1, no waiting room) with a slow task, so item 2 is parked in MoveTo: marked
+	// pending before the call, not in the body yet. Once item 2 is inside with a task running, Schedule has
+	// returned and the mark is gone. The mark is cleared outside the library lock after Schedule returned, while
+	// the door opened inside Schedule, so nothing here relates the mark to the follower's admission.
+	m := runManager(t, fanOutSpec())
+
+	pendingHas := func(itemNo int64) bool {
+		n, ok := nodeByID(m.State(), "f")
+		if !ok {
+			return false
+		}
+		for _, no := range n.PendingEntry {
+			if no == itemNo {
+				return true
+			}
+		}
+		return false
+	}
+
+	waitFor(t, "item 1's task to start on pool l1", func() bool { return occupies(m, "l1", 1) })
+	waitFor(t, "item 2 to be marked pending at the fan-out", func() bool { return pendingHas(2) })
+	if occupies(m, "f", 2) {
+		t.Error("item 2 is in the fan-out's body while item 1 still holds its only slot")
+	}
+	if pendingHas(1) {
+		t.Error("item 1 is still marked pending while its task is running")
+	}
+
+	waitFor(t, "item 2's task to start on pool l1", func() bool { return occupies(m, "l1", 2) })
+	waitFor(t, "item 2's pending mark to clear", func() bool { return !pendingHas(2) })
+	if !occupies(m, "f", 2) {
+		t.Error("item 2 is not in the fan-out's body while its task is running")
+	}
+}

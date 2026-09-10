@@ -8,15 +8,19 @@ import type { ResolvedFanOut, ResolvedNode, ResolvedStart } from "./resolve";
 /** How an item's rectangle should render, everywhere an item is drawn (a start/stage body, a fan-out's own entry
  * slot, or a lane's own interior chain — see FanOutBox/LaneBox):
  *  - "solid"    — the default: in a queue anywhere, or actually doing this node's own work right now — sleeping
- *    out a stage's delay, or (in a fan-out's entry slot) with at least one branch's task still running (Wave.Started
- *    closed, Finished not).
- *  - "pending"  — (fan-out entry slot only) took the slot but not all of its branches' tasks have started yet
- *    (Wave.Started not closed): either FanOut.MoveTo itself hasn't returned (dispatch not confirmed —
- *    runtime.NodeState.PendingEntry), or it has but at least one target branch hasn't pulled the task yet (still in
- *    that branch's InQueue, or — for a lane — still somewhere in its own interior chain).
+ *    out a stage's delay, or (in a fan-out's entry slot) with none of its work still queued on a branch and some of
+ *    it running.
+ *  - "pending"  — (fan-out entry slot only) took the slot but some of its work has not started yet: either its
+ *    Schedule call hasn't returned (dispatch not confirmed — runtime.NodeState.PendingEntry), or it has but a target
+ *    branch hasn't pulled the work yet (still in that branch's InQueue, or — for a lane — still somewhere in its own
+ *    interior chain).
  *  - "blocked"  — finished this node's own work and is now trying to advance into the next node: a start/stage
- *    item past its own delay (runtime.NodeState.BlockedLeaving), or a fan-out entry whose branch work has entirely
- *    finished (Wave.Finished closed on every branch).
+ *    item past its own delay (runtime.NodeState.BlockedLeaving), or a fan-out entry with none of its work queued or
+ *    running on any branch.
+ *
+ * The three fan-out fills are derived from what is polled (PendingEntry plus each branch's InQueue/InBody), not from
+ * the library's Wave channels: an open body's channels are not observable, and Wave.Started counts only the sources
+ * the item scheduled itself, not follow-ups a task may schedule.
  */
 export type ItemFill = "solid" | "pending" | "blocked";
 
@@ -141,7 +145,7 @@ function collectItemNos(nodes: ResolvedNode[], into: Set<number>): void {
   }
 }
 
-/** Classifies a fan-out's entry-slot occupants into "pending" / "solid" / "blocked" per the Wave.Started/Finished
+/** Classifies a fan-out's entry-slot occupants into "pending" / "solid" / "blocked" per the queued/running/none
  * derivation above, using only data already polled (a branch's InQueue/InBody) plus the existing PendingEntry
  * (dispatch-confirmed) marker — no extra Go-side state needed, unlike a plain stage's "blocked" (see
  * runtime.BlockedEntries): a fan-out's own work finishing is already visible per-branch. A lane's entrance releases

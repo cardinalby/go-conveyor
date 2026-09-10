@@ -111,11 +111,11 @@ func (t *TaskCounts) Set(branchID string, count int) {
 }
 
 // FanOutEntry tracks, per fan-out node, which items are currently admitted into it but have not yet had their
-// tasks dispatched — the narrow window between entering the node's waiting room/body and FanOut.MoveTo actually
-// returning (join + task scheduling). DebugUnitOccupants cannot see this distinction on its own: an item counts as
-// occupying the fan-out's body from the moment it is admitted, which happens *inside* MoveTo, before our own code
-// gets control back. The UI uses this to show an item's circle with a striped fill while pending, solid once
-// confirmed — see runtime.NodeState.PendingEntry.
+// tasks dispatched — the narrow window between entering the node's waiting room/body and the item's Schedule call
+// returning (admission inside MoveTo, then the one Schedule that queues every branch's tasks). DebugUnitOccupants
+// cannot see this distinction on its own: an item counts as occupying the fan-out's body from the moment it is
+// admitted, which happens *inside* MoveTo, before our own code gets control back. The UI uses this to show an
+// item's circle with a striped fill while pending, solid once confirmed — see runtime.NodeState.PendingEntry.
 //
 // Entries are never explicitly removed mid-run: once an item leaves the fan-out (its next move releases the slot),
 // DebugUnitOccupants simply stops reporting it there, so a stale "confirmed" entry left behind is inert — nothing
@@ -129,7 +129,8 @@ func NewFanOutEntry() *FanOutEntry {
 	return &FanOutEntry{pending: make(map[string]map[int64]bool)}
 }
 
-// MarkPending records that itemNo has been admitted into nodeID's fan-out but MoveTo has not returned yet.
+// MarkPending records that itemNo is entering nodeID's fan-out (MoveTo may still be waiting for admission) and
+// its Schedule call has not returned yet.
 func (e *FanOutEntry) MarkPending(nodeID string, itemNo int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -139,7 +140,7 @@ func (e *FanOutEntry) MarkPending(nodeID string, itemNo int64) {
 	e.pending[nodeID][itemNo] = true
 }
 
-// MarkConfirmed records that itemNo's tasks have been dispatched — MoveTo returned successfully.
+// MarkConfirmed records that itemNo's tasks have been dispatched — Schedule returned successfully.
 func (e *FanOutEntry) MarkConfirmed(nodeID string, itemNo int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -481,10 +482,10 @@ func ItemProcessor(
 // noRelease is the "nothing precedes this walk" releasePrev for the root item's own walk — see runNodes.
 func noRelease() {}
 
-// runNodes walks nodes in order, calling MoveTo on each stage in turn, or scheduling taskCounts.Get(branch) tasks
-// per branch and calling MoveTo on the fan-out, and sleeps for the target's configured delay — read from delays on
-// every pass, so a live slider change takes effect for the next item/child to reach that node (a pool's task reads
-// it once, when the task actually starts running, for the same reason). Every sleep is followed by a
+// runNodes walks nodes in order, calling MoveTo on each stage in turn, or calling MoveTo on the fan-out and then
+// one Schedule with taskCounts.Get(branch) tasks per branch, and sleeps for the target's configured delay — read
+// from delays on every pass, so a live slider change takes effect for the next item/child to reach that node (a
+// pool's task reads it once, when the task actually starts running, for the same reason). Every sleep is followed by a
 // BlockedEntries.Mark for the node just finished, before the loop goes on to attempt the next node's MoveTo — see
 // BlockedEntries.
 //
@@ -616,6 +617,9 @@ func runNodes(
 					}))
 				}
 			}
+			// The tasks are built above, before MoveTo, so the window between admission and Schedule stays as
+			// short as possible: the fan-out's door is closed to the next item until Schedule returns, and that
+			// window is exactly the "pending" state the UI draws.
 			entries.MarkPending(n.ID, no)
 			if err := fo.MoveTo(ctx); err != nil {
 				release()
