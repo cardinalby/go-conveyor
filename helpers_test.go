@@ -307,6 +307,15 @@ func implOf(c Conveyor) *conveyor { return c.(*conveyor) }
 // public API.
 func itemOf(ctx context.Context) *item { return ctx.Value(itemCtxKey).(*item) }
 
+// bodyStateOf reports the body state of ctx's item at fan-out f, for the one transition the public API reflects only
+// indirectly: completion sealing an open body after the processor returned.
+func bodyStateOf(ctx context.Context, f FanOut) bodyState {
+	it := itemOf(ctx)
+	it.run.mu.Lock()
+	defer it.run.mu.Unlock()
+	return it.body[f.unit().index]
+}
+
 // occupancyOf reports the live occupancy of a unit, for tests that assert on runtime state.
 func occupancyOf(c Conveyor, u Unit) int {
 	r := implOf(c).currentRun.Load()

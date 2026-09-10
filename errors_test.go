@@ -87,8 +87,18 @@ func TestErrForeignContextFromFanOutMoveTo(t *testing.T) {
 	if !errors.Is(err, ErrForeignContext) || !errors.Is(err, ErrInvalidContext) {
 		t.Fatalf("MoveTo with a foreign context = %v, want ErrForeignContext", err)
 	}
+	err = fo.Schedule(context.Background(), pool.NewTask(func(context.Context) error {
+		ran.Store(true)
+		return nil
+	}))
+	if !errors.Is(err, ErrForeignContext) {
+		t.Fatalf("Schedule with a foreign context = %v, want ErrForeignContext", err)
+	}
+	if err := fo.Wait(context.Background()); !errors.Is(err, ErrForeignContext) {
+		t.Fatalf("Wait with a foreign context = %v, want ErrForeignContext", err)
+	}
 	if ran.Load() {
-		t.Fatalf("the task ran although the move was declined")
+		t.Fatalf("the task ran although the call was declined")
 	}
 }
 
@@ -148,6 +158,13 @@ func TestErrStaleContextFromFinishedItem(t *testing.T) {
 			err = fo.MoveTo(stale, Tasks{pool.NewTask(func(context.Context) error { return nil })})
 			if !errors.Is(err, ErrStaleContext) {
 				t.Errorf("FanOut.MoveTo with a stale context = %v, want ErrStaleContext", err)
+			}
+			err = fo.Schedule(stale, pool.NewTask(func(context.Context) error { return nil }))
+			if !errors.Is(err, ErrStaleContext) {
+				t.Errorf("FanOut.Schedule with a stale context = %v, want ErrStaleContext", err)
+			}
+			if err := fo.Wait(stale); !errors.Is(err, ErrStaleContext) {
+				t.Errorf("FanOut.Wait with a stale context = %v, want ErrStaleContext", err)
 			}
 			rw := s.Retain(stale, func() error { return nil })
 			<-rw.Finished()
@@ -647,6 +664,10 @@ func TestErrWrongScopeIsCheckedOnEveryEntryPoint(t *testing.T) {
 			_, _ = f.TryMoveTo(ctx, Tasks{b.NewTask(func(context.Context) error { return nil })})
 		}},
 		{"FanOut.Detach", func(_ Stage, f FanOut, _ Branch, ctx context.Context) { _ = f.Detach(ctx) }},
+		{"FanOut.Schedule", func(_ Stage, f FanOut, b Branch, ctx context.Context) {
+			_ = f.Schedule(ctx, b.NewTask(func(context.Context) error { return nil }))
+		}},
+		{"FanOut.Wait", func(_ Stage, f FanOut, _ Branch, ctx context.Context) { _ = f.Wait(ctx) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := NewConveyor()

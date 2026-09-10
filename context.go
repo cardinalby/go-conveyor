@@ -83,6 +83,23 @@ func (c *conveyor) resolveItem(ctx context.Context) (*item, error) {
 	return it, nil
 }
 
+// resolveCaller returns who acts under ctx for FanOut.Schedule, the one node method open to a pool's work: the
+// collection whose work holds the context (nil when ctx is an item's own), and the acting item — that work's owner,
+// or the item the context carries. It returns ErrForeignContext if ctx carries neither, and panics (errInvalidUnit)
+// if the item belongs to a different conveyor.
+func (c *conveyor) resolveCaller(ctx context.Context) (*taskCollection, *item, error) {
+	if m, ok := ctx.Value(poolWorkCtxKey).(poolWorkMarker); ok {
+		c.validateItemConveyor(m.col.it)
+		return m.col, m.col.it, nil
+	}
+	it, err := itemFromContext(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	c.validateItemConveyor(it)
+	return nil, it, nil
+}
+
 // actingItem is the preamble every node method shares: it validates the handle and the acting item, then takes the
 // run's lock. On success it returns the item and its run WITH r.mu HELD — the caller must unlock it (the package
 // already returns under a held lock in run.join; the alternative, a closure, does not fit the four different return

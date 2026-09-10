@@ -971,8 +971,8 @@ Documentation and examples to revise:
 
 ## 11. Implementation plan
 
-**Progress (2026-09-10):** phases 0 to 3 are done and committed on branch `fanout-schedule` (one commit each).
-Next: phase 4 (§11.6). Process notes: from phase 3 on the phases are self-reviewed, not sent to Codex; nothing is
+**Progress (2026-09-10):** phases 0 to 4 are done and committed on branch `fanout-schedule` (one commit each).
+Next: phase 5 (§11.7). Process notes: from phase 3 on the phases are self-reviewed, not sent to Codex; nothing is
 pushed. Each phase's record sits under its checklist.
 
 ### 11.1 Ground rules
@@ -1141,52 +1141,69 @@ rest of the run. Both belong in the `impl_details.md` §5/§6 rewrite of phase 7
 Goal: §6.2 and §6.3. The old `MoveTo(ctx, tasks, joins...)` still exists and still publishes at entry, so the door
 rule is not testable yet; everything else is.
 
-- [ ] `fanout.go`: add `Schedule(ctx, tasks ...Task) error` to the interface and implement the fourteen steps of §6.2:
+- [x] `fanout.go`: add `Schedule(ctx, tasks ...Task) error` to the interface and implement the fourteen steps of §6.2:
       static task validation, handle validation, caller resolution (pool-work marker, item), conveyor validation,
       lock, stale checks (finished item; finished wave; child checked before the parent-wave redirect), body
       resolution and root/spawn classification, cancellation by both contexts, claim, group, insert, register,
       publish, pump.
-- [ ] `context.go`: add the `Schedule` resolver that accepts a pool-work context and returns its collection.
-- [ ] `fanout.go`: add `Wait(ctx) error` per §6.3: task context panics, body state must be `open`, `waitUntil(idle)`
+- [x] `context.go`: add the `Schedule` resolver that accepts a pool-work context and returns its collection.
+- [x] `fanout.go`: add `Wait(ctx) error` per §6.3: task context panics, body state must be `open`, `waitUntil(idle)`
       with the cancellation nuance, acknowledge and return the node-qualified error, never seal.
-- [ ] `errors.go`: `ErrStaleContext` doc now covers a finished lane child and pool work whose wave finished.
-- [ ] Godoc for `FanOut.Schedule`, `FanOut.Wait`, `TaskFunc` (a pool context may call `Schedule` of its own fan-out).
-- [ ] Tests, written already in the style that survives phase 5 (`MoveTo(ctx, nil)` then `Schedule`), in a new
+- [x] `errors.go`: `ErrStaleContext` doc now covers a finished lane child and pool work whose wave finished.
+- [x] Godoc for `FanOut.Schedule`, `FanOut.Wait`, `TaskFunc` (a pool context may call `Schedule` of its own fan-out).
+- [x] Tests, written already in the style that survives phase 5 (`MoveTo(ctx, nil)` then `Schedule`), in a new
       `schedule_test.go` and `wait_test.go`:
-  - [ ] rounds: `Schedule`, `Wait`, `Schedule`, `Wait`, leave; results of round 1 decide round 2.
-  - [ ] `Wait` on an empty body returns at once; repeated `Wait` after an error returns the same error.
-  - [ ] `Wait` returns only when the whole tree is done (spawn depth 3 on one pool).
-  - [ ] tree on one pool with several roots; tree across two pools; pagination chain.
-  - [ ] the join-as-continuation idiom (last sibling schedules the merge task).
-  - [ ] spawn from a lane child into the fan-out its lane belongs to; the parent's exit joins the siblings.
-  - [ ] spawn into a detached wave; `Finished` closes only when the tree is done; the fan-out slot is held meanwhile.
-  - [ ] `Schedule` from a canceled item returns the cause and queues nothing (`Queued` gauge stays 0).
-  - [ ] `Schedule` from a pool goroutine after its wave finished returns `ErrStaleContext`; from a lane child after
+  - [x] rounds: `Schedule`, `Wait`, `Schedule`, `Wait`, leave; results of round 1 decide round 2.
+  - [x] `Wait` on an empty body returns at once; repeated `Wait` after an error returns the same error.
+  - [x] `Wait` returns only when the whole tree is done (spawn depth 3 on one pool).
+  - [x] tree on one pool with several roots; tree across two pools; pagination chain.
+  - [x] the join-as-continuation idiom (last sibling schedules the merge task).
+  - [x] spawn from a lane child into the fan-out its lane belongs to; the parent's exit joins the siblings.
+  - [x] spawn into a detached wave; `Finished` closes only when the tree is done; the fan-out slot is held meanwhile.
+  - [x] `Schedule` from a canceled item returns the cause and queues nothing (`Queued` gauge stays 0).
+  - [x] `Schedule` from a pool goroutine after its wave finished returns `ErrStaleContext`; from a lane child after
         its callback returned returns `ErrStaleContext` even while the parent wave is busy.
-  - [ ] panics: `Schedule` before entering (`errStageNotEntered`); after `Detach` (`errWorkDetached`); a task calling
+  - [x] panics: `Schedule` before entering (`errStageNotEntered`); after `Detach` (`errWorkDetached`); a task calling
         `Schedule` on another fan-out (`errInvalidUnit`); `Wait` from a pool task (`errCannotMove`); a lane child
         calling `Wait` on the parent's fan-out (`errWrongScope`); a `Retain` callback calling `Schedule` after the
         processor returned (`errBodyClosed`, recovered inside the callback).
-  - [ ] `TryMoveTo` leaving: busy body returns `(false, nil)` and scheduling continues afterwards; idle clean body with
+  - [x] `TryMoveTo` leaving: busy body returns `(false, nil)` and scheduling continues afterwards; idle clean body with
         a full target returns `(false, nil)` and scheduling continues; poisoned item returns `(false, cause)`.
-  - [ ] ordering: with a pool limit of 1, an older item's same-pool spawn chain runs to the end before the younger
+  - [x] ordering: with a pool limit of 1, an older item's same-pool spawn chain runs to the end before the younger
         item's queued task starts; with a limit above 1, the older item's spawn takes the next freed slot ahead of the
         younger item's queued work.
-  - [ ] displaced async pull, yield path: a younger item's generator is mid-pull when the older item spawns; the
+  - [x] displaced async pull, yield path: a younger item's generator is mid-pull when the older item spawns; the
         older work is pulled from the new head; the yielded younger callback still runs on its reserved slot.
-  - [ ] displaced async pull, exhaustion path (this is what identity removal protects): the displaced generator
+  - [x] displaced async pull, exhaustion path (this is what identity removal protects): the displaced generator
         returns no callback while the older work still sits at the head; the displaced collection, not the head, is
         removed; its wave gets exactly one exhaustion notification; the `Queued` gauge returns to 0. Variant: the
         younger item is canceled mid-pull, so the pull ends as exhaustion and the wave records the abandonment.
-  - [ ] `Wait(context.WithoutCancel(ctx))` on a canceled item with an idle clean body returns the cause; with an idle
+  - [x] `Wait(context.WithoutCancel(ctx))` on a canceled item with an idle clean body returns the cause; with an idle
         failed body returns the body error.
-  - [ ] a spawn with zero tasks is a no-op; concurrent `Schedule` calls from the ItemProcessor and from tasks of the
+  - [x] a spawn with zero tasks is a no-op; concurrent `Schedule` calls from the ItemProcessor and from tasks of the
         same item all land, in lock order, and every callback runs once.
-  - [ ] a channel source that is not closed blocks `Wait`; closing it releases `Wait` (documents §7.34).
-  - [ ] `Started` on a detached wave closes when the root generator is drained even while a spawned generator is still
+  - [x] a channel source that is not closed blocks `Wait`; closing it releases `Wait` (documents §7.34).
+  - [x] `Started` on a detached wave closes when the root generator is drained even while a spawned generator is still
         pulling.
-  - [ ] interior fan-out of a lane: a child runs rounds and spawns inside its lane.
-- [ ] Run the root suite.
+  - [x] interior fan-out of a lane: a child runs rounds and spawns inside its lane.
+- [x] Run the root suite.
+
+Phase 4 record: root suite green under `-race -cpu=1,4`; the new tests also pass `-count=10`. `Schedule` resolves its
+caller with `conveyor.resolveCaller` (pool-work marker or item), then `fanOut.bodyFor` classifies the addition (pool
+work: its wave, wrong target panics; lane child at the fan-out of its lane: the parent's wave; otherwise the own-body
+path through `fanOut.openBody`, shared with `Wait`). The stale check runs before `bodyFor`, so a finished child is
+refused before any redirect. Mutation checks: insertion at the tail (instead of at the item's place) fails the two
+ordering tests; head-only removal in `dequeue` fails the displaced-pull tests; dropping the finished-wave stale check
+fails `TestScheduleFromFinishedWorkIsStale`. Two test assumptions were corrected on the way: a slot freed by a spawned
+task goes to the next queued work, whichever item it belongs to, once the older item has nothing queued (so the
+limit-above-1 ordering test asserts only "spawn starts before the younger work"); and a pull in flight reserves a pool
+slot, so occupancy does not return to zero while a channel source is open. The phase 5 items for
+`TestErrForeignContextFromFanOutMoveTo` and `TestErrWrongScopeIsCheckedOnEveryEntryPoint` were done here, plus
+`Schedule`/`Wait` rows in `TestErrStaleContextFromFinishedItem`. The `Schedule` godoc leaves out the door sentence
+("the item's first Schedule opens this fan-out to the item behind it") until phase 5 makes it true. The busy-`Wait`
+stripped-context test (`TestStrippedContextWaitWakesOnItemCancellation`) pins the contract but cannot force the
+wake-up path: `Wait` changes no runtime state before it parks, so nothing observable says the wait has begun; the
+watcher itself is pinned by the phase 2 tests through the same `waitUntil`.
 
 ### 11.7 Phase 5: the API switch
 
@@ -1220,8 +1237,10 @@ Goal: §5 and §6.1. Breaking change, mechanical migration of every call site, t
   - [ ] `TestFanOutTasksFromForeignBranchPanics`, `TestTaskReusePanics` (`fanout_test.go`),
         `TestErrInvalidUnitTaskFromAnotherFanOut`, `TestErrTaskReusedOnSecondSubmission` (`errors_test.go`): the
         panic now comes from `Schedule`.
-  - [ ] `TestErrForeignContextFromFanOutMoveTo` (`errors_test.go`): add `Schedule` and `Wait` with a foreign context.
-  - [ ] `TestErrWrongScopeIsCheckedOnEveryEntryPoint` (`errors_test.go`): add `Schedule` (own-body path) and `Wait`.
+  - [x] `TestErrForeignContextFromFanOutMoveTo` (`errors_test.go`): add `Schedule` and `Wait` with a foreign context
+        (done in phase 4, together with `TestErrStaleContextFromFinishedItem`).
+  - [x] `TestErrWrongScopeIsCheckedOnEveryEntryPoint` (`errors_test.go`): add `Schedule` (own-body path) and `Wait`
+        (done in phase 4).
   - [ ] `TestErrCannotMoveFromNonTravellingWork` (`errors_test.go`) and `TestNonTravellingWorkCannotMove`
         (`children_test.go`): `Schedule` with a pool context is now allowed; `Wait` and the moves still panic.
   - [ ] `TestErrStageNotEnteredAfterLeaving` (`errors_test.go`): add `Schedule` and `Wait` after leaving
@@ -1364,7 +1383,6 @@ library.
 - [ ] Go version floor: CI runs 1.23 and stable; if `context.AfterFunc` or another API newer than 1.23 is touched,
       confirm the floor still builds.
 - [ ] Read the diff of the public API once more against §5; every panic and return in §6.11 has a test.
-- [ ] Tag `v0.10.0` with the release notes from phase 7.
 
 ## Decisions taken
 

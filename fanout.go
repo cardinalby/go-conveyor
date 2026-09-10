@@ -47,10 +47,40 @@ type FanOut interface {
 	// on ctx or only on the item's own context. It panics on the same misuse as MoveTo.
 	TryMoveTo(ctx context.Context, tasks Tasks, joins ...Wave) (entered bool, err error)
 
-	// Detach hands this fan-out's slot to the work already scheduled here, letting the item move on without
-	// waiting for it to finish. Join the returned Wave in a later MoveTo to wait for it.
+	// Schedule adds tasks to a body of this fan-out on behalf of the calling context and returns once they are
+	// queued. It never blocks. Three callers are allowed:
+	//   - the ItemProcessor, while its item is inside this fan-out with an open body (not yet left, not detached);
+	//   - a task running on one of this fan-out's pools, before the task returns;
+	//   - a child item of one of this fan-out's lanes, before its callback returns.
 	//
-	// It panics on misuse: a node the item does not currently occupy, or no outstanding work here to detach.
+	// Work is queued per branch at the owning item's place: after everything that item and older items already
+	// have queued there, ahead of younger items' queued work. Running work is never preempted. Several tasks for
+	// one branch in one call start in argument order. Calling Schedule with no tasks is legal.
+	//
+	// It returns ErrForeignContext; ErrStaleContext when the context belongs to a finished item, a finished child,
+	// or work whose wave has finished; or the item's cancellation cause. In all these cases nothing is queued.
+	// It panics on misuse: a task for another fan-out's branch, a Task submitted twice, the ItemProcessor calling
+	// it outside this fan-out, after it left or tried to leave (the body is closed), or after Detach, or a task
+	// calling it for a fan-out it does not run under.
+	Schedule(ctx context.Context, tasks ...Task) error
+
+	// Wait blocks until every task scheduled so far in this fan-out's body has finished, including work those
+	// tasks scheduled themselves, and returns the first error, or the item's cancellation cause (visible on ctx
+	// or only on the item's own context). The item keeps its slot and may Schedule again afterwards. Repeated
+	// calls return the same error again.
+	//
+	// Only the ItemProcessor (or a child item at a fan-out of its own lane) may call it, while the body is open.
+	// It panics when called with a task's context (a task must never wait for other work), outside this fan-out,
+	// after the body was closed by a leave, or after Detach.
+	Wait(ctx context.Context) error
+
+	// Detach hands this fan-out's slot to the work already scheduled here, letting the item move on without
+	// waiting for it. Join the returned Wave in a later MoveTo, or read its channels. The detached work may still
+	// grow from its own running tasks; the wave finishes when all of it is done. After Detach the ItemProcessor
+	// may not Schedule or Wait here again.
+	//
+	// It panics on misuse: a node the item does not currently occupy, or nothing to detach (never entered here,
+	// already detached, or the body was already closed by a leave).
 	Detach(ctx context.Context) Wave
 
 	// SetLimit sets how many items may have work outstanding in this fan-out at once (default 1; a limit <= 0
@@ -146,6 +176,86 @@ func (f *fanOut) TryMoveTo(ctx context.Context, tasks Tasks, joins ...Wave) (ent
 	}
 	r.addToBody(it, r.newBody(it, f), f, tasks, true)
 	return true, nil
+}
+
+// Schedule adds tasks to a body of this fan-out on behalf of whoever holds ctx. See the FanOut interface for the full
+// contract.
+func (f *fanOut) Schedule(ctx context.Context, tasks ...Task) error {
+	f.validateTasks(tasks) // static wiring check first, before anything touches the context
+	c := f.series.conveyor
+	c.validateUnit(f.node)
+	col, it, err := c.resolveCaller(ctx)
+	if err != nil {
+		return fmt.Errorf("schedule at %s: %w", f, err)
+	}
+	r := it.run
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// A finished caller's context is stale: the item itself (a child's own lifetime is judged before its work is
+	// charged to the parent's wave), or, for a pool's work, the wave it belongs to.
+	if it.finished || (col != nil && col.wave.isFinished()) {
+		return fmt.Errorf("schedule at %s: %w", f, ErrStaleContext)
+	}
+	w, root := f.bodyFor(col, it)
+	if err := w.it.cancelCause(ctx); err != nil {
+		return fmt.Errorf("schedule at %s: %w", f, err)
+	}
+	r.addToBody(w.it, w, f, tasks, root)
+	return nil
+}
+
+// bodyFor resolves the body a Schedule adds to, and whether the addition is a root (through the item's own path) or
+// a spawn (from the body's own work). A pool's work adds to its own wave, which must be this fan-out's; a lane child
+// adds to its parent's wave when this is the fan-out its lane belongs to (checked before the scope, which is the
+// parent's); otherwise the item acts in its own scope and its body here must be open. Caller holds mu.
+func (f *fanOut) bodyFor(col *taskCollection, it *item) (w *wave, root bool) {
+	if col != nil {
+		if col.branch.fanout != f {
+			panic(fmt.Errorf("work on %s cannot schedule at %s: %w", col.branch, f, errInvalidUnit))
+		}
+		return col.wave, false
+	}
+	if pw := it.parentWave; pw != nil && pw.atNode == f.node {
+		return pw, false
+	}
+	f.series.conveyor.validateScope(it, f.node)
+	return f.openBody(it, "schedule"), true
+}
+
+// Wait blocks until the item's body at this fan-out is idle and reports its outcome. See the FanOut interface for the
+// full contract.
+func (f *fanOut) Wait(ctx context.Context) error {
+	it, r, err := f.series.conveyor.actingItem(ctx, f.node, false)
+	if err != nil {
+		return fmt.Errorf("wait at %s: %w", f, err)
+	}
+	defer r.mu.Unlock()
+	w := f.openBody(it, "wait")
+	// A canceled wait with an idle failed body falls through: a failing task poisons its item, so the body's own error
+	// is the truer message (see joinPending). A canceled item never gets nil.
+	if err := r.waitUntil(ctx, it, w.idle); err != nil && (!w.idle() || w.err == nil) {
+		return fmt.Errorf("wait at %s: %w", f, err)
+	}
+	if w.err != nil {
+		w.acked = true
+		return joinedErr(w)
+	}
+	return nil // the body stays open: the item may schedule again
+}
+
+// openBody returns the item's open body at this fan-out, or panics with the sentinel of its body state (see
+// bodyState). verb names the refused call. Caller holds mu.
+func (f *fanOut) openBody(it *item, verb string) *wave {
+	switch it.body[f.node.index] {
+	case bodyOpen:
+		return it.pending
+	case bodyClosed:
+		panic(fmt.Errorf("cannot %s at %s: %w", verb, f, errBodyClosed))
+	case bodyDetached:
+		panic(fmt.Errorf("cannot %s at %s: %w", verb, f, errWorkDetached))
+	default:
+		panic(fmt.Errorf("cannot %s at %s: %w", verb, f, errStageNotEntered))
+	}
 }
 
 // Detach hands this fan-out's slot to the work the item scheduled here. See the FanOut interface for the full

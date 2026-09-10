@@ -9,7 +9,8 @@ import (
 // lane's own nodes if the branch is a Lane — and should return promptly when canceled. A returned error cancels
 // the item.
 //
-// On a Pool the context cannot be used with MoveTo: a pool's work has nowhere to go.
+// On a Pool the context can be used with Schedule of the pool's fan-out, to add follow-up work before the task
+// returns, and with nothing else: a pool's work has nowhere to go and must not wait for other work.
 type TaskFunc = func(ctx context.Context) error
 
 // Task is a bundle of work for one branch, produced by a branch's constructors (NewTask, NewTasks, NewTasksGen,

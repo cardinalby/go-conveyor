@@ -18,8 +18,9 @@ var (
 	// ErrForeignContext indicates the context was never derived from an item's ctx.
 	ErrForeignContext = fmt.Errorf("%w: not derived from a conveyor item's ctx", ErrInvalidContext)
 
-	// ErrStaleContext indicates the context's item has already finished.
-	ErrStaleContext = fmt.Errorf("%w: item is finished", ErrInvalidContext)
+	// ErrStaleContext indicates the context's owner has already finished: the item, a lane child whose callback
+	// returned, or a pool task whose wave has finished.
+	ErrStaleContext = fmt.Errorf("%w: the item or work it belongs to has finished", ErrInvalidContext)
 )
 
 // ShutdownError is the cancellation cause of an item's context when the conveyor cancels it during a shutdown.
@@ -79,8 +80,9 @@ var (
 	// move through the nodes of the lane it runs in, and a root item may not reach into a lane.
 	errWrongScope = errors.New("node belongs to another series")
 
-	// errCannotMove is panicked with when a context handed to a Pool's work is used to move: there is nowhere to go,
-	// and the context carries the item that scheduled the work, which must not be moved from a task goroutine.
+	// errCannotMove is panicked with when a context handed to a Pool's work is used to move or wait: there is nowhere
+	// to go, the work holds a slot it must not wait on, and the context carries the item that scheduled the work,
+	// which must not be moved from a task goroutine. Such a context may only Schedule at its own fan-out.
 	errCannotMove = errors.New("this work cannot move")
 
 	// errConveyorRunning is panicked with when the topology is extended while the conveyor is running.
@@ -91,7 +93,8 @@ var (
 	errConveyorFinalized = errors.New("cannot change the topology after the conveyor has run")
 
 	// errStageNotEntered is panicked with by Stage.Retain and FanOut.Detach when the current item does not occupy the
-	// node it is trying to hand its slot to. Its message reads as a trailing clause of the wrapped panic.
+	// node it is trying to hand its slot to, and by FanOut.Schedule / FanOut.Wait at a fan-out the item never entered.
+	// Its message reads as a trailing clause of the wrapped panic.
 	errStageNotEntered = errors.New("the item does not currently occupy it")
 
 	// errNothingToDetach is panicked with by FanOut.Detach when the item has no body to hand over at this fan-out:
@@ -119,8 +122,8 @@ var (
 	// instead fails the item with it (fail-fast), since by then the misuse surfaces on an internal goroutine.
 	errNilTaskFunc = errors.New("nil callback")
 
-	// errTaskReused is panicked with by FanOut.MoveTo when a Task is submitted twice (tasks are lazy, stateful and
-	// single-use).
+	// errTaskReused is panicked with by FanOut.MoveTo and FanOut.Schedule when a Task is submitted twice (tasks are
+	// lazy, stateful and single-use).
 	errTaskReused = errors.New("tasks are single-use")
 
 	// errForeignWave is panicked with when a wave is passed as a join target of an item that did not create it (or
