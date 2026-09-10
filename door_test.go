@@ -158,10 +158,10 @@ func TestDoorClosedItemMayUseTheWaitingRoom(t *testing.T) {
 }
 
 // assertClosedBodyRefusesEverything: after a leave closed the body, the own-body path is over — Schedule and Wait
-// panic with errBodyClosed, and Detach with detachErr (errNothingToDetach while the item still occupies the fan-out,
-// errStageNotEntered once it stands in the next node's waiting room). It runs on the item's goroutine, so it reports
-// with Errorf: a Fatalf there would end the worker instead of the test.
-func assertClosedBodyRefusesEverything(t *testing.T, ctx context.Context, fo FanOut, pool Pool, detachErr error) {
+// panic with errBodyClosed, and Detach with errNothingToDetach — whether the item still occupies the fan-out or already
+// stands in the next node's waiting room: the body state decides, not occupancy. It runs on the item's goroutine, so
+// it reports with Errorf: a Fatalf there would end the worker instead of the test.
+func assertClosedBodyRefusesEverything(t *testing.T, ctx context.Context, fo FanOut, pool Pool) {
 	t.Helper()
 	if st := bodyStateOf(ctx, fo); st != bodyClosed {
 		t.Errorf("body state after the failed leave = %d, want closed (%d)", st, bodyClosed)
@@ -175,7 +175,7 @@ func assertClosedBodyRefusesEverything(t *testing.T, ctx context.Context, fo Fan
 			_ = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
 		}},
 		{"Wait", errBodyClosed, func() { _ = fo.Wait(ctx) }},
-		{"Detach", detachErr, func() { fo.Detach(ctx) }},
+		{"Detach", errNothingToDetach, func() { fo.Detach(ctx) }},
 	} {
 		if err := recoveredErr(call.fn); !errors.Is(err, call.want) {
 			t.Errorf("%s after the failed leave panicked with %v, want %v", call.name, err, call.want)
@@ -221,7 +221,7 @@ func TestDoorFailedLeaveBeforeTheWaitingRoom(t *testing.T) {
 		if st, ok := unitStatByName(c.Stats(), "fo"); !ok || st.Occupied.Last != 1 {
 			t.Errorf("fo Occupied.Last = %d after the failed leave, want 1", st.Occupied.Last)
 		}
-		assertClosedBodyRefusesEverything(t, ctx, fo, pool, errNothingToDetach)
+		assertClosedBodyRefusesEverything(t, ctx, fo, pool)
 		close(releaseFirst)
 		if err := s.MoveTo(ctx); err != nil {
 			return err
@@ -280,7 +280,7 @@ func TestDoorFailedLeaveAfterTheWaitingRoom(t *testing.T) {
 		if q := queueOccupancy(c, s); q != 1 {
 			t.Errorf("s waiting room holds %d after the failed leave, want 1 (the item stays there)", q)
 		}
-		assertClosedBodyRefusesEverything(t, ctx, fo, pool, errStageNotEntered)
+		assertClosedBodyRefusesEverything(t, ctx, fo, pool)
 		close(retrying)
 		if err := s.MoveTo(ctx); err != nil {
 			return err

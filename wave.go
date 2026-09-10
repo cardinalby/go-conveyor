@@ -62,6 +62,9 @@ type wave struct {
 	// acked records that the error was observed — by a join in MoveTo, or by an Err call after the wave
 	// finished. An unacked error fails the item at completion.
 	acked bool
+	// abandoned records that err is a cancellation cause stored by recordAbandoned, not a failure of the wave's own
+	// work. A later real failure replaces it (see recordErr); a callback error is never replaced.
+	abandoned bool
 
 	startedCh   chan struct{}
 	finishedCh  chan struct{}
@@ -201,14 +204,17 @@ func (w *wave) workDone(err error) {
 }
 
 // recordErr keeps the first error and poisons the owning item with it (fail-fast), so the ItemProcessor and any
-// sibling work abort promptly.
+// sibling work abort promptly. An abandonment cause stored earlier is replaced: the wave's own work failed, and that
+// is the truer outcome. The wave cannot be finished here (this work was still running), so nothing has read the
+// earlier value as final.
 func (w *wave) recordErr(err error) {
-	if w.err != nil || err == nil {
+	if err == nil || (w.err != nil && !w.abandoned) {
 		return
 	}
 	w.err = err
+	w.abandoned = false
 	if w.it != nil {
-		w.it.poison(err)
+		w.it.poison(err) // a no-op on an already canceled item: the canonical cause stays the cancellation
 	}
 }
 
@@ -221,12 +227,14 @@ func (w *wave) recordErr(err error) {
 // decide whether the item's effects are complete (whether to commit the broker offset).
 //
 // It does not poison the item: the item is already canceled by definition, and its cause is what we are recording.
-// First-error-wins is preserved, so a real failure from the wave's own work is never masked by a shutdown cause.
+// A real failure from the wave's own work is never masked by it: an earlier one is kept, a later one replaces it
+// (see recordErr).
 func (w *wave) recordAbandoned(cause error) {
 	if w.err != nil || cause == nil {
 		return
 	}
 	w.err = cause
+	w.abandoned = true
 }
 
 // settle closes Started / Finished once the wave is sealed and the corresponding counters have drained. An unsealed
@@ -272,7 +280,10 @@ func (r *run) join(ctx context.Context, it *item, waves []Wave) error {
 		if w.it != nil && w.it != it {
 			panic(errForeignWave)
 		}
-		if err := r.waitUntil(ctx, it, w.isFinished); err != nil {
+		// A failing task poisons its item, so the join wakes through the cancellation branch; the finished wave's
+		// own error is what the caller is told and so what counts as observed. A finished clean wave, or one still
+		// running, leaves the cancellation cause as the answer.
+		if err := r.waitUntil(ctx, it, w.isFinished); err != nil && (!w.isFinished() || w.err == nil) {
 			return err
 		}
 		w.acked = true

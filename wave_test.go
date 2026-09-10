@@ -464,3 +464,46 @@ func TestWaveNeverReportsCleanFinishForSkippedWork(t *testing.T) {
 		}
 	}
 }
+
+// TestJoinOfFailedWaveAcknowledgesIt: the failing task poisons the item, so the join wakes through the cancellation
+// branch — it must still count as the observation of the wave's error. A processor that handles the reported error and
+// returns nil has dealt with it; completion must not fail the item with it a second time.
+func TestJoinOfFailedWaveAcknowledgesIt(t *testing.T) {
+	boom := errors.New("joined boom")
+	c := NewConveyor()
+	fo := c.AddFanOut(OptName("fo"))
+	pool := fo.AddPool(OptName("pool"))
+	mid := c.AddStage(OptName("mid"))
+	commit := c.AddStage(OptName("commit"))
+
+	var handled atomic.Bool
+	err := runOnce(t, c, func(ctx context.Context) error {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
+			// Fail only once the item is inside commit, that is, blocked in the join: a failure during the admission
+			// wait would end MoveTo there with the poison, before any join could observe the wave.
+			waitFor(t, "the item to enter commit", func() bool { return occupancyOf(c, commit) == 1 })
+			return boom
+		}))
+		if err != nil {
+			return err
+		}
+		w := fo.Detach(ctx)
+		if err := mid.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := commit.MoveTo(ctx, w); !errors.Is(err, boom) {
+			t.Errorf("join = %v, want %v", err, boom)
+		}
+		handled.Store(true)
+		return nil // the error was reported to us and we handled it
+	})
+	if !handled.Load() {
+		t.Fatalf("the item never joined the wave")
+	}
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v; the joined error was already reported to the item, completion must not raise it again", err)
+	}
+}

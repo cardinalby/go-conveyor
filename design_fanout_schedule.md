@@ -351,6 +351,10 @@ Properties:
 - **Callback lifetime contract**: a pool task or lane child must call `Schedule` before it returns. A goroutine that
   outlives its callback gets `ErrStaleContext` once the wave (for pool work) or the child (for a lane child) has
   finished; while sibling work keeps the wave busy, its addition is accepted and cannot be told apart from a legal one.
+  A lane child counts as over for this check from the moment its completion takes the lock after the callback
+  returned (`item.returned`), even while its own detached or retained work keeps it unfinished; a spawn into the
+  parent's fan-out with its context is refused from then on. Its own-body path is answered by the closed body
+  (`errBodyClosed`, §6.6), not by staleness.
 
 ### 6.3 Wait
 
@@ -426,8 +430,9 @@ the idle check, the admission check and the occupancy mutation happen in one loc
 
 ### 6.5 Detach
 
-1. The item's body state at this fan-out must be `open` (`errStageNotEntered` if the item does not occupy the node;
-   `errNothingToDetach` if the state is `closed` or `detached`).
+1. The item's body state at this fan-out must be `open`. `closed` or `detached` panics `errNothingToDetach`, whether
+   or not the item still occupies the node; `none` panics `errStageNotEntered`. The body state is checked first, so
+   the diagnostic does not depend on occupancy.
 2. Set the wave's `retainUnit` to this node. Seal the wave. Publish this fan-out's rank on the item (the door opens).
    Set the body state to `detached`.
 3. If the wave is already idle it finishes now. Its slot is released by "whichever happens last": the next move of
@@ -508,7 +513,9 @@ Observation and acknowledgement:
 
 - `Wait` acknowledges an error it returns.
 - Leaving acknowledges (the idle check in §6.4 step 2).
-- A join of a detached wave acknowledges, as does `Err` after `Finished`.
+- A join of a detached wave acknowledges, as does `Err` after `Finished`. The join acknowledges also when it is
+  woken by the poison the failing task put on the item: the wave is finished and its error is what the caller is
+  told. A `MoveTo` that fails before reaching its joins (cancellation during the admission wait) acknowledges nothing.
 - An unacknowledged error fails the item at completion (unchanged).
 
 ### 6.8 Ordering guarantees
@@ -563,7 +570,9 @@ Queue mechanics required by rule 1:
 
 - A task error is recorded on its wave and poisons the item (fail-fast), unchanged.
 - Queued work of a poisoned item is dropped when it reaches the head, with the cancellation cause recorded on the wave
-  (`recordAbandoned`), unchanged. Async pulls treat cancellation as exhaustion, unchanged.
+  (`recordAbandoned`), unchanged. Async pulls treat cancellation as exhaustion, unchanged. An abandonment cause never
+  masks a failure of the wave's own work: an earlier task error is kept, a later one replaces the cause. Within one
+  wave the first task error wins, whatever its value (a task returning `ctx.Err()` counts as a task error).
 - **Cancellation is judged by both contexts everywhere.** Every node method reads the cancellation cause of the call
   context and of the owning item's canonical context, and answers with whichever is set: the `TryMoveTo` preamble,
   the admission waits of `MoveTo` and `TryMoveTo`, `Wait`, `Schedule`, and `Retain`'s decision not to run its
@@ -606,10 +615,10 @@ The argument is made per kind of slot holder, with its assumptions stated.
 
 | situation | outcome |
 |-----------|---------|
-| `Schedule` / `Wait` / `Detach` at a fan-out the item never entered or does not occupy | panic `errStageNotEntered` |
+| `Schedule` / `Wait` at a fan-out the item never entered or does not occupy; `Detach` at a fan-out whose body state is `none` | panic `errStageNotEntered` |
 | `Schedule` / `Wait` through the own-body path at a fan-out whose body is `closed` | panic `errBodyClosed` |
 | `Schedule` / `Wait` through the own-body path at a fan-out whose body is `detached` | panic `errWorkDetached` |
-| `Detach` at a fan-out whose body is `closed` or `detached` | panic `errNothingToDetach` |
+| `Detach` at a fan-out whose body is `closed` or `detached`, occupied or not | panic `errNothingToDetach` |
 | `Schedule` from a task for a fan-out it does not run under | panic `errInvalidUnit` (wrong target) |
 | `Wait`, `MoveTo`, `TryMoveTo`, `Retain`, `Detach` with a task's context | panic `errCannotMove` |
 | Lane child calls `Wait` on the fan-out its lane belongs to | panic `errWrongScope` |
@@ -977,8 +986,8 @@ Documentation and examples to revise:
 
 ## 11. Implementation plan
 
-**Progress (2026-09-10):** phases 0 to 8 and 10 are done and committed on branch `fanout-schedule` (one commit each).
-Phase 9 is not planned. Remaining: review and the v0.10.0 tag. Process notes: from phase 3 on the phases are self-reviewed, not
+**Progress (2026-09-10):** phases 0 to 8, 10 and 11 are done and committed on branch `fanout-schedule` (one commit
+each). Phase 9 is not planned. Remaining: the v0.10.0 tag. Process notes: from phase 3 on the phases are self-reviewed, not
 sent to Codex; nothing is pushed. Each phase's record sits under its checklist.
 
 ### 11.1 Ground rules
@@ -1477,6 +1486,38 @@ per-feature files); the one gap found was the leave path's node-qualified text, 
 `TestFanOutTaskErrorFailsRun` now asserts ("fo work: task boom"). No release tag was created; that is the user's step
 after review.
 
+### 11.13 Phase 11: external review fixes
+
+Codex reviewed the branch against this document after phase 10 (2026-09-10) and found four problems; each was
+verified in the code and fixed test-first (the test failed before the fix, passes after).
+
+- [x] **Abandonment masking a later task error** (`wave.go`): `recordAbandoned` stored the shutdown cause first and
+      `recordErr` kept first-error-wins, so a task failing afterwards was lost. Inherited from `master`. Fix: a wave
+      `abandoned` flag; a real error replaces an abandonment cause, never another real error.
+      `TestCompletionAbandonmentDoesNotHideALaterTaskError`.
+- [x] **Returned lane child spawning into the parent's wave** (`fanout.go`, `run.go`): the stale check used
+      `item.finished`, set only after completion waited for the child's own waves; a captured child context could add
+      parent work in that window. Fix: `item.returned`, set when `completeItem` takes the lock, refused on the
+      redirect path only. `TestScheduleFromReturnedChildIsStale`.
+- [x] **Join not acknowledging the failed wave it reports** (`wave.go` `join`): the poison woke `waitUntil` before
+      the acknowledgement, so a processor that handled the error still failed at completion. Inherited from `master`.
+      Fix: after a cancellation wake-up a finished wave with an error is acknowledged and returned, as `Wait` and
+      `joinPending` already did. `TestJoinOfFailedWaveAcknowledgesIt`.
+- [x] **`Detach` diagnostics depending on occupancy** (`fanout.go`): after a failed leave into a waiting room, or after
+      moving on from a detached body, `Detach` panicked `errStageNotEntered`. Fix: body state first. §6.5 and §6.11
+      reworded; `assertClosedBodyRefusesEverything`, `TestDetachAfterMovingOnPanics` updated;
+      `TestDetachTwiceAfterMovingOnPanics` added.
+- [x] `panicsInItem` captures the panic on the item's goroutine and asserts on the test goroutine; before, a mismatch
+      hung the run instead of failing.
+- [x] Root suite green under `-race -cpu=1,4`; the new tests pass `-count=30` each.
+
+Not changed, recorded from the discussion: across separate waves, completion still picks the first unacknowledged
+error in creation order, so a shutdown cause on an older wave can win over a real error on a younger one; and a task
+that returns plain `ctx.Err()` after a shutdown already turns the shutdown into an ordinary failure with
+`context.Canceled`. Both are pre-existing policies, to be changed together if at all. Codex also suggested tests for
+task-context misuse of fan-out `MoveTo` / `TryMoveTo` / `Detach`, foreign and stale contexts on `Detach`, and a
+refused `Schedule` leaving its task unclaimed; not added.
+
 ## 12. Release notes draft (v0.10.0)
 
 **Fan-out bodies that grow: `Schedule` and `Wait`.** An item now enters a fan-out with `MoveTo(ctx)` and adds work
@@ -1539,6 +1580,15 @@ scheduled so far is done and lets the item schedule again. See `docs/4_fan-out.m
 ---
 
 ## Change log
+
+Revision 7, after an external review of the implementation:
+
+- §6.5 step 1 and §6.11: `Detach` on a `closed` or `detached` body panics `errNothingToDetach` whatever the
+  occupancy; `errStageNotEntered` is for body state `none`.
+- §6.2: a lane child is over for the stale check once its completion has started, not once it is finished.
+- §6.7: a join acknowledges also when woken by the wave's own poison; a `MoveTo` that fails before its joins does not.
+- §6.9: an abandonment cause never masks a failure of the wave's own work.
+- §11.13 added (phase 11: the four fixes and their tests).
 
 Revision 6:
 

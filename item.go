@@ -60,7 +60,9 @@ type item struct {
 	// between a fan-out's admission and its first Schedule. Background work uses it to decide whether the item has
 	// moved on (see wave.releaseRetained).
 	reachedRank int
-	// finished is set once the item's processor has returned and all its slots are released.
+	// returned is set once the item's processor has returned, before completion waits for its waves; finished once
+	// all its slots are released. Between the two the item is over for its own code but its background work may live.
+	returned bool
 	finished bool
 
 	// prev/next link the in-flight items of this scope in creation order (see run.scopeList). prev is the item's

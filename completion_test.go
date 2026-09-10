@@ -235,3 +235,54 @@ func TestShutdownWhileBlockedInWaitDropsQueuedSpawns(t *testing.T) {
 		t.Errorf("the queued task ran although the item was canceled")
 	}
 }
+
+// TestCompletionAbandonmentDoesNotHideALaterTaskError: the shutdown cancels the item; a channel source's pull ends first
+// and records the abandonment on the wave; then the running task fails for real. The real failure is the wave's error
+// and the run's, not the shutdown cause it happened to follow.
+func TestCompletionAbandonmentDoesNotHideALaterTaskError(t *testing.T) {
+	boom := errors.New("boom")
+	c := NewConveyor(optCancelItemsOnShutdown())
+	fo := c.AddFanOut(OptName("fo"))
+	work := fo.AddPool(OptName("work"))
+	feed := fo.AddPool(OptName("feed"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	never := make(chan TaskFunc) // nobody feeds it: the pull ends only with the item's cancellation
+	taskDone := make(chan struct{})
+	var once atomic.Bool
+	err := c.Run(ctx, func(ic context.Context) error {
+		if !once.CompareAndSwap(false, true) {
+			return nil
+		}
+		if err := fo.MoveTo(ic); err != nil {
+			return err
+		}
+		it := itemOf(ic)
+		waveErr := func() error {
+			it.run.mu.Lock()
+			defer it.run.mu.Unlock()
+			return it.pending.err
+		}
+		err := fo.Schedule(ic,
+			work.NewTask(func(tctx context.Context) error {
+				defer close(taskDone)
+				<-tctx.Done()
+				waitFor(t, "the abandoned pull to be recorded on the wave", func() bool { return waveErr() != nil })
+				return boom
+			}),
+			feed.NewTasksChan(never),
+		)
+		if err != nil {
+			return err
+		}
+		cancel()
+		<-ic.Done()
+		<-taskDone
+		return context.Cause(ic)
+	})
+
+	if !errors.Is(err, boom) {
+		t.Fatalf("Run = %v, want the task's own error %v", err, boom)
+	}
+}

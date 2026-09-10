@@ -1224,3 +1224,68 @@ func TestChildRunsRoundsAndSpawnsInsideItsLane(t *testing.T) {
 		t.Fatalf("%d second-round tasks ran, want %d", got, children)
 	}
 }
+
+// TestScheduleFromReturnedChildIsStale: a lane child's callback has returned but the child is not finished yet, because
+// it detached work at an interior fan-out that is still running. Its context is over for its own code: a Schedule into
+// the parent's fan-out with it is refused with ErrStaleContext, not redirected into the parent's wave.
+func TestScheduleFromReturnedChildIsStale(t *testing.T) {
+	c := NewConveyor()
+	fo := c.AddFanOut(OptName("fo"))
+	lane := fo.AddLane(OptName("lane"))
+	inner := lane.AddFanOut(OptName("inner"))
+	ipool := inner.AddPool(OptName("ipool"))
+
+	childCtx := make(chan context.Context, 1)
+	release := make(chan struct{})
+	var ran atomic.Int64
+	var checked atomic.Bool
+	err := runOnce(t, c, func(ctx context.Context) error {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		err := fo.Schedule(ctx, lane.NewTask(func(cctx context.Context) error {
+			if err := inner.MoveTo(cctx); err != nil {
+				return err
+			}
+			err := inner.Schedule(cctx, ipool.NewTask(func(context.Context) error {
+				<-release
+				return nil
+			}))
+			if err != nil {
+				return err
+			}
+			_ = inner.Detach(cctx) // the child returns while its work runs on: returned, not finished
+			childCtx <- cctx
+			return nil
+		}))
+		if err != nil {
+			return err
+		}
+		cctx := <-childCtx
+		child := itemOf(cctx)
+		waitFor(t, "the child's callback to return", func() bool {
+			child.run.mu.Lock()
+			defer child.run.mu.Unlock()
+			return child.returned && !child.finished
+		})
+		err = fo.Schedule(cctx, lane.NewTask(func(context.Context) error {
+			ran.Add(1)
+			return nil
+		}))
+		if !errors.Is(err, ErrStaleContext) {
+			t.Errorf("Schedule with a returned child's context = %v, want ErrStaleContext", err)
+		}
+		checked.Store(true)
+		close(release)
+		return nil
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("run failed: %v", err)
+	}
+	if !checked.Load() {
+		t.Fatalf("the check did not run")
+	}
+	if got := ran.Load(); got != 0 {
+		t.Fatalf("%d refused tasks ran", got)
+	}
+}

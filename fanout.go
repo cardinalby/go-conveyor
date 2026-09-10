@@ -191,9 +191,13 @@ func (f *fanOut) Schedule(ctx context.Context, tasks ...Task) error {
 	r := it.run
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// A finished caller's context is stale: the item itself (a child's own lifetime is judged before its work is
-	// charged to the parent's wave), or, for a pool's work, the wave it belongs to.
-	if it.finished || (col != nil && col.wave.isFinished()) {
+	// A finished caller's context is stale: the item itself, or, for a pool's work, the wave it belongs to. A lane
+	// child whose callback has returned is over for its own code even while its background work keeps it unfinished:
+	// its lifetime is judged before its work would be charged to the parent's wave. (Its own-body path is answered by
+	// the closed body instead.) The boundary is completeItem taking the lock; a Schedule racing with the return is
+	// the callback lifetime contract's problem.
+	if it.finished || (col != nil && col.wave.isFinished()) ||
+		(col == nil && it.returned && it.parentWave != nil && it.parentWave.atNode == f.node) {
 		return fmt.Errorf("schedule at %s: %w", f, ErrStaleContext)
 	}
 	w, root := f.bodyFor(col, it)
@@ -269,11 +273,8 @@ func (f *fanOut) Detach(ctx context.Context) Wave {
 		return standaloneWave(fmt.Errorf("detach %s: %w", f, err))
 	}
 	defer r.mu.Unlock()
-	if it.occupied[f.node.index] == 0 {
-		panic(fmt.Errorf("cannot detach %s: %w", f, errStageNotEntered))
-	}
-	// The body state, not occupancy, says whether there is work to hand over: an item that detached here still
-	// occupies the node (the wave holds its slot), and one whose leave failed still stands here with a closed body.
+	// The body state, not occupancy, says whether there is work to hand over, so the diagnostic is the same whether
+	// the item still stands here (a detached wave holding the slot, a failed leave) or has moved on.
 	switch it.body[f.node.index] {
 	case bodyOpen:
 	case bodyDetached:
@@ -281,7 +282,10 @@ func (f *fanOut) Detach(ctx context.Context) Wave {
 	case bodyClosed:
 		panic(fmt.Errorf("cannot detach %s: the body was closed when the item left: %w", f, errNothingToDetach))
 	default:
-		panic(fmt.Errorf("cannot detach %s: %w", f, errNothingToDetach))
+		panic(fmt.Errorf("cannot detach %s: %w", f, errStageNotEntered))
+	}
+	if it.occupied[f.node.index] == 0 {
+		panic(fmt.Errorf("cannot detach %s: %w", f, errStageNotEntered)) // an open body is always occupied
 	}
 	w := it.pending
 	// From here the slot follows the work, not the item: releaseBelow leaves it alone (see item.isRetaining) and the

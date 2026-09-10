@@ -16,8 +16,11 @@ import (
 func panicsInItem(t *testing.T, c Conveyor, want error, misuse func(ctx context.Context)) {
 	t.Helper()
 	var checked atomic.Bool
+	var got error
+	// The panic is captured on the item's goroutine and asserted here: a Fatalf there would end the item instead of
+	// the test (see recoveredErr) and hang the run.
 	err := runOnce(t, c, func(ctx context.Context) error {
-		assertPanics(t, want, func() { misuse(ctx) })
+		got = recoveredErr(func() { misuse(ctx) })
 		checked.Store(true)
 		return nil
 	})
@@ -26,6 +29,12 @@ func panicsInItem(t *testing.T, c Conveyor, want error, misuse func(ctx context.
 	}
 	if !checked.Load() {
 		t.Fatalf("the panic check did not run")
+	}
+	if got == nil {
+		t.Fatalf("expected a panic with %v, got none", want)
+	}
+	if !errors.Is(got, want) {
+		t.Fatalf("expected a panic matching %v, got %v", want, got)
 	}
 }
 

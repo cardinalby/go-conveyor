@@ -275,6 +275,7 @@ func (r *run) acquireItem(arrived bool) *item {
 func (r *run) completeItem(it *item, procErr error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	it.returned = true
 
 	// A real processor error aborts the item's own still-running background work; a graceful return lets it
 	// finish (a live task owns its slot and cannot be force-freed).

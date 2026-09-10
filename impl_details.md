@@ -360,17 +360,21 @@ another node, and is what `sealBody` indexes the body state by.
 
 Two ways an error reaches a wave:
 
-- `recordErr` — the wave's own work failed. First error wins, and it **poisons** the owning item (fail-fast) so
-  siblings and the ItemProcessor abort promptly.
+- `recordErr` — the wave's own work failed. The first such error wins, and it **poisons** the owning item (fail-fast)
+  so siblings and the ItemProcessor abort promptly. It replaces an abandonment cause stored earlier (`abandoned`):
+  the wave cannot be finished while its work is still running, so nothing has read that cause as final.
 - `recordAbandoned` — work was dropped without running because the item was canceled. It records the cancellation
-  cause but does **not** poison (the item is already canceled by definition). Without it a wave would settle clean
+  cause, flagged `abandoned`, but does **not** poison (the item is already canceled by definition).
+  A task error recorded earlier is kept. Without it a wave would settle clean
   whenever its work was skipped rather than failed, and a caller could not tell "all my work ran" from "most of it
   was thrown away" — which is the one thing a wave must never be ambiguous about, since it is what a pipeline uses
   to decide whether the item's effects are complete.
 
 `acked` records that the outcome was observed — by `Wait`, by the leave's `closeBody`, by a join, or by an `Err()`
 call after the wave finished. An unacked error fails the item at completion, so a failure can be delayed but never
-lost.
+lost. `Wait`, `closeBody` and `join` all share one rule for a cancellation wake-up: a finished (for `Wait`: idle)
+wave with an error is acknowledged and its error returned, because the poison that woke them is that error; a clean
+or unfinished wave leaves the cancellation cause as the answer.
 
 `FanOut.Wait` is `waitUntil(idle)` on the open body, then the acknowledged node-qualified error; it never seals, so
 the item may schedule again. Its cancellation nuance mirrors `joinPending`: an idle body with an error reports the
@@ -461,8 +465,10 @@ static wiring or a dynamic per-item contract violation is irrelevant.
 - **Return**: context cancellation and `ShutdownError`, fail-fast work errors surfacing at `Wait` or a join,
   `ErrForeignContext` / `ErrStaleContext` (both wrapping `ErrInvalidContext`), and `ErrConveyorAlreadyRunning`.
 
-The context cases are the deliberate carve-out. A **stale** context — a finished item's, a finished lane child's, or
-pool work's whose wave has finished, including one decoupled from cancellation via `context.WithoutCancel` — is
+The context cases are the deliberate carve-out. A **stale** context — a finished item's, a lane child's whose
+callback returned (`item.returned`, set when `completeItem` takes the lock, judged before a spawn into the parent's
+fan-out), or pool work's whose wave has finished, including one decoupled from cancellation via
+`context.WithoutCancel` — is
 benign: a context outliving its owner, like a closed-channel receive. A **foreign** context is a mistake, but a
 cleanly declinable one, not a memory-unsafe wiring bug like a foreign *handle*. A nil callback is the mirror case:
 the eager constructors panic, but by the time a streaming source yields nil the misuse surfaces on an internal

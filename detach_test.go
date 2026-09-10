@@ -241,15 +241,15 @@ func TestDetachNodeNotOccupiedPanics(t *testing.T) {
 	})
 }
 
-// TestDetachAfterMovingOnPanics: leaving the fan-out joins its work, so afterwards there is nothing left to detach —
-// and the node is no longer the item's to hand over.
+// TestDetachAfterMovingOnPanics: leaving the fan-out joins its work and closes the body, so afterwards there is nothing
+// left to detach — the body state answers, whether or not the item still occupies the node.
 func TestDetachAfterMovingOnPanics(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
 	commit := c.AddStage(OptName("commit"))
 
-	panicsInItem(t, c, errStageNotEntered, func(ctx context.Context) {
+	panicsInItem(t, c, errNothingToDetach, func(ctx context.Context) {
 		if err := fo.MoveTo(ctx); err != nil {
 			t.Fatalf("move failed: %v", err)
 		}
@@ -370,4 +370,32 @@ func TestDetachedSlotFreedWhenTheWorkFinishes(t *testing.T) {
 	if !freed.Load() {
 		t.Fatalf("the fan-out slot was still held after its detached work had finished")
 	}
+}
+
+// TestDetachTwiceAfterMovingOnPanics: a body once detached stays detached. After the detached work finished and the
+// item moved on, the node is free — the diagnostic is still errNothingToDetach, from the body state, not
+// errStageNotEntered from the empty occupancy.
+func TestDetachTwiceAfterMovingOnPanics(t *testing.T) {
+	c := NewConveyor()
+	fo := c.AddFanOut(OptName("fo"))
+	pool := fo.AddPool(OptName("pool"))
+	commit := c.AddStage(OptName("commit"))
+
+	panicsInItem(t, c, errNothingToDetach, func(ctx context.Context) {
+		if err := fo.MoveTo(ctx); err != nil {
+			t.Fatalf("move failed: %v", err)
+		}
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil })); err != nil {
+			t.Fatalf("schedule failed: %v", err)
+		}
+		w := fo.Detach(ctx)
+		<-w.Finished()
+		if err := commit.MoveTo(ctx, w); err != nil {
+			t.Fatalf("move failed: %v", err)
+		}
+		if occ := occupancyOf(c, fo); occ != 0 {
+			t.Errorf("fan-out occupancy = %d after the item moved on, want 0", occ)
+		}
+		_ = fo.Detach(ctx)
+	})
 }
