@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -585,6 +586,10 @@ func TestFanOutTaskErrorFailsRun(t *testing.T) {
 
 	if !errors.Is(err, boom) {
 		t.Fatalf("Run error = %v, want %v", err, boom)
+	}
+	// The leave names the fan-out whose work failed, not the node the item was entering.
+	if !strings.Contains(err.Error(), "fo work: task boom") {
+		t.Fatalf("Run error = %q, want it to contain %q", err, "fo work: task boom")
 	}
 	if committed.Load() {
 		t.Fatalf("the item ran its commit work although the joined wave had failed")

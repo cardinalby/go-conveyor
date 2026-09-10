@@ -977,8 +977,8 @@ Documentation and examples to revise:
 
 ## 11. Implementation plan
 
-**Progress (2026-09-10):** phases 0 to 8 are done and committed on branch `fanout-schedule` (one commit each).
-Next: phase 10 (§11.12); phase 9 is not planned. Process notes: from phase 3 on the phases are self-reviewed, not
+**Progress (2026-09-10):** phases 0 to 8 and 10 are done and committed on branch `fanout-schedule` (one commit each).
+Phase 9 is not planned. Remaining: review and the v0.10.0 tag. Process notes: from phase 3 on the phases are self-reviewed, not
 sent to Codex; nothing is pushed. Each phase's record sits under its checklist.
 
 ### 11.1 Ground rules
@@ -1460,12 +1460,22 @@ library.
 
 ### 11.12 Phase 10: final verification
 
-- [ ] Root: `go vet ./... && go test -race -cpu=1,4 ./...`, plus the repeated package run from §11.1 with a name
+- [x] Root: `go vet ./... && go test -race -cpu=1,4 ./...`, plus the repeated package run from §11.1 with a name
       selector covering the new tests and the property suite.
-- [ ] Demo and bench modules: vet and race tests as in §11.1; `npm run lint && npm run build`.
-- [ ] Go version floor: CI runs 1.23 and stable; if `context.AfterFunc` or another API newer than 1.23 is touched,
+- [x] Demo and bench modules: vet and race tests as in §11.1; `npm run lint && npm run build`.
+- [x] Go version floor: CI runs 1.23 and stable; if `context.AfterFunc` or another API newer than 1.23 is touched,
       confirm the floor still builds.
-- [ ] Read the diff of the public API once more against §5; every panic and return in §6.11 has a test.
+- [x] Read the diff of the public API once more against §5; every panic and return in §6.11 has a test.
+
+Phase 10 record: root `go vet` and `go test -race -cpu=1,4` green; the repeated run (`-count=10`, selector
+`Test(Schedule|Wait|Spawn|Door|Property|Completion|Stats|Cancel|Detach|Leave|TryMoveTo|Stale|Body)`) green. Demo and
+bench modules vet and pass under `-race`; `npm run lint` and `npm run build` pass. Go floor: the root module vets and
+tests under `go1.23.12` (`GOTOOLCHAIN=go1.23.12`); `context.WithoutCancel` and `context.Cause` are 1.21 APIs.
+Public API: the `FanOut` interface in `fanout.go` matches §5.1 method for method; `Tasks` is gone; the sentinels in
+`errors.go` match §5.5. Every row of §6.11 has a test that names its sentinel or message (`errors_test.go` plus the
+per-feature files); the one gap found was the leave path's node-qualified text, which
+`TestFanOutTaskErrorFailsRun` now asserts ("fo work: task boom"). No release tag was created; that is the user's step
+after review.
 
 ## 12. Release notes draft (v0.10.0)
 
