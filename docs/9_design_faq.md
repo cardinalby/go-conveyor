@@ -58,6 +58,55 @@ There are smarter strategies possible that slow down the "read" stage before the
 The lib doesn't provide such strategies out of the box, but you can build your own back-pressure manager by 
 using [observability metrics](./7_observability.md) and dynamically adjusted limits and queue sizes for stages.
 
+## Q4. FanOut.MoveTo
+
+Why does `FanOut.MoveTo` take no tasks? Why the extra `Schedule` call?
+
+---
+
+`MoveTo` moves; `Schedule` adds work. Splitting the two is what makes a growing body possible:
+- the ItemProcessor may enter, look at the data, and only then decide which tasks to build (a conditional body);
+- it may schedule in **rounds** (`Schedule`, `Wait`, `Schedule` again) and use the result of one round to plan the
+  next;
+- a **task** may `Schedule` follow-ups into the same body with its own context, so a tree of work can grow while the
+  item stays inside the fan-out.
+
+None of that fits one call that both enters and hands over a fixed set of tasks. The cost is the **door**: the item
+behind cannot enter the fan-out until the item ahead has scheduled once (or left, or detached), so branch work stays
+in item order. Keep the code between `MoveTo` and the first `Schedule` short.
+
+## Q5. Waiting inside a task
+
+Why can a task not wait for the work it spawned?
+
+---
+
+A running task holds a branch slot. If it could wait for a follow-up, and the follow-up needed a slot of the same
+pool, the pool could be full of tasks all waiting for follow-ups that never start: a hold-and-wait cycle. The
+deadlock-freedom argument of the library rests on the opposite: a running task waits for nothing, and a queued task
+holds nothing. So `Wait` (and every move) with a task's context panics.
+
+What a task may do is `Schedule` — a non-blocking enqueue. If a step needs all the siblings done, make that step a
+task of its own and let the last sibling schedule it (see [Join as a continuation](4_fan-out.md#join-as-a-continuation)).
+The ItemProcessor, which holds no branch slot, is the one that waits: with `Wait`, or by leaving the fan-out.
+
+## Q6. Stripped contexts
+
+Why does a context with cancellation stripped (`context.WithoutCancel`) not bypass cancellation?
+
+---
+
+Cancellation is judged by the **item**, not by the context you pass. Every node method also reads the cancellation
+cause of the item's own context, so once a task has failed or the conveyor is shutting down, `MoveTo`, `TryMoveTo`,
+`Schedule` and `Wait` return the cause, and `Retain` declines to run its callback, whatever the caller derived from
+the item's context.
+
+The reason is ordering. If item 5 fails while writing and item 6 hides its cancellation to reach `commit`, item 6
+would commit cumulative offsets past item 5's messages. A pipeline is only correct if a canceled item cannot enter a
+node. Code that must run after cancellation can still run in plain Go once the node method has returned; it just
+cannot run inside a node. A derived context with a shorter deadline still works, because it inherits the item's
+cancellation and adds its own.
+
 ---
 
 | Prev                             |

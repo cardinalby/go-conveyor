@@ -235,7 +235,7 @@ func (r *run) checkEnterOrder(it *item, target *unit) {
 	// treating it as one would report a re-entry as a backward move.
 	switch {
 	case target.rank < it.reachedRank:
-		// reachedRank, not maxRank: an item that has been admitted to a fan-out but not yet enqueued its work is
+		// reachedRank, not maxRank: an item that has been admitted to a fan-out but has not yet scheduled its work is
 		// already there, even though the items behind it cannot see that yet.
 		panic(fmt.Errorf("cannot move to %s: item has already advanced to %s; %w",
 			target, r.conveyor.describeRank(it.scope, it.reachedRank), errWrongEnterOrder))

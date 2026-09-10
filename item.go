@@ -51,14 +51,14 @@ type item struct {
 	// nothing per item beyond this int (see the capacity discussion in unit.go).
 	queuedAt int
 	// maxRank is the highest rank this item has published within its scope (its high-water mark). It only ever
-	// increases and drives the ordering gate for the items behind it. A fan-out publishes it at enqueue, not at
-	// admission, so an item that is inside the node but has not yet scheduled its work still blocks the next item's
-	// enqueue — which is what keeps each branch's work in item order.
+	// increases and drives the ordering gate for the items behind it. A fan-out publishes it at the item's first
+	// Schedule (or leave, or Detach), not at admission, so an item that is inside the node but has not yet scheduled
+	// its work still blocks the next item's entry — which is what keeps each branch's work in item order.
 	maxRank int
 	// reachedRank is the highest rank this item has actually occupied, whether or not it has been published yet. It
 	// says where the item *is*, while maxRank says what the items behind it are allowed to see — the two differ only
-	// between a fan-out's admission and its enqueue. Background work uses it to decide whether the item has moved on
-	// (see wave.releaseRetained).
+	// between a fan-out's admission and its first Schedule. Background work uses it to decide whether the item has
+	// moved on (see wave.releaseRetained).
 	reachedRank int
 	// finished is set once the item's processor has returned and all its slots are released.
 	finished bool
@@ -67,7 +67,7 @@ type item struct {
 	// binding predecessor for the ordering gate; both are nil once the item is finished (unlinked).
 	prev, next *item
 
-	// waves are the background-work handles this item created (FanOut.MoveTo, Stage.Retain). They are joined when
+	// waves are the background-work handles this item created (a fan-out body, Stage.Retain). They are joined when
 	// the item completes, and an error none of them had observed fails the item.
 	waves []*wave
 	// pending is the item's open body: the work scheduled at the fan-out it currently occupies and has not detached,

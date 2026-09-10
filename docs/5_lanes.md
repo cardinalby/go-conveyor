@@ -27,38 +27,40 @@ messages := split.AddLane()
 enrich := messages.AddStage().SetLimit(6) // 6 concurrent HTTP calls
 write := messages.AddStage()              // but only 1 DB write at a time, in message order
 
-report := messages.AddStage().SetLimit(3) // 3 concurrent reporting tasks
+report := split.AddPool().SetLimit(3) // 3 concurrent reporting tasks
 
 commit := c.AddStage()
 
 c.Run(ctx, func(ctx context.Context) error {
     batch := read() // (1) read a batch of messages
 
-    // (2) run the fetch+write and report tasks on each message 
-    // and wait for all of them to finish before moving to the commit stage
-    err := split.MoveTo(ctx, conveyor.Tasks{
+    // (2) enter the fan-out, then run the fetch+write and report tasks on each message
+    if err := split.MoveTo(ctx); err != nil {
+        return err
+    }
+    err := split.Schedule(ctx,
         messages.NewTasks(len(batch), func(cctx context.Context, i int) error {
             // `cctx` is the CHILD's context, not the item's — use it for the lane's own stages
             if err := enrich.MoveTo(cctx); err != nil {
                 return err
             }
             meta := fetchMeta(cctx, batch[i]) // 6 messages can be in here at once
-    
+
             if err := write.MoveTo(cctx); err != nil {
                 return err
             }
             return writeDB(cctx, batch[i], meta) // one at a time, in batch order
         }),
-		
+
         report.NewTasks(len(batch), func(cctx context.Context, i int) error {
-            return reportDB(cctx, batch[i]) // one at a time, in batch order
-        }),	
-    })
+            return reportDB(cctx, batch[i]) // 3 at a time
+        }),
+    )
     if err != nil {
         return err
     }
 
-    // (3) waits for every child of this item to finish
+    // (3) waits for every child and task of this item to finish
     if err := commit.MoveTo(ctx); err != nil {
         return err
     }
@@ -77,6 +79,15 @@ Everything you know about an item applies to a child, one level down:
 - It may move **only through its own lane's nodes**. Reaching a conveyor node from a child — or a lane's node from
   the conveyor — is a **panic** (`errWrongScope`).
 - Its error is fail-fast: it cancels the whole item (siblings included).
+- A lane may have its own interior fan-outs; a child enters them with `MoveTo` and adds work with `Schedule` and
+  `Wait`, exactly like the ItemProcessor does on the conveyor.
+
+## A child may add work to its parent's fan-out
+
+A child may call `Schedule` on the fan-out **its lane belongs to** (`split` above), before its callback returns. The
+work joins the parent item's body, like a follow-up scheduled from a pool task (see
+[Trees](4_fan-out.md#trees-a-task-schedules-follow-ups)), and the parent's next `MoveTo` waits for it too. A child
+may not call `Wait` there — that panics, for the same reason a pool task may not wait: it holds a slot.
 
 ## The lane's entrance is limit 1, like the conveyor's start
 
@@ -89,17 +100,25 @@ The parallelism comes from the **interior stages**, not the entrance — which i
 
 ## Order: every child takes a ticket
 
-When a piece of a lane's work is **pulled** off the lane's queue, it takes a numbered ticket. Interior stages admit
-strictly by ticket number — a stage's limit says how many may be *inside* at once, never *who goes next*.
+When a piece of a lane's work is **pulled** off the lane's queue, a child is created and takes a numbered ticket.
+Interior stages admit strictly by ticket number — a stage's limit says how many may be *inside* at once, never
+*who goes next*.
 
-Tickets are handed out by three rules, in this priority:
+Children are pulled from the lane's queue in this order:
 
-1. **Older item first** — every piece of an item's work precedes the *first* piece of the next item's.
-2. **Then the order you added the tasks** to the `Tasks` value.
+1. **Older item first** — a child is never created for a younger item's work while an older item has work queued
+   on the lane.
+2. **Then `Schedule` order**, and within one `Schedule` call the order you listed the tasks.
 3. **Then index order** within a `NewTasks` / generator / channel.
 
-So for `Tasks{messages.NewTask(A), messages.NewTasks(2, B)}` from item 1 and `Tasks{messages.NewTasks(2, C)}` from
-item 2, every interior stage is entered in the order `A, B0, B1, C0, C1`.
+So for `Schedule(ctx, messages.NewTask(A), messages.NewTasks(2, B))` from item 1 and
+`Schedule(ctx, messages.NewTasks(2, C))` from item 2, every interior stage is entered in the order
+`A, B0, B1, C0, C1`.
+
+The ticket is taken at creation, and a child holds the lane's entrance only until its first move. So work an item
+adds later — a second round, or a follow-up scheduled by a child after it has moved off the entrance — is queued
+ahead of younger items' queued work, but a younger item's child that was already created keeps its earlier ticket.
+Strict "all of item 1, then all of item 2" holds for the pattern above: one `Schedule` right after entering.
 
 ---
 

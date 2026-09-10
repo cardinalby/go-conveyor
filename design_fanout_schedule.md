@@ -788,6 +788,9 @@ return commit.MoveTo(ctx)
 ### 8.4 Tree: a task spawns follow-ups
 
 ```go
+crawl := c.AddFanOut("crawl")
+fetch := c.AddPool("fetch", 10)
+
 var visit func(ctx context.Context, url string) error
 visit = func(ctx context.Context, url string) error {
     links, err := fetchPage(ctx, url, &found)
@@ -803,9 +806,12 @@ visit = func(ctx context.Context, url string) error {
 if err := crawl.MoveTo(ctx); err != nil {
     return err
 }
-if err := crawl.Schedule(ctx, fetch.NewTask(func(ctx context.Context) error { return visit(ctx, seed) })); err != nil {
+if err := crawl.Schedule(ctx, oltp.NewTask(func(ctx context.Context) error { return visit(ctx, seed) })); err != nil {
     return err
 }
+
+crawl.Wait(ctx)
+
 // leaving waits for the whole tree
 if err := commit.MoveTo(ctx); err != nil {
     return err
@@ -971,8 +977,8 @@ Documentation and examples to revise:
 
 ## 11. Implementation plan
 
-**Progress (2026-09-10):** phases 0 to 6 are done and committed on branch `fanout-schedule` (one commit each).
-Next: phase 7 (§11.9). Process notes: from phase 3 on the phases are self-reviewed, not sent to Codex; nothing is
+**Progress (2026-09-10):** phases 0 to 7 are done and committed on branch `fanout-schedule` (one commit each).
+Next: phase 8 (§11.10). Process notes: from phase 3 on the phases are self-reviewed, not sent to Codex; nothing is
 pushed. Each phase's record sits under its checklist.
 
 ### 11.1 Ground rules
@@ -1346,35 +1352,56 @@ time equal or better, one more allocation and 4-6% more bytes per item for the b
 
 ### 11.9 Phase 7: documentation
 
-- [ ] `docs/4_fan-out.md`: rewrite around `MoveTo` then `Schedule`. Sections: the basic example; the door rule in one
+- [x] `docs/4_fan-out.md`: rewrite around `MoveTo` then `Schedule`. Sections: the basic example; the door rule in one
       paragraph; conditional body; rounds with `Wait`; trees (a task schedules follow-ups) with the three rules
       (schedule, never wait; before the task returns; results flow forward); several roots; join as a continuation;
       the ordering statement from §6.8 with its consequences; `Detach` with a growing tree; the `Started` note; a
       short "migrating from v0.9" table (old call, new calls). Keep the interactive demo link only if the demo's
       URL schema did not change (see phase 9).
-- [ ] `docs/5_lanes.md`: migrate the example; ticket rule wording (children order by pull, a spawn from a child after
+- [x] `docs/5_lanes.md`: migrate the example; ticket rule wording (children order by pull, a spawn from a child after
       its first move does not hold the entrance); a lane child may `Schedule` at the fan-out its lane belongs to.
-- [ ] `docs/6_conditional-move-to.md`: rewrite the fan-out `TryMoveTo` section (nothing to leave unclaimed; declined
+- [x] `docs/6_conditional-move-to.md`: rewrite the fan-out `TryMoveTo` section (nothing to leave unclaimed; declined
       entry needs no cleanup) and add a paragraph on `TryMoveTo` out of a fan-out (busy body means declined).
-- [ ] `docs/9_design_faq.md`: add "Why does `FanOut.MoveTo` take no tasks?" and "Why can a task not wait for the work it
+- [x] `docs/9_design_faq.md`: add "Why does `FanOut.MoveTo` take no tasks?" and "Why can a task not wait for the work it
       spawned?" and "Why does a stripped context not bypass cancellation?".
-- [ ] `docs/1_retain-previous-stage.md`, `docs/2_queues.md`, `docs/3_shared-stages.md`: check for
+- [x] `docs/1_retain-previous-stage.md`, `docs/2_queues.md`, `docs/3_shared-stages.md`: check for
       `MoveTo(ctx, tasks` and ordering wording.
-- [ ] `docs/7_observability.md`: a branch's backlog is no longer bounded by "one collection per item inside the
+- [x] `docs/7_observability.md`: a branch's backlog is no longer bounded by "one collection per item inside the
       fan-out" (the sentence near line 61); with rounds and spawns an item may have several collections queued.
       Reword `Queued` for branches as "collections not fully handed out".
-- [ ] `debug.go` (`UnitOccupants.InQueue`) and `stats.go` (`UnitStat.Queued`) godoc: queue order and collection
+- [x] `debug.go` (`UnitOccupants.InQueue`) and `stats.go` (`UnitStat.Queued`) godoc: queue order and collection
       counting per the two points above.
-- [ ] `docs/README.md`: index line for 4 mentions `Schedule` and `Wait`.
-- [ ] `README.md`: the features list and the scatter-gather sentence.
-- [ ] `impl_details.md`: §2 or §4 (body state per item), §5 (waiting-room rank on admission; node rank at first root
+- [x] `docs/README.md`: index line for 4 mentions `Schedule` and `Wait`.
+- [x] `README.md`: the features list and the scatter-gather sentence.
+- [x] `impl_details.md`: §2 or §4 (body state per item), §5 (waiting-room rank on admission; node rank at first root
       `Schedule`; `TryMoveTo` preamble and canonical cancellation), §7 (Schedule steps, ordered insert, identity
       removal, root versus spawn, displaced pull), §8 (sealed waves, `Started` over roots, body state table), §10
       (`ErrStaleContext` for finished work; canonical cancellation), §13 (invariant 5 wording), §14 (the no-gap
       argument and its limits), §15 if the `Started` caveat belongs there.
-- [ ] Godoc pass over `conveyor.go` (package doc mentions of `Tasks`), `errors.go`, `wave.go`, `branch.go`,
+- [x] Godoc pass over `conveyor.go` (package doc mentions of `Tasks`), `errors.go`, `wave.go`, `branch.go`,
       `task.go`.
-- [ ] Release notes draft for the tag: breaking changes list from §9, migration table, new features.
+- [x] Release notes draft for the tag: breaking changes list from §9, migration table, new features.
+
+
+Phase 7 record: `docs/4_fan-out.md` rewritten around `MoveTo` then `Schedule` (door, conditional body, rounds, trees
+with the three rules, several roots, join as a continuation, the §6.8 ordering statement and its consequences,
+`Detach` with a growing tree, the `Started` note, a v0.9 migration table); the demo links are kept, since phase 9 is
+not planned and the URL schema did not change. `docs/5_lanes.md` migrated (the example's `report` branch is now a
+pool of the fan-out — before it was a lane stage used with `NewTasks`, which does not compile), the ticket rules now
+speak of pull order, and a section says a child may `Schedule` at its parent's fan-out but not `Wait` there.
+`docs/6_conditional-move-to.md` got the fan-out sections "into" (nothing to clean up) and "out of" (busy body means
+declined, body stays open). `docs/9_design_faq.md` Q4 to Q6. `docs/7_observability.md`, `debug.go` and `stats.go`
+describe a branch's backlog as collections not fully handed out, several per item possible. `docs/1`, `docs/2`,
+`docs/3` and `docs/8` needed no change (no `Tasks` or ordering wording). `impl_details.md` rewritten: §3 (`waitUntil`
+on both contexts), §4 (`seq`, body state table), §5 (leave steps with the failed-leave positions and the `queuedAt`
+retry guard, publishing rules and the door, `tryEnterUnit` order and preamble), §6 (the two waiting-room slot fixes
+from phase 3), §7 (bodies, the `Schedule` steps, queue order with displacement and identity removal), §8 (sealed /
+idle / finished, `Started` over roots, `Wait`), §10 (canonical cancellation, new sentinels, stale contexts), §12,
+§13 (invariant 5 reworded, invariant 9 added), §14 (growth and the no-gap argument with its limits), §15 (door cost,
+`Started` caveat). Godoc pass: `errors.go` header, `task.go` (`claim`), `item.go` (`maxRank`, `reachedRank`,
+`waves`), `state.go` (`checkEnterOrder` comment); `conveyor.go`, `wave.go`, `branch.go` and `fanout.go` were already
+current from phases 4 and 5. Release notes draft added as §12 below. No code changed; `go vet` and the root suite
+pass.
 
 ### 11.10 Phase 8: demo and bench migration (required)
 
@@ -1416,7 +1443,7 @@ the polled data), the badge animation in `TaskStrip.tsx` (origins keyed by item 
 follow-ups), and the code generator (a recursive `visit` closure). It can be picked up later without touching the
 library.
 
-### 11.12 Phase 10: final verification and release
+### 11.12 Phase 10: final verification
 
 - [ ] Root: `go vet ./... && go test -race -cpu=1,4 ./...`, plus the repeated package run from §11.1 with a name
       selector covering the new tests and the property suite.
@@ -1424,6 +1451,56 @@ library.
 - [ ] Go version floor: CI runs 1.23 and stable; if `context.AfterFunc` or another API newer than 1.23 is touched,
       confirm the floor still builds.
 - [ ] Read the diff of the public API once more against §5; every panic and return in §6.11 has a test.
+
+## 12. Release notes draft (v0.10.0)
+
+**Fan-out bodies that grow: `Schedule` and `Wait`.** An item now enters a fan-out with `MoveTo(ctx)` and adds work
+with `Schedule(ctx, tasks...)`, as many times as it likes. A task running on one of the fan-out's pools (or a child of
+one of its lanes) may `Schedule` follow-ups into the same body with its own context before it returns, so trees of
+work (crawling, pagination, recursive listing) grow while the item stays inside. `Wait(ctx)` blocks until everything
+scheduled so far is done and lets the item schedule again. See `docs/4_fan-out.md`.
+
+### Breaking changes
+
+- `FanOut.MoveTo(ctx, tasks, joins...)` is now `MoveTo(ctx, joins...)`; `FanOut.TryMoveTo` likewise. Add work with
+  the new `FanOut.Schedule(ctx, tasks...)`.
+- `Tasks` and `Tasks.Add` are removed. Build a `[]Task` and pass it with `...`.
+- The item behind a fan-out can enter it only after the item ahead has called `Schedule` once (or left, or
+  detached), not at the item ahead's `MoveTo`. It may wait in the fan-out's waiting room meanwhile. Keep the code
+  between `MoveTo` and the first `Schedule` short.
+- Every node method (`MoveTo`, `TryMoveTo`, `Schedule`, `Wait`, and `Retain`'s decision to run its callback) declines
+  an item whose own context is canceled, even when called with a context that hides the cancellation
+  (`context.WithoutCancel`). A derived context with a shorter deadline still works.
+- `Wave.Started` closes once the wave is sealed and every task the *ItemProcessor* scheduled has been handed out.
+  Work scheduled by tasks or lane children does not count and does not delay it.
+- A pool task's context is accepted by `Schedule` of its own fan-out. Every other node method still panics with it.
+- `ErrStaleContext` also covers a finished lane child's context and a pool task's context whose wave has finished.
+- The per-branch ordering guarantee is restated: on a branch, a free slot is never given to a younger item's work
+  while an older item has work queued there; started work and reserved streaming pulls are never taken back. For
+  code that schedules once right after entering it is unchanged.
+- A `TryMoveTo` out of a fan-out that does not admit the item leaves the body untouched and open. A blocking `MoveTo`
+  out of a fan-out that fails after the body was joined leaves the body closed; `Schedule` and `Wait` there panic.
+
+### Migration
+
+| v0.9                                              | v0.10                                                                |
+|---------------------------------------------------|----------------------------------------------------------------------|
+| `f.MoveTo(ctx, conveyor.Tasks{a, b}, joins...)`   | `f.MoveTo(ctx, joins...)` then `f.Schedule(ctx, a, b)`               |
+| `f.MoveTo(ctx, nil)`                              | `f.MoveTo(ctx)`                                                      |
+| `f.TryMoveTo(ctx, tasks)`                         | `entered, err := f.TryMoveTo(ctx)`; `if entered { f.Schedule(...) }` |
+| `var t conveyor.Tasks; t.Add(x)`                  | `var t []conveyor.Task; t = append(t, x)`                            |
+
+### New
+
+- `FanOut.Schedule(ctx, tasks...)`: non-blocking; callable by the ItemProcessor while inside with an open body, by a
+  pool task before it returns, and by a lane child before its callback returns. Work is queued at the owning item's
+  place on each branch. Zero tasks is legal and only opens the fan-out to the next item.
+- `FanOut.Wait(ctx)`: blocks until the body (including spawned work) is idle, returns the first error with the node's
+  name, keeps the slot; repeated calls return the same error.
+- `FanOut.Detach` returns a wave that may still grow from its own running tasks; the slot follows the whole tree.
+- Two fixes on the way: a `MoveTo` retried from a waiting room after a failed move no longer takes a second queued
+  slot, and a queued slot left in front of an earlier node by a failed move is given back when the item waits
+  elsewhere.
 
 ## Decisions taken
 

@@ -125,7 +125,7 @@ You still have a **single function** that processes a single batch, but the Conv
    - with channels, you would need to send a "skip" signal through the channels
    - with channels, it's complicated to send data from "stage1" to "stage3" if "stage2" is a fan-out stage 
 4. Supports deadlock-free [scatter-gather](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Conveyor.AddFanOut) 
-   stages
+   stages whose work may grow while it runs: schedule in rounds, or let a task schedule its own follow-ups
 5. Dynamic concurrency limits and queue sizes for stages (gracefully adjusted in runtime)
 6. Goroutines pool is dynamically adjusted (goroutines are reused for new items)
 7. Graceful **shutdown** happens naturally, just respect the context:
@@ -154,7 +154,7 @@ See the [docs](docs/README.md) for guides on these features:
 - [Retain previous stage longer](docs/1_retain-previous-stage.md)
 - [Queues](docs/2_queues.md)
 - [Shared Stages](docs/3_shared-stages.md)
-- [Fan-out (scatter/gather)](docs/4_fan-out.md)
+- [Fan-out (scatter/gather)](docs/4_fan-out.md): pools, `Schedule` / `Wait` rounds, tasks that spawn follow-ups, `Detach`
 - [Lanes: when a branch is a pipeline](docs/5_lanes.md)
 - [Conditional MoveTo](docs/6_conditional-move-to.md)
 - [Observability](docs/7_observability.md)

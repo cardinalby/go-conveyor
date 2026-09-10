@@ -5,8 +5,8 @@ import (
 	"fmt"
 )
 
-// Returned errors, inspectable with errors.Is on the value returned by Run and the node methods (Stage.MoveTo /
-// FanOut.MoveTo), or on Wave.Err.
+// Returned errors, inspectable with errors.Is on the value returned by Run and the node methods (MoveTo, TryMoveTo,
+// FanOut.Schedule, FanOut.Wait), or on Wave.Err.
 var (
 	// ErrConveyorAlreadyRunning is returned by Run when the conveyor is already running.
 	ErrConveyorAlreadyRunning = errors.New("conveyor is already running")

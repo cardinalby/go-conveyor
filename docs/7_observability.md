@@ -54,12 +54,14 @@ And per node, in `UnitStat`:
 |------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `Occupied` | items running a stage's code / items with work outstanding in a fan-out / pieces of a branch's work in flight (for a lane: children at its entrance).                                  |
 | `Limit`    | that node's capacity — the denominator. It travels with `Occupied` because 3 is saturated at limit 3 and idle at limit 300, and the two are read under one lock, so they always agree. |
-| `Queued`   | what is piled up **in front of** the node: items in a stage's or fan-out's waiting room, or — for a branch — items whose work it has accepted but not yet started.                     |
+| `Queued`   | what is piled up **in front of** the node: items in a stage's or fan-out's waiting room, or — for a branch — collections of work (one per `Schedule` call that touched the branch) not yet fully handed out. |
 
 `Queued` needs no capacity to interpret: any queueing at all means that node is not keeping up with its input, which
 is why the configured waiting-room size is not reported here. Read it back from the handle (`Stage.QueueSize` /
-`FanOut.QueueSize`) if a dashboard wants the denominator; a branch's backlog has no size of its own, being bounded by
-its fan-out's limit.
+`FanOut.QueueSize`) if a dashboard wants the denominator. A branch's backlog has no size of its own: an item inside
+the fan-out may have several collections queued on one branch (a later round, follow-ups scheduled by its tasks), so
+the backlog is not bounded by the fan-out's limit either. Running work is never counted there — a collection leaves
+the backlog as soon as its last callback has been handed out.
 
 So the two signals worth alerting on are `Occupied.Max == Limit` (saturated) and a `Queued` that never returns to
 zero (falling behind) — and the node they point at is the one to give more capacity, with `SetLimit` or

@@ -46,26 +46,35 @@ Two things are worth knowing:
 - A **waiting room** in front of the stage (`SetQueueSize`) is deliberately **not** used.
 - `TryMoveTo` also won't jump an item already waiting in front of the stage. Item order still holds.
 
-A fan-out has the same variant, and there it does one thing more — on `entered == false` the tasks are left
-**unclaimed**, so the very same `Tasks` value can be submitted later, here or somewhere else:
+## Into a fan-out
+
+A fan-out has the same variant. Because the tasks are built and scheduled *after* entering, a declined entry leaves
+nothing to clean up: no tasks were built for nothing, and nothing was claimed.
 
 ```go
-tasks := conveyor.Tasks{db1Write.NewTask(writeDb1)}
-
-entered, err := dbsWrite.TryMoveTo(ctx, tasks)
+entered, err := enrich.TryMoveTo(ctx)
 if err != nil {
     return err
 }
-if !entered {
-    // Nothing was scheduled and nothing was consumed: the same value is still submittable.
-    if err := dbsWrite.MoveTo(ctx, tasks); err != nil {
+if entered {
+    if err := enrich.Schedule(ctx, lookup.NewTasks(len(batch), lookupMeta)); err != nil {
         return err
     }
 }
+// not entered: the item is still in the previous node; enrich may be entered later with MoveTo
 ```
 
 Waves passed to either variant are joined only if the item entered, so a `TryMoveTo` that declines never waits on
 anything.
+
+## Out of a fan-out
+
+`TryMoveTo` called while the item is **inside a fan-out** has one more reason to decline: the item's body there is
+still **busy** (tasks queued or running). Leaving would mean waiting for them, which is exactly what the call promises
+not to do, so it returns `(false, nil)` and touches nothing — the body stays open and the item may keep scheduling.
+With an idle body it behaves like the stage variant: it leaves if the target has room, and otherwise declines, again
+leaving the body open. A body whose task has failed has already canceled the item, so the call returns
+`(false, cause)`; the node-qualified error is what `Wait` or the blocking `MoveTo` report.
 
 ---
 

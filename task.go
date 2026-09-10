@@ -41,7 +41,7 @@ func (t Task) branchName() string {
 // A source is stateful and single-use; claim() detects a Task submitted twice. All methods except an async pull
 // are called under run.mu.
 type taskSource interface {
-	// claim marks the source as consumed by a MoveTo call; it reports false if it was already claimed.
+	// claim marks the source as consumed by a Schedule call; it reports false if it was already claimed.
 	claim() bool
 	// isSync reports whether pull is free of user code and safe to call under run.mu.
 	isSync() bool
