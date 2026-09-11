@@ -130,10 +130,11 @@ type propNode struct {
 // propJitter is one node a scenario may resize while the conveyor runs. setQueue is nil for a lane, which has no
 // waiting room of its own; g is nil for a fan-out node, whose occupancy no instrumented region measures.
 type propJitter struct {
-	name     string
-	setLimit func(int)
-	setQueue func(int)
-	g        *propGauge
+	name         string
+	setLimit     func(int)
+	setQueue     func(int)
+	setAdmission func(FanOutAdmission) // fan-out nodes only: the admission policy is live too
+	g            *propGauge
 }
 
 // propTopology is a generated conveyor plus everything the invariants are checked against.
@@ -250,10 +251,12 @@ func buildPropTopology(rnd *rand.Rand, seed int64) *propTopology {
 		if rnd.Intn(4) == 0 {
 			fo.SetQueueSize(1 + rnd.Intn(3))
 		}
+		fo.SetAdmission(FanOutAdmission(rnd.Intn(3))) // by limit, by pools, or by pools with an upstream hold
 		top.jitters = append(top.jitters, propJitter{
-			name:     name,
-			setLimit: func(n int) { fo.SetLimit(n) },
-			setQueue: func(n int) { fo.SetQueueSize(n) },
+			name:         name,
+			setLimit:     func(n int) { fo.SetLimit(n) },
+			setQueue:     func(n int) { fo.SetQueueSize(n) },
+			setAdmission: func(a FanOutAdmission) { fo.SetAdmission(a) },
 		})
 		pf := &propFanOut{fo: fo}
 		for j, nl := 0, 1+rnd.Intn(3); j < nl; j++ {
@@ -302,6 +305,7 @@ func (top *propTopology) buildLane(rnd *rand.Rand, fo FanOut, name string, inter
 
 	if innerFanOut {
 		inner := l.AddFanOut(OptName(name + ".ifo")).SetLimit(1 + rnd.Intn(2))
+		inner.SetAdmission(FanOutAdmission(rnd.Intn(3))) // strict: a child holds the lane's entrance until its work starts
 		pf := &propFanOut{fo: inner}
 		for j, nl := 0, 1+rnd.Intn(2); j < nl; j++ {
 			pf.lanes = append(pf.lanes, top.buildLane(rnd, inner, fmt.Sprintf("%s.ifo.l%d", name, j), false))
@@ -575,6 +579,9 @@ func (top *propTopology) jitterCapacities(stop <-chan struct{}, seed int64) {
 		if j.setQueue != nil {
 			j.setQueue(rnd.Intn(4)) // 0 included: taking a waiting room away entirely
 		}
+		if j.setAdmission != nil {
+			j.setAdmission(FanOutAdmission(rnd.Intn(3))) // flip the policy under items waiting at the door
+		}
 		time.Sleep(50 * time.Microsecond) // often enough to interleave, cheap enough not to dominate the run
 	}
 }
@@ -757,7 +764,7 @@ func TestPropertyRandomFailFast(t *testing.T) {
 }
 
 // TestPropertyCapacityJitterHoldsInvariants is the invariant checker again, with every node's limit and waiting room
-// being resized from another goroutine throughout the run. It is a separate test rather than an option on the base
+// being resized, and every fan-out's admission policy flipped, from another goroutine throughout the run. It is a separate test rather than an option on the base
 // one so a failure says whether live resizing is implicated.
 //
 // Capacity changes are admission-only in both directions, so none of the invariants may bend: order still holds at the

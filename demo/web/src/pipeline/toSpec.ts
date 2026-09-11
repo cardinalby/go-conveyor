@@ -28,6 +28,7 @@ function nodesToSpec(nodes: PipelineNode[]): NodeSpec[] {
       limit: n.limit,
       queueSize: n.queueSize,
       delayMs: 0,
+      admission: n.admission,
       branches: n.branches.map(branchToSpec),
     };
   });

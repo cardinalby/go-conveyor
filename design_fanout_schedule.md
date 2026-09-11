@@ -1,6 +1,7 @@
 # FanOut body that grows: `Schedule` and `Wait`
 
-Status: design proposal, not implemented. The change is breaking and is meant for a v0.x release before v1.
+Status: implemented (the plan in §11 was carried out; the runtime is described in `impl_details.md`). The change
+was breaking and targeted a v0.x release before v1. Kept as the design record.
 
 This document records the problem, the options that were declined and why, and the full specification of the
 proposed interfaces and behavior, followed by the implementation plan (§11). Revision 2 incorporates an external

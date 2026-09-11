@@ -30,7 +30,7 @@ import { resetBodySlotAssignments } from "./state/bodySlotAssignments";
 import { readUrlState, writeUrlState } from "./state/urlState";
 import type { UrlAppState } from "./state/urlState";
 import { START_ID } from "./types/topology";
-import type { BranchNode, Pipeline } from "./types/pipeline";
+import type { BranchNode, FanOutAdmission, Pipeline } from "./types/pipeline";
 import type { RunState } from "./types/state";
 import type { MenuTarget } from "./types/menu";
 import type { EditField } from "./components/nodes/types";
@@ -212,6 +212,30 @@ function App() {
       if (field === "limit") api.setLimit(id, value);
       else if (field === "queueSize") api.setQueueSize(id, value);
       else api.setDelay(id, value);
+      setRunState(api.state());
+    },
+    [mode],
+  );
+
+  // A fan-out's admission policy — the one non-numeric node dial (see components/nodes/types' onEditAdmission).
+  // Live like Limit and Queue: conveyor.FanOut.SetAdmission is safe on a running conveyor and applies to admissions
+  // after the call.
+  const handleEditAdmission = useCallback(
+    (id: string, value: FanOutAdmission) => {
+      setPipeline((p) => ({
+        ...p,
+        nodes: rewriteNodeLists(p.nodes, (list) => {
+          const i = list.findIndex((n) => n.id === id);
+          if (i < 0) return list;
+          const n = list[i];
+          if (n.kind !== "fanout") return list;
+          const next = [...list];
+          next[i] = { ...n, admission: value };
+          return next;
+        }),
+      }));
+      if (mode !== "run") return;
+      api.setAdmission(id, value);
       setRunState(api.state());
     },
     [mode],
@@ -434,6 +458,7 @@ function App() {
           mode={mode}
           onContextMenu={handleContextMenu}
           onEditNode={handleEditNode}
+          onEditAdmission={handleEditAdmission}
           onEditBranch={handleEditBranch}
           onEditStartDelay={handleEditStartDelay}
           onRenameNode={handleRenameNode}

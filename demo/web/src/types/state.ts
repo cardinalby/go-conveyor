@@ -1,5 +1,7 @@
 // Mirrors demo/internal/runtime.State / NodeState — the run-mode poll response. Keep in sync by hand.
 
+import type { FanOutAdmission } from "./pipeline";
+
 /** One (item number, lane-child ordinal path) pair currently occupying a node reachable through some lane's
  * interior — see Go's topology.LanePathEntry. A child always inherits its parent's item number, so this is the
  * only way to tell concurrent siblings of the same item apart: path [2] is the second child a top-level lane
@@ -19,6 +21,8 @@ export interface NodeState {
   id: string;
   limit: number;
   queueSize: number;
+  /** A fan-out's live admission policy; absent for every other kind of node. */
+  admission?: FanOutAdmission;
   delayMs: number;
   /** How many tasks/children (see Go's Branch.NewTasks) one item schedules on this branch. Always 0 for anything
    * but a pool or a lane. */

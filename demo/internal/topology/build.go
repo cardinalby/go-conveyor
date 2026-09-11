@@ -60,6 +60,33 @@ func Build(spec Spec, options ...conveyor.Option) (*Built, error) {
 	return built, nil
 }
 
+// AdmissionPolicy maps a Spec's Admission to the library's policy. An empty value is AdmissionByLimit (the default
+// for a Spec that predates the field); anything else unknown is an error, like an unknown Kind.
+func AdmissionPolicy(a Admission) (conveyor.FanOutAdmission, error) {
+	switch a {
+	case "", AdmissionByLimit:
+		return conveyor.AdmitByLimit, nil
+	case AdmissionByPools:
+		return conveyor.AdmitByPools, nil
+	case AdmissionByPoolsStrict:
+		return conveyor.AdmitByPoolsStrict, nil
+	default:
+		return conveyor.AdmitByLimit, fmt.Errorf("unknown admission %q", a)
+	}
+}
+
+// AdmissionName is the inverse of AdmissionPolicy, for reporting a live fan-out's policy in a State snapshot.
+func AdmissionName(a conveyor.FanOutAdmission) Admission {
+	switch a {
+	case conveyor.AdmitByPools:
+		return AdmissionByPools
+	case conveyor.AdmitByPoolsStrict:
+		return AdmissionByPoolsStrict
+	default:
+		return AdmissionByLimit
+	}
+}
+
 // buildNodes builds nodes onto host (the conveyor root, or one lane's interior series) at the given depth, filling
 // built.Handles/Depth as it goes and recursing into every lane branch's own Nodes one depth deeper.
 func buildNodes(nodes []NodeSpec, host nodeHost, depth int, built *Built, claim func(string) error) error {
@@ -72,7 +99,11 @@ func buildNodes(nodes []NodeSpec, host nodeHost, depth int, built *Built, claim 
 			built.Handles[n.ID] = host.AddStage(conveyor.OptName(n.Name)).SetLimit(n.Limit).SetQueueSize(n.QueueSize)
 			built.Depth[n.ID] = depth
 		case KindFanOut:
-			f := host.AddFanOut(conveyor.OptName(n.Name)).SetLimit(n.Limit).SetQueueSize(n.QueueSize)
+			admission, err := AdmissionPolicy(n.Admission)
+			if err != nil {
+				return fmt.Errorf("node %q: %w", n.ID, err)
+			}
+			f := host.AddFanOut(conveyor.OptName(n.Name)).SetLimit(n.Limit).SetQueueSize(n.QueueSize).SetAdmission(admission)
 			built.Handles[n.ID] = f
 			built.Depth[n.ID] = depth
 			for _, br := range n.Branches {

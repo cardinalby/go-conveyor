@@ -4,7 +4,7 @@ import { getSlotElement } from "../state/slotRegistry";
 import { isFailModifier } from "./shared/failModifier";
 import { ItemBadge } from "./shared/ItemBadge";
 import { colorForItem, textColorForItem } from "../pipeline/colors";
-import { parentKey, type ItemFill, type ItemPositions } from "../pipeline/itemPositions";
+import { baseKey, isHeldKey, parentKey, type ItemFill, type ItemPositions } from "../pipeline/itemPositions";
 
 // Half of .item-badge's own size — centers the rectangle on its slot's midpoint. Not square: the extra width is
 // what a lane sub-item's ".1"/".2" suffix (see itemPositions.ts) needs room for.
@@ -24,7 +24,7 @@ interface RenderedItem {
  * a lane's sub-item is colored by, and what a click on it fails as a whole (see topology.runNodes — a child's
  * failure is the item's own, escalated, so there is nothing narrower to fail). */
 function rootItemNo(key: string): number {
-  return Number(key.split(".", 1)[0]);
+  return Number(baseKey(key).split(".", 1)[0]);
 }
 
 interface Props {
@@ -64,7 +64,7 @@ export function ItemsOverlay({ itemPositions, onFailItem }: Props) {
         const el = getSlotElement(key);
         if (!el) return;
         const fill = itemPositions.fills.get(itemKey) ?? "solid";
-        if (!prev.has(itemKey)) {
+        if (!prev.has(itemKey) && !isHeldKey(itemKey)) {
           // Freshly appearing (a lane's entrance, or one level deeper): park it at wherever its immediate parent —
           // the item itself, for an entrance — currently sits, still tracked under that shallower key. The very
           // next tick then moves it to its real slot in a second, separate update, and it's *that* second write the
@@ -109,16 +109,26 @@ export function ItemsOverlay({ itemPositions, onFailItem }: Props) {
       <div className="items-overlay">
         {Array.from(items.entries()).map(([itemKey, item]) => {
           const no = rootItemNo(itemKey);
+          const label = baseKey(itemKey);
+          // A held copy (see itemPositions' ItemFill "held") stands for an item drawn elsewhere: its label is the
+          // item's own, and its data-item-key is left unset so nothing flies in from the copy instead of the item.
+          const held = isHeldKey(itemKey);
           return (
             <ItemBadge
               key={itemKey}
-              itemKey={itemKey}
-              label={itemKey}
+              itemKey={held ? undefined : itemKey}
+              label={label}
               color={colorForItem(no)}
               textColor={textColorForItem(no)}
               fill={item.fill}
               className={`item-rect-overlay${item.exiting ? " exiting" : ""}`}
-              title={item.exiting ? undefined : `Item ${itemKey} — Ctrl/⌘-click to fail it`}
+              title={
+                item.exiting
+                  ? undefined
+                  : held
+                    ? `Item ${label} — slot kept until its tasks start (admitted by pools, strict); Ctrl/⌘-click to fail it`
+                    : `Item ${label} — Ctrl/⌘-click to fail it`
+              }
               onClick={(e) => {
                 if (item.exiting || !isFailModifier(e)) return;
                 e.stopPropagation();

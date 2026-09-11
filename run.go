@@ -288,6 +288,9 @@ func (r *run) completeItem(it *item, procErr error) {
 	// nobody observed fails the item below.
 	if w := it.pending; w != nil {
 		it.sealBody(w, bodyClosed)
+		// Sealing may have ended an upstream hold (see dischargeHold) and freed a slot upstream waiters are parked on;
+		// the wait below would otherwise leave them asleep until an unrelated broadcast.
+		r.cond.Broadcast()
 	}
 	// Join all outstanding background work before releasing slots.
 	for it.hasLiveWaves() {

@@ -73,6 +73,9 @@ type wave struct {
 	rootUnexhausted int
 	// running is the number of this wave's tasks (or child items) that have started but not finished.
 	running int
+	// rootSubmitted records that a root submission has reached this body, so only the first one is the entering
+	// submission of an AdmitByPools admission (see run.markEntering).
+	rootSubmitted bool
 
 	// err is the first error produced by the wave's work; it is also set as the cancellation cause of the
 	// owning item's context (fail-fast).

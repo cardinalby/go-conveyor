@@ -3,6 +3,19 @@
 
 export type BranchKind = "pool" | "lane";
 
+/** A fan-out's admission policy — mirrors Go's topology.Admission / conveyor.FanOutAdmission. "limit" (the default)
+ * admits on a free item slot and releases the previous node at once; "pools" also needs a branch with free capacity
+ * (conveyor.AdmitByPools); "poolsStrict" on top keeps the previous node's slot until the item's first Schedule has
+ * started on every branch it touched, so a saturated pool pushes back upstream (conveyor.AdmitByPoolsStrict). */
+export type FanOutAdmission = "limit" | "pools" | "poolsStrict";
+
+export const FAN_OUT_ADMISSIONS: readonly FanOutAdmission[] = ["limit", "pools", "poolsStrict"];
+
+/** Narrows an untrusted string (URL state, a <select> value) to a policy; anything unknown is the default. */
+export function toFanOutAdmission(v: unknown): FanOutAdmission {
+  return v === "pools" || v === "poolsStrict" ? v : "limit";
+}
+
 export interface PoolBranch {
   id: string;
   kind: "pool";
@@ -45,6 +58,7 @@ export interface FanOutNode {
   name: string;
   limit: number;
   queueSize: number;
+  admission: FanOutAdmission;
   branches: BranchNode[];
 }
 

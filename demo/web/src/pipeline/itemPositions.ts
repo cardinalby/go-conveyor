@@ -17,12 +17,33 @@ import type { ResolvedFanOut, ResolvedNode, ResolvedStart } from "./resolve";
  *  - "blocked"  — finished this node's own work and is now trying to advance into the next node: a start/stage
  *    item past its own delay (runtime.NodeState.BlockedLeaving), or a fan-out entry with none of its work queued or
  *    running on any branch.
+ *  - "held"     — a second, dimmed copy of an item that is already inside a fan-out admitted "by pools (strict)" (see
+ *    conveyor.AdmitByPoolsStrict): the slot it still keeps in the node before the fan-out — or in the fan-out's own
+ *    waiting room — until its first Schedule has started on every branch it touched. Drawn under a separate key
+ *    (see heldKey) so the item appears in two places at once, which is exactly what the backpressure looks like.
  *
  * The three fan-out fills are derived from what is polled (PendingEntry plus each branch's InQueue/InBody), not from
  * the library's Wave channels: an open body's channels are not observable, and Wave.Started counts only the sources
  * the item scheduled itself, not follow-ups a task may schedule.
  */
-export type ItemFill = "solid" | "pending" | "blocked";
+export type ItemFill = "solid" | "pending" | "blocked" | "held";
+
+/** Suffix of the key a held token's copy is drawn under (see ItemFill "held"): "42@held" for item 42, "42.1@held"
+ * for a lane sub-item. Never contains "." after the base key, so parentKey/rootItemNo keep working on the base. */
+const HELD_SUFFIX = "@held";
+
+export function heldKey(key: string): string {
+  return `${key}${HELD_SUFFIX}`;
+}
+
+export function isHeldKey(key: string): boolean {
+  return key.endsWith(HELD_SUFFIX);
+}
+
+/** The item key a held copy stands for — the key itself for a normal one. */
+export function baseKey(key: string): string {
+  return isHeldKey(key) ? key.slice(0, -HELD_SUFFIX.length) : key;
+}
 
 /** One in-flight item's progress through the pipeline, for the toolbar's live item list (see ../components/
  * ConveyorItems). Always a root item — a lane's own sub-items are "inside" whichever top-level node scheduled
@@ -234,13 +255,55 @@ export function assignBodySlots(
  * to any depth) — but never touches `completed`, which only computeItemPositions' own top-level walk tracks: a
  * lane's interior is "inside" whichever top-level node scheduled it, not a stage of its own. */
 function assignNode(node: ResolvedNode, slotKeys: Map<string, string>, fills: Map<string, ItemFill>): void {
+  // Slots the earlier nodes of this walk already gave this node's body occupants, read before this node overwrites
+  // them: an item inside a fan-out admitted "by pools (strict)" still holds its slot in the node before it until its
+  // first tasks have started (see conveyor.AdmitByPoolsStrict), so it is genuinely in two bodies at once. Nodes are walked in
+  // pipeline order, so "already assigned" means "the node before". keyAssigner is deterministic for one
+  // (lanePaths, inBody) pair, so a throwaway one here resolves the same composite keys assignBody is about to.
+  const heldBefore = new Map<string, string>();
+  if (node.kind === "fanout") {
+    const preview = keyAssigner(node.lanePaths);
+    for (const no of node.inBody) {
+      const key = preview(no);
+      const slot = slotKeys.get(key);
+      if (slot !== undefined) heldBefore.set(key, slot);
+    }
+  }
+
   // One keyFor shared across body *and* queue: a lane child queued here and another, concurrent child of the same
   // item already in body both draw from the same path pool, and must not collide on the same composite key by
   // each independently starting their own count from zero.
   const keyFor = keyAssigner(node.lanePaths);
   const bodyKeyByItem = assignBody(node.id, node.limit, node.inBody, keyFor, slotKeys);
+  const bodyKeys = new Set([...bodyKeyByItem.values()].flat());
+  const fallbackUsed = new Map<number, number>();
   queueSlots(node.queueSize, node.inQueue).forEach((no, i) => {
-    if (no !== null) slotKeys.set(keyFor(no), slotKey(node.id, "queue", i));
+    if (no === null) return;
+    let key = keyFor(no);
+    const slot = slotKey(node.id, "queue", i);
+    // An item both inside a fan-out and in its waiting room is one admitted "by pools (strict)" from that room: the queued
+    // token is the one it keeps (the previous node was released when it stepped aside). Its rectangle belongs to
+    // the body; the room shows the held copy. For a lane child the path pool has one entry per child, and the body
+    // pass consumed it: the queued token then falls back to the bare number, which must not steal the root item's
+    // rectangle — it is the held copy of a child already in the body. Several such tokens of one item take distinct
+    // body keys in order (which child holds which token is not known; the pairing is arbitrary but collision-free).
+    const ownBodyKeys = bodyKeyByItem.get(no);
+    if (!bodyKeys.has(key) && node.lanePaths.length > 0 && ownBodyKeys && !key.includes(".")) {
+      const used = fallbackUsed.get(no) ?? 0;
+      fallbackUsed.set(no, used + 1);
+      key = ownBodyKeys[Math.min(used, ownBodyKeys.length - 1)];
+    }
+    if (bodyKeys.has(key)) {
+      slotKeys.set(heldKey(key), slot);
+      fills.set(heldKey(key), "held");
+    } else {
+      slotKeys.set(key, slot);
+    }
+  });
+  heldBefore.forEach((slot, key) => {
+    if (slotKeys.get(key) === slot) return; // not re-assigned here after all
+    slotKeys.set(heldKey(key), slot);
+    fills.set(heldKey(key), "held");
   });
 
   if (node.kind === "stage") {

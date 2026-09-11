@@ -1,5 +1,7 @@
 // Mirrors demo/internal/topology/schema.go — the wire format sent to WASM's "run" method. Keep in sync by hand.
 
+import type { FanOutAdmission } from "./pipeline";
+
 /** Reserved id for the conveyor's implicit start ("Read") stage. A Spec's own ids must never equal it. */
 export const START_ID = "__start__";
 
@@ -25,8 +27,9 @@ export interface BranchSpec {
   nodes?: NodeSpec[]; // lane only
 }
 
-/** One node of a Spec, or of a lane's own interior series. branches is present (and non-empty) only for a fanout;
- * delayMs applies only to a stage (a fan-out runs no code of its own, only its branches do). */
+/** One node of a Spec, or of a lane's own interior series. branches and admission are present only for a fanout
+ * (admission omitted means "limit" — see Go's topology.Admission); delayMs applies only to a stage (a fan-out runs
+ * no code of its own, only its branches do). */
 export interface NodeSpec {
   id: string;
   kind: NodeKind;
@@ -34,6 +37,7 @@ export interface NodeSpec {
   limit: number;
   queueSize: number;
   delayMs: number;
+  admission?: FanOutAdmission;
   branches?: BranchSpec[];
 }
 

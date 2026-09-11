@@ -4,7 +4,7 @@ interface Props {
   textColor: string;
   /** See ../../pipeline/itemPositions.ts's ItemFill — "pending"/"blocked" swap the solid fill for an outline.
    * Irrelevant to a pool's task badge (see shared/TaskStrip), which is always the solid look. */
-  fill?: "solid" | "pending" | "blocked";
+  fill?: "solid" | "pending" | "blocked" | "held";
   className?: string;
   style?: React.CSSProperties;
   title?: string;

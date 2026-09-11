@@ -510,3 +510,42 @@ func TestPendingEntryCoversTheWindowUntilScheduleReturns(t *testing.T) {
 		t.Error("item 2 is not in the fan-out's body while its task is running")
 	}
 }
+
+func TestSetAdmissionSwitchesALiveFanOut(t *testing.T) {
+	// The Admission dial is live like Limit and Queue: the switch reaches the running fan-out and the next State
+	// snapshot reports it. A stage has no admission policy, and an unknown name is a UI bug, so both are errors.
+	m := runManager(t, fanOutSpec())
+
+	n, ok := nodeByID(m.State(), "f")
+	if !ok {
+		t.Fatal("f missing from State().Nodes")
+	}
+	if n.Admission != topology.AdmissionByLimit {
+		t.Errorf("f's Admission = %q before any switch, want %q", n.Admission, topology.AdmissionByLimit)
+	}
+	if err := m.SetAdmission("f", string(topology.AdmissionByPools)); err != nil {
+		t.Fatalf("SetAdmission: %v", err)
+	}
+	n, _ = nodeByID(m.State(), "f")
+	if n.Admission != topology.AdmissionByPools {
+		t.Errorf("f's Admission = %q after the switch, want %q", n.Admission, topology.AdmissionByPools)
+	}
+	if err := m.SetAdmission("f", string(topology.AdmissionByPoolsStrict)); err != nil {
+		t.Fatalf("SetAdmission(strict): %v", err)
+	}
+	n, _ = nodeByID(m.State(), "f")
+	if n.Admission != topology.AdmissionByPoolsStrict {
+		t.Errorf("f's Admission = %q after the strict switch, want %q", n.Admission, topology.AdmissionByPoolsStrict)
+	}
+	if err := m.SetAdmission("after", string(topology.AdmissionByPools)); err == nil {
+		t.Error(`SetAdmission("after") = nil, want an error: after is a stage, not a fan-out`)
+	}
+	if err := m.SetAdmission("f", "nope"); err == nil {
+		t.Error(`SetAdmission("f", "nope") = nil, want an error for an unknown policy`)
+	}
+	// The stage before the fan-out is the implicit start here, so a wrong-pool hold shows as a stage node with no
+	// Admission of its own.
+	if s, ok := nodeByID(m.State(), "after"); ok && s.Admission != "" {
+		t.Errorf("stage after's Admission = %q, want empty", s.Admission)
+	}
+}

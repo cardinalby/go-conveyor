@@ -1,10 +1,17 @@
 import { callWasmMethod, ready } from "./wasmHandler";
 import type { Spec } from "../types/topology";
 import type { RunState } from "../types/state";
+import type { FanOutAdmission } from "../types/pipeline";
 
 interface NodeValueRequest {
   id: string;
   value: number;
+}
+
+// Body shape of setAdmission (see wasmapi.nodeStringRequest): like NodeValueRequest, but the value is a policy name.
+interface NodeStringRequest {
+  id: string;
+  value: string;
 }
 
 // Body shape of setItemsLimit (see wasmapi.itemsLimitRequest) — global, so unlike NodeValueRequest it names no node.
@@ -42,6 +49,10 @@ export const api = {
   },
   setQueueSize(id: string, value: number): RunState {
     return callWasmMethod<RunState>("setQueueSize", { id, value } satisfies NodeValueRequest);
+  },
+  /** Switches a running fan-out's admission policy — see runtime.Manager.SetAdmission. */
+  setAdmission(id: string, value: FanOutAdmission): RunState {
+    return callWasmMethod<RunState>("setAdmission", { id, value } satisfies NodeStringRequest);
   },
   setDelay(id: string, value: number): RunState {
     return callWasmMethod<RunState>("setDelay", { id, value } satisfies NodeValueRequest);

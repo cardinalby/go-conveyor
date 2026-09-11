@@ -1,6 +1,6 @@
 // Package runtime owns the demo's single conveyor instance across its whole lifetime and exposes the handful of
 // operations the WASM/JS boundary needs: start it from a topology.Spec, cancel or force-stop it, poll its live
-// state, and adjust a node's limit, queue size or delay while it runs.
+// state, and adjust a node's limit, queue size, admission policy or delay while it runs.
 package runtime
 
 import (
@@ -25,7 +25,10 @@ type NodeState struct {
 	ID        string `json:"id"`
 	Limit     int    `json:"limit"`
 	QueueSize int    `json:"queueSize"`
-	DelayMs   int    `json:"delayMs"`
+	// Admission is a fan-out's live admission policy ("limit", "pools" or "poolsStrict", see topology.Admission).
+	// Empty for every other kind of node.
+	Admission topology.Admission `json:"admission,omitempty"`
+	DelayMs   int                `json:"delayMs"`
 	// TasksPerItem is how many tasks/children (see conveyor.Branch.NewTasks) one item schedules on this branch.
 	// Always 0 for anything but a pool or a lane — see topology.TaskCounts.
 	TasksPerItem int     `json:"tasksPerItem"`
@@ -245,8 +248,9 @@ func (m *Manager) State() State {
 		// path) for such a node — LanePaths is exactly that, one entry per current occurrence — and falls back to
 		// item number alone for a node outside any branch, which can never hold the same item number twice at once.
 		ns.BlockedLeaving = stillBlocked(blocked, id, ns.InBody, ns.LanePaths, reachableThroughBranch)
-		if _, ok := u.(conveyor.FanOut); ok {
+		if f, ok := u.(conveyor.FanOut); ok {
 			ns.PendingEntry = entries.Pending(id)
+			ns.Admission = topology.AdmissionName(f.Admission())
 		}
 		if _, ok := u.(conveyor.Branch); ok {
 			ns.TasksPerItem = taskCounts.Get(id)
@@ -320,6 +324,28 @@ func (m *Manager) SetQueueSize(id string, value int) error {
 	default:
 		return fmt.Errorf("node %q has no adjustable queue size", id)
 	}
+	return nil
+}
+
+// SetAdmission switches a running fan-out's admission policy immediately (see conveyor.FanOut.SetAdmission — safe on
+// a live conveyor by design; it applies to admissions after the call). value is a topology.Admission name. It errors
+// if nothing is running, id names something other than a fan-out, or value is not a known policy.
+func (m *Manager) SetAdmission(id string, value string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, err := m.handleLocked(id)
+	if err != nil {
+		return err
+	}
+	f, ok := u.(conveyor.FanOut)
+	if !ok {
+		return fmt.Errorf("node %q is not a fan-out", id)
+	}
+	policy, err := topology.AdmissionPolicy(topology.Admission(value))
+	if err != nil {
+		return fmt.Errorf("node %q: %w", id, err)
+	}
+	f.SetAdmission(policy)
 	return nil
 }
 

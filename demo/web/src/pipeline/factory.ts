@@ -22,7 +22,7 @@ export function newBranch(kind: BranchKind, branchCount: number): BranchNode {
 }
 
 export function newFanOut(branches: BranchNode[]): FanOutNode {
-  return { id: newId("f"), kind: "fanout", name: "", limit: 1, queueSize: 0, branches };
+  return { id: newId("f"), kind: "fanout", name: "", limit: 1, queueSize: 0, admission: "limit", branches };
 }
 
 /** The pipeline shown on first load: Read + 2 stages. The start stage's own delay defaults the same way a plain

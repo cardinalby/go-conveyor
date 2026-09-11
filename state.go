@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 // This file holds the lock-protected state machine that backs a run: creating items, the admission gate
@@ -32,6 +33,9 @@ type taskCollection struct {
 	// at an interior fan-out of its lane), as opposed to one spawned by the wave's own running work. Only root
 	// collections count toward the wave's Started channel (see wave.rootUnexhausted).
 	root bool
+	// hold is set on the collections of an item's entering submission at an AdmitByPoolsStrict fan-out — its first root
+	// Schedule there — and points at the upstream hold that submission must end (see upstreamHold). nil otherwise.
+	hold *upstreamHold
 
 	// sources in submission order; entries before srcIdx are consumed and nil'd.
 	sources []taskSource
@@ -191,7 +195,28 @@ func (r *run) canEnter(it *item, u *unit) bool {
 	if it.prev != nil && it.prev.maxRank < u.rank {
 		return false
 	}
+	if u.needsPoolCapacity() && !r.branchHasFreeCapacity(u.owner.(*fanOut)) {
+		return false
+	}
 	return true
+}
+
+// branchHasFreeCapacity reports whether some branch of f has capacity that nothing queued will consume: a free slot
+// and an empty queue. It is the third part of admission under AdmitByPools and AdmitByPoolsStrict (see canEnter). The empty-queue part
+// matters because a freed slot is handed to queued work under the same lock, before any waiter wakes: a branch with
+// a free slot and a non-empty queue has an async pull in flight on its head, and that slot is spoken for. A fan-out
+// with no branches has nothing to saturate and admits by limit alone. Caller holds mu.
+func (r *run) branchHasFreeCapacity(f *fanOut) bool {
+	if len(f.branches) == 0 {
+		return true
+	}
+	for _, b := range f.branches {
+		j := b.start.index
+		if r.unitHasFreeSlot(j) && len(r.taskQueues[j]) == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // unitHasFreeSlot reports whether unit j has a free slot right now, reading the unit's current limit (which
@@ -270,17 +295,26 @@ func (r *run) enterUnit(ctx context.Context, it *item, target *unit, publish boo
 		return err
 	}
 	if it.queuedAt != target.index {
-		if err := r.waitUntil(ctx, it, func() bool {
-			return r.canEnter(it, target) || r.canEnterQueue(it, target)
-		}); err != nil {
-			return err
+		for {
+			if err := r.waitUntil(ctx, it, func() bool {
+				return r.canEnter(it, target) || r.canEnterQueue(it, target)
+			}); err != nil {
+				return err
+			}
+			if r.canEnter(it, target) {
+				r.takeUnit(it, target, publish)
+				return nil
+			}
+			if r.canEnterQueue(it, target) {
+				// Only the waiting room is open: step aside (releasing the previous node) and wait for the node from
+				// there.
+				r.takeQueue(it, target)
+				break
+			}
+			// Neither is open any more: a capacity dial (SetLimit, SetQueueSize, SetAdmission) moved between the
+			// predicate and here. The dials are stored under mu while a run is live, so this is a backstop; wait again
+			// rather than step into a room that has no space.
 		}
-		if r.canEnter(it, target) {
-			r.takeUnit(it, target, publish)
-			return nil
-		}
-		// Only the waiting room is open: step aside (releasing the previous node) and wait for the node from there.
-		r.takeQueue(it, target)
 	}
 	if err := r.waitUntil(ctx, it, func() bool { return r.canEnter(it, target) }); err != nil {
 		return err
@@ -422,6 +456,11 @@ func joinedErr(w *wave) error {
 // enterUnit, or by a single check in tryEnterUnit). Caller holds mu.
 func (r *run) takeUnit(it *item, u *unit, publish bool) {
 	r.occupy(it, u, publish)
+	if u.holdsUpstream() && it.hold == nil {
+		// The release admission would do is deferred: the token stays with the item until its work has started (see
+		// upstreamHold). Everything else the item may still hold behind it is released as usual.
+		it.hold = r.newHold(it, u)
+	}
 	r.releaseBelow(it, u.rank)
 	r.cond.Broadcast()
 }
@@ -472,7 +511,7 @@ func (r *run) releaseSlot(it *item, j int) {
 // the ordinary releaseBelow inside takeUnit performs the swap. Nothing else needs to know about it.
 func (r *run) releaseBelow(it *item, beforeRank int) bool {
 	freed := false
-	if j := it.queuedAt; j >= 0 && r.conveyor.units[j].queueRank() < beforeRank {
+	if j := it.queuedAt; j >= 0 && r.conveyor.units[j].queueRank() < beforeRank && !it.holdsQueued() {
 		r.leaveQueue(it, j)
 		freed = true
 	}
@@ -480,12 +519,103 @@ func (r *run) releaseBelow(it *item, beforeRank int) bool {
 		if u.rank >= beforeRank || it.occupied[u.index] == 0 {
 			continue
 		}
-		if it.isRetaining(u.index) {
+		if it.isRetaining(u.index) || it.holdsUnit(u.index) {
 			continue
 		}
 		freed = r.freeUnit(it, u) || freed
 	}
 	return freed
+}
+
+// --- upstream hold (AdmitByPools) ---
+
+// upstreamHold is the release an AdmitByPoolsStrict admission deferred: the one token the item would have given up on
+// entering the fan-out — the previous node's slot, or the queued token when it was admitted from the fan-out's
+// waiting room (takeQueue released the previous node already) — kept until the item's work has started. It is a
+// kind of ownership separate from wave.retainUnit: releaseBelow skips the held token the way it skips a retained
+// unit, so the sweep an unrelated Retain completion triggers cannot free it, and a unit both hold is freed only when
+// both have ended.
+//
+// The hold ends (dischargeHold) when the entering submission — the item's first root Schedule at the fan-out — has
+// had one assignment on every branch it touched (startWork), or a touched collection has left the queue without one
+// (dequeue: exhausted with zero yield, or dropped on cancellation), or the body is sealed (leave, Detach, processor
+// return), whichever comes first. finishItem clears it with everything else. Its life cycle depends only on item
+// state, never on the current policy, which is what makes SetAdmission safe on a live conveyor.
+type upstreamHold struct {
+	// queued says the held token is the item's queued slot (item.queuedAt); else unit is the index of the held unit,
+	// or -1 when the item had nothing behind it to hold.
+	queued bool
+	unit   int
+	// awaiting is the set of branch indices the entering submission touched that have not had an assignment yet. nil
+	// until the entering submission; the hold is discharged when it empties.
+	awaiting map[int]struct{}
+}
+
+// newHold records the token the admission to u would have released: the queued slot if the item is waiting
+// anywhere, else the highest-rank unit below u the item occupies — whether or not a Retain wave holds it too, so a
+// unit under both is freed only when both have ended. Caller holds mu.
+func (r *run) newHold(it *item, u *unit) *upstreamHold {
+	h := &upstreamHold{unit: -1}
+	if it.queuedAt >= 0 {
+		h.queued = true
+		return h
+	}
+	for _, o := range r.conveyor.scopeUnits[it.scope] {
+		if o.rank >= u.rank || it.occupied[o.index] == 0 {
+			continue
+		}
+		if h.unit < 0 || o.rank > r.conveyor.units[h.unit].rank {
+			h.unit = o.index
+		}
+	}
+	return h
+}
+
+// dischargeHold ends the item's upstream hold, if any, and performs the release it deferred (everything behind the
+// item's current position, by the ordinary rule). Every discharge path funnels through here, so the hold ends
+// exactly once. Caller holds mu and must broadcast.
+func (r *run) dischargeHold(it *item) {
+	if it.hold == nil {
+		return
+	}
+	it.hold = nil
+	if it.finished {
+		return // finishItem has swept everything already
+	}
+	r.releaseBelow(it, it.reachedRank)
+}
+
+// markEntering makes the collections of the item's first root submission at an AdmitByPoolsStrict fan-out the ones that end
+// its hold: each is tagged with the hold and its branch joins the awaiting set. A submission that touched no branch
+// discharges at once. Caller holds mu and must broadcast.
+func (r *run) markEntering(it *item, cols []*taskCollection) {
+	h := it.hold
+	if h == nil {
+		return
+	}
+	if len(cols) == 0 {
+		r.dischargeHold(it)
+		return
+	}
+	h.awaiting = make(map[int]struct{}, len(cols))
+	for _, col := range cols {
+		col.hold = h
+		h.awaiting[col.branch.start.index] = struct{}{}
+	}
+}
+
+// branchStarted records that an entering collection on branchIdx has had its first assignment, or has left the queue
+// without one, and discharges the hold once every touched branch has. A collection whose hold has already ended (the
+// body was sealed first) is a no-op. Caller holds mu and must broadcast.
+func (r *run) branchStarted(col *taskCollection, branchIdx int) {
+	h := col.hold
+	if h == nil || col.it.hold != h {
+		return
+	}
+	delete(h.awaiting, branchIdx)
+	if len(h.awaiting) == 0 {
+		r.dischargeHold(col.it)
+	}
 }
 
 // freeUnit releases every slot the item holds in unit u and reports whether it held any. Freeing a lane's start
@@ -512,6 +642,7 @@ func (r *run) freeUnit(it *item, u *unit) bool {
 // for all of its waves, so those slots are gone — the wider sweep is a backstop that keeps the "no slot outlives its
 // item" invariant true of this function alone, rather than of the order its callers run in.
 func (r *run) finishItem(it *item) {
+	it.hold = nil                 // the sweep below frees the held token with everything else
 	r.leaveQueue(it, it.queuedAt) // an item canceled while waiting in front of a node still holds a queued slot
 	for _, u := range r.conveyor.units {
 		r.freeUnit(it, u)
@@ -591,6 +722,9 @@ func (r *run) dequeue(branchIdx int, col *taskCollection) {
 		r.taskQueues[branchIdx] = q[:len(q)-1]
 	}
 	r.queued[branchIdx].add(-1)
+	if col.hold != nil {
+		r.branchStarted(col, branchIdx) // an entering collection that left without assigning still ends its wait
+	}
 }
 
 // pullableHead returns the branch's head collection if work may be pulled from it right now, or nil when the queue is
@@ -727,6 +861,9 @@ func (r *run) startWork(col *taskCollection, branchIdx int, fn TaskFunc, reserve
 		r.occupySlot(col.it, branchIdx)
 	}
 	col.wave.workStarted()
+	if col.hold != nil {
+		r.branchStarted(col, branchIdx)
+	}
 	return g
 }
 
@@ -822,17 +959,46 @@ func (u *unit) setLimit(limit int) {
 	if limit <= 0 {
 		limit = 1
 	}
-	u.limit.Store(int64(limit))
+	u.storeDial(&u.limit, int64(limit), func(r *run) {
+		if u.kind == kindStart && u.branchSeries != nil {
+			r.pump(u.index) // a raise may let queued work start now; a lower is a no-op here
+		}
+	})
+}
+
+// storeDial publishes a capacity dial of u and wakes any run so waiters re-check admission (after running then, if
+// given, under the run's mu). While a run is live the store happens under its mu: admission is a multi-step decision
+// (the predicate, then the choice between the node and its waiting room, then the policy read in takeUnit) that must
+// see one value of every dial. The atomics stay for the lock-free reads outside a run (Limit, QueueSize, Admission)
+// and the store before any run exists.
+//
+// A run may start (or replace a finished one) between the load of currentRun and the store: its items would then
+// park on the old value with nobody to wake them. So the current run is read again after the store, and a run that
+// was not the one written under is woken too.
+func (u *unit) storeDial(dial *atomic.Int64, v int64, then func(r *run)) {
+	wake := func(r *run) {
+		r.mu.Lock()
+		if then != nil {
+			then(r)
+		}
+		r.cond.Broadcast()
+		r.mu.Unlock()
+	}
 	r := u.conveyor.currentRun.Load()
 	if r == nil {
-		return
+		dial.Store(v)
+	} else {
+		r.mu.Lock()
+		dial.Store(v)
+		if then != nil {
+			then(r)
+		}
+		r.cond.Broadcast()
+		r.mu.Unlock()
 	}
-	r.mu.Lock()
-	if u.kind == kindStart && u.branchSeries != nil {
-		r.pump(u.index) // a raise may let queued work start now; a lower is a no-op here
+	if r2 := u.conveyor.currentRun.Load(); r2 != nil && r2 != r {
+		wake(r2)
 	}
-	r.cond.Broadcast() // wake items waiting in canEnter so a raise admits them immediately
-	r.mu.Unlock()
 }
 
 // setQueueSize publishes a node's new waiting-room size and wakes any run so items waiting at its door re-check
@@ -847,14 +1013,20 @@ func (u *unit) setQueueSize(size int) {
 	if size < 0 {
 		size = 0
 	}
-	u.queueSize.Store(int64(size))
-	r := u.conveyor.currentRun.Load()
-	if r == nil {
-		return
+	u.storeDial(&u.queueSize, int64(size), nil)
+}
+
+// setAdmission publishes a fan-out's admission policy and wakes any run so items waiting at its door re-check
+// admission. Like setQueueSize it changes no topology, so it is safe on a live conveyor, and it is admission-only:
+// a switch to AdmitByPools or AdmitByPoolsStrict makes waiters also need free pool capacity (and, for the strict
+// policy, gives the items admitted from then on an upstream hold), while items already inside were admitted as they
+// were and are left alone. A switch back relaxes the predicate at once and leaves existing holds to end on their own
+// (see upstreamHold). Values outside the known policies fall back to AdmitByLimit.
+func (u *unit) setAdmission(a FanOutAdmission) {
+	if a != AdmitByPools && a != AdmitByPoolsStrict {
+		a = AdmitByLimit
 	}
-	r.mu.Lock()
-	r.cond.Broadcast()
-	r.mu.Unlock()
+	u.storeDial(&u.admission, int64(a), nil)
 }
 
 // waitUntil blocks until admissible() reports true or the item may not go on — the call context or the item's own

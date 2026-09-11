@@ -12,7 +12,7 @@ const PREVIEW_ITEM_NO = 42;
 /** One item-badge preview, reusing the exact ItemBadge component ItemsOverlay/TaskStrip render with — see
  * index.css's .item-badge and its .pending/.blocked modifiers. No positioning class: a legend swatch sits in plain
  * flow, unlike the live, moving/fading versions. */
-function Preview({ fill }: { fill?: "pending" | "blocked" }) {
+function Preview({ fill }: { fill?: "pending" | "blocked" | "held" }) {
   return (
     <ItemBadge
       label={PREVIEW_ITEM_NO}
@@ -61,6 +61,13 @@ export function LegendPanel({ open }: Props) {
                 <li className="legend-item">
                   <span className="legend-label">Pool task belonging to an item</span>
                   <Preview />
+                </li>
+                <li className="legend-item">
+                  <span className="legend-label">
+                    Slot an item admitted &quot;by pools (strict)&quot; still keeps in the previous stage (or the waiting
+                    room) until its tasks start — the item is shown inside the fan-out too
+                  </span>
+                  <Preview fill="held" />
                 </li>
               </ul>
             </li>

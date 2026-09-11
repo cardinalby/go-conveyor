@@ -32,6 +32,13 @@ type nodeValueRequest struct {
 	Value int    `json:"value"`
 }
 
+// nodeStringRequest is the body shape of setAdmission: like nodeValueRequest, but the value is a name (see
+// topology.Admission), not a number.
+type nodeStringRequest struct {
+	ID    string `json:"id"`
+	Value string `json:"value"`
+}
+
 // itemsLimitRequest is the body shape of setItemsLimit — global, so unlike nodeValueRequest it names no node.
 type itemsLimitRequest struct {
 	Value int `json:"value"`
@@ -103,6 +110,8 @@ func (h *handler) dispatch(req methodRequest) (any, error) {
 		return h.applyNodeValue(req.Body, h.manager.SetLimit)
 	case "setQueueSize":
 		return h.applyNodeValue(req.Body, h.manager.SetQueueSize)
+	case "setAdmission":
+		return h.applyNodeString(req.Body, h.manager.SetAdmission)
 	case "setDelay":
 		return h.applyNodeValue(req.Body, h.manager.SetDelay)
 	case "setTasksPerItem":
@@ -118,6 +127,17 @@ func (h *handler) dispatch(req methodRequest) (any, error) {
 
 func (h *handler) applyNodeValue(body json.RawMessage, apply func(id string, value int) error) (any, error) {
 	var req nodeValueRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, err
+	}
+	if err := apply(req.ID, req.Value); err != nil {
+		return nil, err
+	}
+	return h.manager.State(), nil
+}
+
+func (h *handler) applyNodeString(body json.RawMessage, apply func(id string, value string) error) (any, error) {
+	var req nodeStringRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, err
 	}

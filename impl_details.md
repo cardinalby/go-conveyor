@@ -78,10 +78,10 @@ first `Run`, and idempotently from `newRun`.
 ## 3. Per-run state
 
 `conveyor` (the unexported implementation behind the `Conveyor` interface) is immutable topology shared across
-`Run` invocations — except the two atomic capacities. All mutable
+`Run` invocations — except the two atomic capacities and a fan-out node's atomic admission policy. All mutable
 state lives on `run`, allocated fresh per `Run`, so nothing leaks between invocations. `conveyor.currentRun` is an
-atomic pointer to the active run (nil outside a run); it backs `Stats` and lets `SetLimit` / `SetQueueSize` reach a
-live run.
+atomic pointer to the active run (nil outside a run); it backs `Stats` and lets `SetLimit` / `SetQueueSize` /
+`SetAdmission` reach a live run.
 
 Everything below `run.mu` is guarded by it:
 
@@ -122,6 +122,10 @@ They differ only between a fan-out's admission and the item's first `Schedule` t
 item admitted to a fan-out has reached the node, but must not open the gate for the next item until its first work is
 on the branches (see §5).
 
+`item.hold` is the release an admission to an `AdmitByPoolsStrict` fan-out deferred, nil when there is none (§6, "a token
+that follows the work"). It is ownership state, like `occupied`, and is separate from the two ranks: an item may hold
+its previous node's slot while having published the fan-out's rank.
+
 ### Body state
 
 For every fan-out an item has entered it records a **body state** (`item.body[k]`, by unit index) and, while the
@@ -151,7 +155,12 @@ Three checks, deliberately separate:
 - **`checkEnterOrder`** — permanent misuse, panics: moving backward (`target.rank < it.reachedRank`) or re-entering
   a node (`it.entered[target.index]`). Compared against the node's own rank, never its waiting room's.
 - **`canEnter`** — transient: a free slot (`unitHasFreeSlot`) **and** ordering
-  (`it.prev == nil || it.prev.maxRank >= u.rank`).
+  (`it.prev == nil || it.prev.maxRank >= u.rank`) **and**, for a fan-out node whose policy is `AdmitByPools` or
+  `AdmitByPoolsStrict` (`unit.needsPoolCapacity`), free capacity on some branch (`branchHasFreeCapacity`: a branch with a free slot and an
+  empty queue; a fan-out with no branches passes). The empty-queue part matters because a freed slot is handed to
+  queued work under the same lock, before any waiter wakes: a branch with a free slot and a non-empty queue has an
+  async pull in flight on its head, so that slot is spoken for. `canEnterQueue` does not ask this question — an item
+  may step into the waiting room while the pools are full.
 - **`canEnterQueue`** — the same two questions asked of the waiting room: room in `queued[]` versus `queueSize`,
   and `it.prev.maxRank >= u.queueRank()`.
 
@@ -169,9 +178,14 @@ Three checks, deliberately separate:
    front about which to wait for: an item walks straight into a free node and never touches the waiting room, and
    because both are re-tested on every wake-up, a waiting room created or enlarged while an item is already waiting
    takes effect for that item at once.
-3. If only the waiting room is open, `takeQueue` (take a queued slot, publish the *queue* rank, release everything
-   held behind), then wait for `canEnter`.
-4. `takeUnit`: `occupy` + `releaseBelow(u.rank)` + broadcast.
+3. Re-check under the same lock hold: `canEnter` wins (`takeUnit`); else if `canEnterQueue` still holds, `takeQueue`
+   (take a queued slot, publish the *queue* rank, release everything held behind), then wait for `canEnter`. If
+   neither holds any more — a dial moved between the predicate and the choice — wait again rather than step into a
+   room with no space. The dials are stored under `mu` while a run is live (`storeDial`, `setLimit`), so this is a
+   backstop.
+4. `takeUnit`: `occupy`, then — for an `AdmitByPoolsStrict` node (`unit.holdsUpstream`), when the item has no hold yet — `newHold` records the
+   token the release below would give up (§6), then `releaseBelow(u.rank)` (which skips that token) + broadcast.
+   The policy is read once, under the same lock hold as the `canEnter` check, so one admission sees one policy.
 
 A move that fails (a deadline on the call context, poison, shutdown) after step 1 leaves the body **closed** and the
 item in one of two places: still inside the fan-out holding its slot, or standing in the target's waiting room with
@@ -221,7 +235,67 @@ queued piece of work may start now.
 outside its scope: a pool's work cannot travel, so its slot is charged to the scheduling
 item, which lives in the parent scope. By then `completeItem` has already joined all the item's waves, so those
 slots are gone — the wider sweep is a backstop that keeps "no slot outlives its item" true of the function itself
-rather than of the order its callers run in.
+rather than of the order its callers run in. It also clears `item.hold` first: the held token is one of the slots the
+sweep frees.
+
+### A token that follows the work: the upstream hold
+
+`Retain` and `Detach` keep a slot for work that runs *after* the item has moved on. `AdmitByPoolsStrict`
+(`FanOut.SetAdmission`) needs the mirror image: a slot kept for work that has not *started* yet. `AdmitByPools` is the
+same admission predicate without the hold (§5); everything in this section is the strict variant's addition. An item
+admitted under that policy keeps the
+token it would have released on entering the fan-out until its first work has a slot on every branch it touched, so
+an item whose work waits for a saturated pool keeps pushing back on the stage before it, while younger items whose
+work can start pass it on the branches (the door and the next node's ordering gate are unchanged). The design and
+its rationale are in `design_pool_aware_admission.md`; this is how it is built.
+
+**The hold** (`upstreamHold`, `item.hold`) is the deferred release, recorded by `newHold` in `takeUnit`. It protects
+exactly one token:
+
+- `queued` — the item's queued slot (`item.queuedAt`), when the item was admitted from the fan-out's waiting room
+  (`takeQueue` released the previous node already) or still stood in front of an earlier node after a failed move;
+- else `unit` — the highest-rank unit below the fan-out the item occupies (whether or not a `Retain` wave holds it
+  too; such a slot is freed only when both have ended): the previous
+  stage, or the start gate (the conveyor's for a root item, the lane's for a child), which is what throttles item or
+  child creation while the hold lasts; `-1` when the item had nothing behind it.
+
+It is a kind of ownership **separate from `wave.retainUnit`**. `releaseBelow` skips the held token (`item.holdsQueued`
+/ `item.holdsUnit`) the same way it skips a retained unit, so the sweep an unrelated `Retain` completion triggers
+(`releaseRetained` → `releaseBelow`) cannot free it, and a unit both a `Retain` wave and the hold keep is freed only
+when both have ended. `takeUnit` still runs `releaseBelow` after creating the hold: anything else the item held behind
+it is released as usual.
+
+**Discharge** (`dischargeHold`) is the single funnel: clear `it.hold`, then `releaseBelow(it, it.reachedRank)` — the
+ordinary rule, now no longer skipping the token — unless the item is already finished. The caller broadcasts. Three
+things end a hold, whichever comes first:
+
+1. **The entering submission has started.** The entering submission is the item's first root `Schedule` at the
+   fan-out. `addToBody` knows it by `wave.rootSubmitted` (set on the first root addition to a body; spawns never
+   set it) and, if the item has a hold, calls `markEntering`: every new collection gets `taskCollection.hold`
+   pointing at the hold, and `hold.awaiting` becomes the set of touched branch indices. A submission that touched
+   no branch (no tasks, or only statically empty ones) discharges at once. From then on `branchStarted` removes a
+   branch from the set when `startWork` assigns work from its collection (for a lane: child creation at the start
+   gate, not admission to an interior stage), or when `dequeue` removes the collection without an assignment
+   (exhausted with zero yield, or dropped by `dropCollection` on cancellation). An empty set discharges. It is "one
+   assignment per touched branch", not "every task handed out": `NewTasks(100)` on a limit-2 pool ends the hold at
+   the first assignment. Later rounds and spawns never hold: `rootSubmitted` is already set.
+2. **The body is sealed.** `item.sealBody` discharges, so a leave (`closeBody`), `Detach` and `completeItem` all end
+   the hold: the item's own path is over, and nothing it schedules from here can start the work the token waited
+   for. A failed leave with running work keeps the body open and therefore keeps the hold; the item is still stuck.
+3. **The item finishes.** `finishItem` clears the hold and frees the token with everything else.
+
+`taskCollection.hold` is a pointer, not a flag, and `branchStarted` checks `col.it.hold == col.hold`: a collection of
+a detached body may outlive its hold and be dequeued after the same item has acquired a new hold at a later fan-out,
+and must not touch it. The wait for `branchHasFreeCapacity` needs no new broadcast: every path that frees a branch
+slot or empties a queue already broadcasts (`runWork`, `finishAsyncPull`, `branchWorker`, the `pump` callers).
+
+Consequences worth knowing. An item can appear in two units at once — the previous node (or its queued token) and
+the fan-out — and `DebugUnitOccupants` / `UnitStat` report it that way. Packaging decides pressure: an item that
+enters with one task and schedules the rest later releases upstream sooner than one that enters with everything. The
+hold's life cycle depends only on item state, never on the current policy, which is what makes `SetAdmission` safe on
+a live conveyor (§11). No new wait cycle appears: the two-token holder waits only for branch slots, which running
+tasks (which wait for nothing) or lane children (which drain through their own series) free; a younger item that
+passed it waits at the next node's gate, which the older item opens by passing (§14).
 
 ## 7. Fan-out and the branch runtime
 
@@ -263,8 +337,10 @@ set, stored in `item.pending`, body state `open`. Nothing is queued yet.
 5. cancellation by both contexts (`item.cancelCause`); `Schedule` never blocks, so it makes this check itself. This
    is what stops a caller with a stripped context from queueing work for a poisoned item;
 6. `run.addToBody`: **claim** every source (the resubmission panic fires here, before the body is mutated), **group**
-   into one `taskCollection` per branch in argument order, `insertCollection` each, **publish** the node's rank
-   (idempotent max; the door), `pump` every touched branch, broadcast.
+   into one `taskCollection` per branch in argument order, `insertCollection` each, on the first root addition
+   (`wave.rootSubmitted`) **mark** the collections as the entering submission if the item has an upstream hold
+   (`markEntering`, §6), **publish** the node's rank (idempotent max; the door), `pump` every touched branch,
+   broadcast.
 
 Steps 3 to 6 run under `run.mu` with no user code, so `Schedule` is safe from any goroutine and tasks may call it
 concurrently with the ItemProcessor. The runtime detects an expired *wave*, not an expired individual callback: the
@@ -496,6 +572,17 @@ from any goroutine at any time, and both are **admission-only, never preemptive*
 `unitHasFreeSlot` is the single place occupancy is compared against a limit, so a live change is observed uniformly
 by `canEnter`, `pump` and the branch worker's pull-next. A limit is clamped to `>= 1`, a queue size to `>= 0`.
 
+`SetAdmission` is the third dial, on a fan-out's node unit (`unit.admission`), and follows the same shape
+(`setAdmission` → `storeDial`: store under the live run's `mu`, broadcast). All three dials are stored under `mu` while
+a run is live, because admission is a multi-step decision (predicate, node-or-room choice, the policy read in
+`takeUnit`) that must see one value of each; the atomics remain for the lock-free getters and for stores before a run
+exists. It is admission-only too: a switch to `AdmitByPools` or `AdmitByPoolsStrict` makes items at the door
+also need free branch capacity (and, for the strict policy, gives the items admitted from then on an upstream hold),
+while items already inside were admitted as they were and are left alone; a switch back relaxes the predicate at once and leaves
+existing holds to end on their own (§6). `takeUnit` reads the policy in the same lock hold as `canEnter`, and a
+hold's life depends only on item state, so no admission straddles two policies. An unknown value is stored as
+`AdmitByLimit`.
+
 ## 12. Observability
 
 `windowedInt` is a value plus the min/max it has reached since the window was last reset. Every mutation goes
@@ -509,7 +596,9 @@ fan-out.
 
 A branch's backlog reuses `run.queued`, the same counter a stage's waiting room uses, counting **collections** not
 fully handed out — one per `Schedule` call that touched the branch, so an item may count several times (§7). The
-fan-out's occupancy counts items inside, including empty-body visits and items whose leave failed. Nothing else is
+fan-out's occupancy counts items inside, including empty-body visits and items whose leave failed. Under
+`AdmitByPoolsStrict` a node's occupancy (or its `Queued` gauge) also counts the token an item already admitted to the next
+fan-out still holds (§6); held tokens are not reported as a separate figure. Nothing else is
 shared: the admission side (`canEnterQueue` / `takeQueue` / `item.queuedAt`) is never reached for a branch's start
 gate, because work is born there rather than moving to it.
 
@@ -518,13 +607,16 @@ gate, because work is born there rather than moving to it.
 Break any of these and the model stops holding:
 
 1. **No state without a token.** Every item and every running piece of work holds at least one slot, from creation
-   to completion.
+   to completion. An upstream hold adds a token to an item, never replaces one: the item holds the fan-out's slot as
+   well, and the held token is freed by the same `releaseBelow` rule once the hold is discharged.
 2. **`maxRank` is non-increasing with item age within a scope.** This is what makes the O(1) `it.prev` ordering
    gate correct. Publish only under `mu`, and never let a later item advance past an earlier one. A fan-out
    admission publishes the waiting room's rank; the waiting room behind it published the same rank. Equal is allowed.
 3. **Admission is atomic.** Hold `mu` continuously from the `canEnter` check through the `occupy` mutation.
 4. **One slot per piece of work, released on completion.** A running task holds one slot and waits for nothing; a
-   queued task holds nothing. This is what makes the design deadlock-free (see §14).
+   queued task holds nothing. This is what makes the design deadlock-free (see §14). The item is the only two-token
+   holder: under `AdmitByPoolsStrict` it keeps the previous node's token while queued work of its own waits for a branch
+   slot, and what it waits for is freed by running tasks or lane children, never by another waiter.
 5. **Per-branch order by item age.** A collection is inserted at its item's place — behind the queued work of the
    same item and of older ones, ahead of younger ones — and work is pulled from the head collection only. A fan-out
    publishes its rank at the item's first `Schedule` (or leave, or `Detach`), never at admission, so a younger item
@@ -536,7 +628,8 @@ Break any of these and the model stops holding:
 7. **An error is never lost.** A wave whose error nobody acknowledged fails its item at completion; a root item's
    real error becomes `runErr`.
 8. **No slot outlives its item, and no item sits somewhere holding nothing.** The two halves of the retain/detach
-   handover.
+   handover, and of the upstream hold: a held token is freed by a discharge (first assignment per touched branch,
+   sealed body) or by `finishItem`, whichever comes first, and every discharge goes through `dischargeHold` once.
 9. **A body is idle whenever it is observed idle.** A spawn is only accepted from running work of the same wave, so
    an idle wave cannot have work still to come; `Wait` and the leave may therefore decide on `idle()` alone. A sealed
    idle wave is finished and refuses additions.

@@ -27,9 +27,12 @@ type FanOut interface {
 	// It panics if the conveyor is running or has already run.
 	AddLane(opts ...AnyUnitOption) Lane
 
-	// MoveTo advances the item into this fan-out, releasing the previous node. The item enters with an empty body;
-	// add work with Schedule. Until the item's first Schedule (or until it leaves or
-	// detaches), the item behind it may step into this fan-out's waiting room but cannot enter the node.
+	// MoveTo advances the item into this fan-out, releasing the previous node on entering. Under AdmitByPools it
+	// also waits for a branch with free capacity; under AdmitByPoolsStrict it additionally keeps the previous node's
+	// slot until the item's first Schedule has started (see SetAdmission). The item enters with an empty body; add
+	// work with Schedule.
+	// Until the item's first Schedule (or until it leaves or detaches), the item behind it may step into this
+	// fan-out's waiting room but cannot enter the node.
 	//
 	// It returns ErrForeignContext, ErrStaleContext, or the item's cancellation cause — whether the cancellation is
 	// visible on ctx or only on the item's own context (see ItemProcessor). It panics on misuse: moving backward,
@@ -37,7 +40,8 @@ type FanOut interface {
 	MoveTo(ctx context.Context) error
 
 	// TryMoveTo is MoveTo without waiting: it enters the fan-out only if it can do so right now, and reports
-	// whether it did. It bypasses the waiting room and never jumps an item already waiting there.
+	// whether it did. It bypasses the waiting room and never jumps an item already waiting there. Under
+	// AdmitByPools it also declines while no pool has free capacity.
 	//
 	// When entered is false nothing happened. A canceled item returns (false, its cancellation cause), whether the
 	// cancellation is visible on ctx or only on the item's own context. It panics on the same misuse as MoveTo.
@@ -104,8 +108,57 @@ type FanOut interface {
 	// QueueSize returns the size of this fan-out's waiting room, or 0 if it has none.
 	QueueSize() int
 
+	// SetAdmission selects when MoveTo lets an item enter this fan-out and when the item leaves the previous stage
+	// (default AdmitByLimit), and returns the fan-out for chaining. See FanOutAdmission.
+	//
+	// Safe to call at any time, from any goroutine, including on a running conveyor. It applies to items entering
+	// after the call: items already inside keep behaving as they were let in.
+	SetAdmission(a FanOutAdmission) FanOut
+
+	// Admission returns the admission policy.
+	Admission() FanOutAdmission
+
 	// Branches returns this fan-out's branches — pools and lanes alike — in creation order.
 	Branches() []Branch
+}
+
+// FanOutAdmission selects when FanOut.MoveTo lets an item enter the fan-out and when the item leaves the previous
+// stage (see FanOut.SetAdmission).
+type FanOutAdmission int
+
+const (
+	// AdmitByLimit is the default. MoveTo lets the item in when the fan-out has a free item slot (SetLimit) and it is
+	// the item's turn. The item leaves the previous stage at that moment, like at every other node.
+	AdmitByLimit FanOutAdmission = iota
+
+	// AdmitByPools makes the backpressure follow pool capacity. MoveTo lets the item in only when, on top of the
+	// above, some branch has a free slot and nothing queued; the item leaves the previous stage at that moment. So
+	// items keep entering while any pool can take work, and stop as soon as no pool can, whatever the item limit
+	// still allows; the item limit bounds how many items have work queued on a full pool. See docs/4_fan-out.md,
+	// "SetAdmission".
+	AdmitByPools
+
+	// AdmitByPoolsStrict is AdmitByPools with stricter backpressure: the item also stays in the previous stage until
+	// its first Schedule has started one task on every branch it touched (or until it leaves, detaches, or its
+	// processor returns). So an item whose work waits for a full pool keeps the stage before the fan-out busy, while
+	// a younger item whose work can start may enter and run ahead of it on the branches; downstream order is
+	// unchanged. Fewer items in flight, at the cost of throughput when task durations vary. See docs/4_fan-out.md,
+	// "SetAdmission".
+	AdmitByPoolsStrict
+)
+
+// String names the policy for messages and debugging.
+func (a FanOutAdmission) String() string {
+	switch a {
+	case AdmitByLimit:
+		return "AdmitByLimit"
+	case AdmitByPools:
+		return "AdmitByPools"
+	case AdmitByPoolsStrict:
+		return "AdmitByPoolsStrict"
+	default:
+		return fmt.Sprintf("FanOutAdmission(%d)", int(a))
+	}
 }
 
 // fanOut is the FanOut implementation: one node of a series, owning one node unit plus its branches.
@@ -336,6 +389,17 @@ func (r *run) addToBody(it *item, w *wave, f *fanOut, tasks []Task, root bool) {
 	for _, branchIdx := range touched {
 		r.insertCollection(branchIdx, byBranch[branchIdx])
 	}
+	if root && !w.rootSubmitted {
+		w.rootSubmitted = true
+		if it.hold != nil {
+			// The entering submission of an AdmitByPoolsStrict admission: its first assignment per branch ends the hold.
+			cols := make([]*taskCollection, 0, len(touched))
+			for _, branchIdx := range touched {
+				cols = append(cols, byBranch[branchIdx])
+			}
+			r.markEntering(it, cols)
+		}
+	}
 	// Publishing the rank is what opens the gate for the next item and keeps the "older item's maxRank >=
 	// younger item's" invariant. With no tasks this is the whole effect of the call.
 	if f.node.rank > it.maxRank {
@@ -392,6 +456,13 @@ func (f *fanOut) SetQueueSize(size int) FanOut {
 func (f *fanOut) Limit() int { return int(f.node.limit.Load()) }
 
 func (f *fanOut) QueueSize() int { return int(f.node.queueSize.Load()) }
+
+func (f *fanOut) SetAdmission(a FanOutAdmission) FanOut {
+	f.node.setAdmission(a)
+	return f
+}
+
+func (f *fanOut) Admission() FanOutAdmission { return f.node.admissionPolicy() }
 
 func (f *fanOut) Branches() []Branch {
 	bs := make([]Branch, 0, len(f.branches))

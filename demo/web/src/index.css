@@ -469,6 +469,19 @@ body,
   accent-color: #f97316;
 }
 
+/* The fan-out's Admission dial (see components/shared/AdmissionSelect): a <select> in the slider's row, sized to the
+   slider's own fixed width so the label column lines up with Limit / Queue above it. */
+.admission-select {
+  flex: 0 0 74px;
+  font-size: 11px;
+  font-family: inherit;
+  color: #444;
+  border: 1px solid #2563eb;
+  border-radius: 4px;
+  background: #fff;
+  padding: 1px 2px;
+}
+
 .labeled-slider-value {
   min-width: 32px;
   text-align: right;
@@ -537,6 +550,16 @@ body,
 
 .item-badge.pending {
   border-style: dashed;
+}
+
+/* "held" (see pipeline/itemPositions.ts's ItemFill): the dimmed copy of an item already inside a fan-out admitted
+   "by pools (strict)", drawn in the slot it still keeps in the node before (or in the fan-out's waiting room) until its tasks
+   start. Dotted and faded so it reads as a shadow of the real rectangle, not a second item. */
+.item-badge.held {
+  background: transparent;
+  border: 2px dotted var(--item-color, #2563eb);
+  color: var(--item-color, #2563eb);
+  opacity: 0.5;
 }
 
 .items-overlay {

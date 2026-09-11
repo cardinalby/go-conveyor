@@ -16,7 +16,7 @@ import {
   MIN_TASKS_PER_ITEM,
 } from "../pipeline/defaults";
 import { newId } from "../pipeline/ids";
-import type { BranchNode, FanOutNode, LaneBranch, Pipeline, PipelineNode, PoolBranch, StageNode } from "../types/pipeline";
+import { toFanOutAdmission, type BranchNode, type FanOutAdmission, type FanOutNode, type LaneBranch, type Pipeline, type PipelineNode, type PoolBranch, type StageNode } from "../types/pipeline";
 
 // Bumped from 1: the pool/lane split changed the wire shape (branches instead of lanes, recursive nodes inside a
 // lane). decodeUrlState already treats a version mismatch as "no hash" (see its own doc) and falls back to a fresh
@@ -58,6 +58,9 @@ interface UrlFanOutNode {
   name?: string;
   limit: number;
   queueSize: number;
+  /** Present only when not the default "limit" — same convention as `name`, so a link saved before this field
+   * existed (or one that never changed it) stays exactly as short as before, and decodes to "limit". */
+  admission?: FanOutAdmission;
   branches: UrlBranch[];
 }
 
@@ -104,7 +107,8 @@ function nodeToUrl(n: PipelineNode): UrlNode {
   if (n.kind === "stage") {
     return { kind: "stage", ...name, limit: n.limit, queueSize: n.queueSize, delayMs: n.delayMs };
   }
-  return { kind: "fanout", ...name, limit: n.limit, queueSize: n.queueSize, branches: n.branches.map(branchToUrl) };
+  const admission = n.admission !== "limit" ? { admission: n.admission } : {};
+  return { kind: "fanout", ...name, ...admission, limit: n.limit, queueSize: n.queueSize, branches: n.branches.map(branchToUrl) };
 }
 
 // A loosely-typed read of untrusted, already-parsed JSON: Partial<UrlNode> looks like the right parameter type
@@ -155,6 +159,8 @@ function urlToNode(raw: unknown): PipelineNode {
       name: typeof n.name === "string" ? n.name : "",
       limit: clamp(Number(n.limit), MIN_LIMIT, MAX_LIMIT),
       queueSize: clamp(Number(n.queueSize), MIN_QUEUE_SIZE, MAX_QUEUE_SIZE),
+      // Anything but a known value — including a missing field — is the default, so no version bump.
+      admission: toFanOutAdmission(n.admission),
       branches: rawBranches.map(urlToBranch),
     };
     return fanOut;

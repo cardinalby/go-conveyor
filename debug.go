@@ -6,13 +6,17 @@ type UnitOccupants struct {
 	Unit Unit
 
 	// InBody lists the item numbers holding a slot in the node itself, in arrival order. An item holding several
-	// slots appears once per slot.
+	// slots appears once per slot. A slot may belong to an item that has already moved on: one a Stage.Retain or a
+	// FanOut.Detach keeps for its work, or the previous-node slot an item admitted to an AdmitByPoolsStrict fan-out keeps
+	// until its first Schedule has started (see FanOutAdmission). Such an item appears in two units at once.
 	InBody []int64
 
-	// InQueue lists the item numbers waiting in front of the node, in arrival order. For a branch it is the backlog
-	// in queue order — item age, then Schedule order — which is not the order the work arrived in; one entry per
-	// collection (the tasks one Schedule call queued on that branch) not yet fully handed out, so an item that
-	// schedules there several times (rounds, follow-ups from its tasks) appears once per collection.
+	// InQueue lists the item numbers waiting in front of the node, in arrival order. Under AdmitByPoolsStrict a queued
+	// token may belong to an item already admitted to the fan-out from its waiting room, kept the same way as a
+	// previous-node slot. For a branch it is the backlog in queue order — item age, then Schedule order — which is
+	// not the order the work arrived in; one entry per collection (the tasks one Schedule call queued on that branch)
+	// not yet fully handed out, so an item that schedules there several times (rounds, follow-ups from its tasks)
+	// appears once per collection.
 	InQueue []int64
 }
 

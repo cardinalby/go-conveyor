@@ -71,6 +71,11 @@ type unit struct {
 	// are waiting.
 	queueSize atomic.Int64
 
+	// admission is the FanOutAdmission of a fan-out's node unit (always AdmitByLimit for every other kind). Atomic
+	// for the same reason as limit: SetAdmission may change it at any time; canEnter and takeUnit read it under
+	// run.mu at admission time, so one admission sees one policy.
+	admission atomic.Int64
+
 	// index is unique per unit across the whole conveyor. It indexes the per-run occupancy array and the
 	// per-item occupied/entered arrays. The conveyor's start unit is always index 0.
 	index int
@@ -93,6 +98,21 @@ type unit struct {
 
 // String returns the unit's name: its owner's name (see Stage.String / FanOut.String / branch.String).
 func (u *unit) String() string { return u.owner.String() }
+
+// admissionPolicy reads the unit's admission policy (see FanOut.SetAdmission).
+func (u *unit) admissionPolicy() FanOutAdmission { return FanOutAdmission(u.admission.Load()) }
+
+// needsPoolCapacity reports whether this unit is a fan-out node whose admission also requires a branch with free
+// capacity (AdmitByPools, AdmitByPoolsStrict). Caller holds run.mu when the answer decides an admission.
+func (u *unit) needsPoolCapacity() bool {
+	return u.kind == kindFanOut && u.admissionPolicy() != AdmitByLimit
+}
+
+// holdsUpstream reports whether an item entering this unit keeps the previous node until its work has started
+// (AdmitByPoolsStrict; see upstreamHold). Caller holds run.mu.
+func (u *unit) holdsUpstream() bool {
+	return u.kind == kindFanOut && u.admissionPolicy() == AdmitByPoolsStrict
+}
 
 // queueName is how this node's waiting room is identified in error messages.
 func (u *unit) queueName() string { return u.owner.String() + ".queue" }

@@ -49,10 +49,14 @@ func (w *windowedInt) snapshot() Gauge {
 // Conveyor.StartUnit) that produced it, for matching a stat back to what was built.
 //
 // Occupied and Limit describe the node itself: items running its code, with work outstanding, or occupying a
-// branch's entrance. Queued describes what is waiting in front of it — items in a stage's or fan-out's waiting
-// room, or, for a branch, the collections (the tasks one Schedule call queued there) not yet fully handed out. An
-// item may have several collections queued on one branch, so a branch's backlog is not bounded by its fan-out's
-// limit; running work is never counted.
+// branch's entrance. A slot also counts while a Stage.Retain or a FanOut.Detach keeps it for work in flight, and
+// while an item admitted to an AdmitByPoolsStrict fan-out keeps the previous node's slot until its first Schedule has
+// started (see FanOutAdmission) — so a node's occupancy may include items that are already in the next one. Queued
+// describes what is waiting in front of it — items in a stage's or fan-out's waiting room (under AdmitByPoolsStrict
+// possibly a token kept by an item already admitted from that room), or, for a branch, the collections (the tasks
+// one Schedule call queued there) not yet fully handed out. An item may have several collections queued on one
+// branch, so a branch's backlog is not bounded by its fan-out's limit; running work is never counted. Held tokens
+// are not reported separately.
 type UnitStat struct {
 	Unit     Unit
 	Occupied Gauge // slots of the node in use since the previous Stats read

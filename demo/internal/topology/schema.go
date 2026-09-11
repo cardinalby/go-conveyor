@@ -31,6 +31,16 @@ const (
 	KindLane BranchKind = "lane"
 )
 
+// Admission names a fan-out's admission policy (see conveyor.FanOutAdmission). The zero value means AdmissionByLimit,
+// so a Spec saved before this field existed keeps the behavior it had.
+type Admission string
+
+const (
+	AdmissionByLimit       Admission = "limit"       // conveyor.AdmitByLimit
+	AdmissionByPools       Admission = "pools"       // conveyor.AdmitByPools: enter only while a pool has room
+	AdmissionByPoolsStrict Admission = "poolsStrict" // conveyor.AdmitByPoolsStrict: also keep the previous node until the work starts
+)
+
 // BranchSpec is one branch of a FanOutSpec, built as a conveyor.Pool or a conveyor.Lane depending on Kind.
 //
 // Limit applies to a pool only (conveyor.Pool.SetLimit) — a lane's entrance has no SetLimit, fixed at one child at
@@ -60,8 +70,9 @@ type NodeSpec struct {
 	Name      string       `json:"name"`
 	Limit     int          `json:"limit"`
 	QueueSize int          `json:"queueSize"`
-	DelayMs   int          `json:"delayMs"`            // stage only
-	Branches  []BranchSpec `json:"branches,omitempty"` // fanout only, at least 2 branches
+	DelayMs   int          `json:"delayMs"`             // stage only
+	Admission Admission    `json:"admission,omitempty"` // fanout only; empty means AdmissionByLimit
+	Branches  []BranchSpec `json:"branches,omitempty"`  // fanout only, at least 2 branches
 }
 
 // Spec is a full pipeline topology built by the UI's build mode: an ordered list of nodes, left to right. The

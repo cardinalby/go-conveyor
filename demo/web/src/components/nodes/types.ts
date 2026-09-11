@@ -1,5 +1,6 @@
 import type { ResolvedFanOut, ResolvedStage } from "../../pipeline/resolve";
 import type { MenuTarget } from "../../types/menu";
+import type { FanOutAdmission } from "../../types/pipeline";
 
 export type Mode = "build" | "run";
 export type EditField = "limit" | "queueSize" | "delayMs";
@@ -13,6 +14,9 @@ export interface TreeCallbacks {
   mode: Mode;
   onContextMenu: (target: MenuTarget, evt: React.MouseEvent) => void;
   onEditNode: (id: string, field: EditField, value: number) => void;
+  /** A fan-out's admission policy is the one non-numeric dial, so it has its own callback rather than widening
+   * onEditNode's value type — see FanOutBox. */
+  onEditAdmission: (id: string, value: FanOutAdmission) => void;
   onEditBranch: (branchId: string, field: BranchEditField, value: number) => void;
   onRenameNode: (id: string, name: string) => void;
   onRenameBranch: (branchId: string, name: string) => void;

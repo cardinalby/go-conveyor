@@ -77,6 +77,11 @@ type item struct {
 	// fan-out, or has handed its work over with FanOut.Detach — that is, whenever no entry of body is bodyOpen.
 	pending *wave
 
+	// hold is the release deferred by this item's admission to an AdmitByPoolsStrict fan-out, nil when there is none (see
+	// upstreamHold). At most one at a time: it lives between that admission and the discharge, which comes no later
+	// than the sealing of the body opened by the same admission.
+	hold *upstreamHold
+
 	// parentWave is the wave whose work created this child item (nil for a root item). The child's outcome is
 	// reported to it.
 	parentWave *wave
@@ -150,7 +155,14 @@ func (it *item) sealBody(w *wave, state bodyState) {
 	it.pending = nil
 	it.body[w.atNode.index] = state
 	w.seal()
+	w.run.dischargeHold(it) // the item's own path is over; nothing more it schedules can start the held-for work
 }
+
+// holdsQueued reports whether the item's upstream hold protects its queued slot. Caller holds run.mu.
+func (it *item) holdsQueued() bool { return it.hold != nil && it.hold.queued }
+
+// holdsUnit reports whether the item's upstream hold protects its slot in unit j. Caller holds run.mu.
+func (it *item) holdsUnit(j int) bool { return it.hold != nil && it.hold.unit == j }
 
 // isRetaining reports whether a live wave of this item holds unit j — a Stage.Retain's stage or a FanOut.Detach's
 // node. Such a slot must not be taken away when the item moves on; it is freed when the work returns. Caller holds

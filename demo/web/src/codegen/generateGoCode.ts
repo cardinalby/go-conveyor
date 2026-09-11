@@ -37,6 +37,8 @@ function declareUnit(hostVar: string, ctor: "AddStage" | "AddFanOut", node: Pipe
   let line = `${varName} := ${hostVar}.${ctor}()`;
   if (node.limit !== 1) line += `.SetLimit(${node.limit})`;
   if (node.queueSize !== 0) line += `.SetQueueSize(${node.queueSize})`;
+  if (node.kind === "fanout" && node.admission === "pools") line += ".SetAdmission(conveyor.AdmitByPools)";
+  if (node.kind === "fanout" && node.admission === "poolsStrict") line += ".SetAdmission(conveyor.AdmitByPoolsStrict)";
   return line;
 }
 

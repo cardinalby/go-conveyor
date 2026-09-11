@@ -1,4 +1,5 @@
 import { EditableTitle } from "../shared/EditableTitle";
+import { AdmissionSelect } from "../shared/AdmissionSelect";
 import { LabeledSlider } from "../shared/LabeledSlider";
 import { SlotStrip } from "../shared/SlotStrip";
 import { BranchBox } from "./BranchBox";
@@ -69,6 +70,7 @@ export function FanOutBox({ fanout, callbacks, handles, shellRef }: Props) {
           onChange={(v) => callbacks.onEditNode(fanout.id, "queueSize", v)}
           title="Maximum number of items waiting to enter this fan-out"
         />
+        <AdmissionSelect value={fanout.admission} onChange={(v) => callbacks.onEditAdmission(fanout.id, v)} />
         <SlotStrip nodeId={fanout.id} variant="body" count={bodySlotCount(fanout.limit, fanout.inBody)} reserve={MAX_LIMIT} />
         <div className="fanout-branches">
           {fanout.branches.map((branch) => (
