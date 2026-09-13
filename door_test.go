@@ -12,7 +12,7 @@ import (
 // joined leaves behind.
 
 // TestDoorOpensOnlyWhenTheItemAheadPublishes: whatever the limit, the item behind cannot enter the fan-out until the
-// item ahead has published — its first Schedule (even with zero tasks), a leave without scheduling, or a Detach. Wait
+// item ahead has published — its first Schedule (even with zero tasks), a leave without scheduling, or a Retain. Wait
 // publishes nothing.
 func TestDoorOpensOnlyWhenTheItemAheadPublishes(t *testing.T) {
 	noop := func(context.Context) error { return nil }
@@ -30,8 +30,8 @@ func TestDoorOpensOnlyWhenTheItemAheadPublishes(t *testing.T) {
 		{"leave without scheduling", true, func(ctx context.Context, _ FanOut, _ Pool, commit Stage) error {
 			return commit.MoveTo(ctx)
 		}},
-		{"detach an empty body", true, func(ctx context.Context, fo FanOut, _ Pool, _ Stage) error {
-			fo.Detach(ctx)
+		{"retain an empty body", true, func(ctx context.Context, fo FanOut, _ Pool, _ Stage) error {
+			fo.Retain(ctx)
 			return nil
 		}},
 		{"wait", false, func(ctx context.Context, fo FanOut, _ Pool, _ Stage) error {
@@ -103,7 +103,8 @@ func TestDoorOpensOnlyWhenTheItemAheadPublishes(t *testing.T) {
 func TestDoorClosedItemMayUseTheWaitingRoom(t *testing.T) {
 	c := NewConveyor()
 	prev := c.AddStage(OptName("prev"))
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2).SetQueueSize(1)
+	// Buffered: item 1 blocks before its Schedule, and under the default it would keep prev meanwhile.
+	fo := c.AddFanOut(OptName("fo")).SetLimit(2).SetQueueSize(1).SetBackpressure(BackpressureBuffered)
 	pool := fo.AddPool(OptName("pool"))
 
 	firstInside := make(chan struct{})
@@ -158,7 +159,7 @@ func TestDoorClosedItemMayUseTheWaitingRoom(t *testing.T) {
 }
 
 // assertClosedBodyRefusesEverything: after a leave closed the body, the own-body path is over — Schedule and Wait
-// panic with errBodyClosed, and Detach with errNothingToDetach — whether the item still occupies the fan-out or already
+// panic with errBodyClosed, and Retain with errNothingToRetain — whether the item still occupies the fan-out or already
 // stands in the next node's waiting room: the body state decides, not occupancy. It runs on the item's goroutine, so
 // it reports with Errorf: a Fatalf there would end the worker instead of the test.
 func assertClosedBodyRefusesEverything(t *testing.T, ctx context.Context, fo FanOut, pool Pool) {
@@ -175,7 +176,7 @@ func assertClosedBodyRefusesEverything(t *testing.T, ctx context.Context, fo Fan
 			_ = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
 		}},
 		{"Wait", errBodyClosed, func() { _ = fo.Wait(ctx) }},
-		{"Detach", errNothingToDetach, func() { fo.Detach(ctx) }},
+		{"Retain", errNothingToRetain, func() { fo.Retain(ctx) }},
 	} {
 		if err := recoveredErr(call.fn); !errors.Is(err, call.want) {
 			t.Errorf("%s after the failed leave panicked with %v, want %v", call.name, err, call.want)

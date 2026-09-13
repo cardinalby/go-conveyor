@@ -48,8 +48,11 @@ Two things are worth knowing:
 
 ## Into a fan-out
 
-A fan-out has the same variant. Because the tasks are built and scheduled *after* entering, a declined entry leaves
-nothing to clean up: no tasks were built for nothing, and nothing was claimed.
+A fan-out has the same variant. It declines only for the reasons a stage does: no free item slot, or an item ahead
+still at the door. Busy pools never make it decline; entering may keep the previous stage's slot instead
+(see [SetBackpressure](4_fan-out.md#setbackpressure-when-the-previous-stage-is-released)).
+
+Tasks built after entering cost nothing on a decline: nothing was created for nothing.
 
 ```go
 entered, err := enrich.TryMoveTo(ctx)
@@ -64,8 +67,12 @@ if entered {
 // not entered: the item is still in the previous node; enrich may be entered later with MoveTo
 ```
 
-Neither variant takes waves, so a `TryMoveTo` that declines never waits on anything. To wait for a `Retain` or
-`Detach` wave after a conditional move, call `Wave.Wait` once `entered` is true.
+Work prepared with `Schedule` before entering (see [Schedule before entry](4_fan-out.md#schedule-before-entry))
+survives a decline unchanged: it starts if a later attempt or a `MoveTo` enters, and is discarded if the item moves
+past the fan-out.
+
+Neither variant takes waves, so a `TryMoveTo` that declines never waits on anything. To wait for a `Stage.Retain` or
+`FanOut.Retain` wave after a conditional move, call `Wave.Wait` once `entered` is true.
 
 ## Out of a fan-out
 

@@ -75,10 +75,10 @@ func TestCompletionSealsBusyBodyAndJoinsTheTree(t *testing.T) {
 // recorded on the wave as the reason its work did not run.
 func TestCompletionWithErrorStopsTheSpawningTree(t *testing.T) {
 	boom := errors.New("boom")
-	for _, detach := range []bool{false, true} {
+	for _, retain := range []bool{false, true} {
 		name := "open body"
-		if detach {
-			name = "detached body"
+		if retain {
+			name = "retained body"
 		}
 		t.Run(name, func(t *testing.T) {
 			c := NewConveyor()
@@ -109,8 +109,8 @@ func TestCompletionWithErrorStopsTheSpawningTree(t *testing.T) {
 					return err
 				}
 				<-running
-				if detach {
-					w = fo.Detach(ctx)
+				if retain {
+					w = fo.Retain(ctx)
 				}
 				return boom
 			})
@@ -124,7 +124,7 @@ func TestCompletionWithErrorStopsTheSpawningTree(t *testing.T) {
 			if bRan.Load() != 0 {
 				t.Errorf("the queued task ran although its item was canceled")
 			}
-			if detach {
+			if retain {
 				if werr := w.Err(); !errors.Is(werr, boom) {
 					t.Errorf("wave error = %v, want the cause %v recorded for the dropped work", werr, boom)
 				}
@@ -219,7 +219,7 @@ func TestShutdownWhileBlockedInWaitDropsQueuedSpawns(t *testing.T) {
 		}()
 		werr := fo.Wait(ic)
 		assertShutdownCause(t, "Wait during shutdown", werr, cause)
-		w := fo.Detach(ic) // the body is still open after Wait returned
+		w := fo.Retain(ic) // the body is still open after Wait returned
 		<-w.Finished()
 		assertShutdownCause(t, "the wave of the dropped work", w.Err(), cause)
 		return werr

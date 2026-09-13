@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-// TestDetachLetsTheItemMoveOnWithoutWaiting: a detached fan-out no longer holds the item back, so it passes the nodes
+// TestRetainLetsTheItemMoveOnWithoutWaiting: a retained fan-out no longer holds the item back, so it passes the nodes
 // after it while its work is still running, and the wave it was handed is what finally waits.
-func TestDetachLetsTheItemMoveOnWithoutWaiting(t *testing.T) {
+func TestFanOutRetainLetsTheItemMoveOnWithoutWaiting(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
@@ -30,7 +30,7 @@ func TestDetachLetsTheItemMoveOnWithoutWaiting(t *testing.T) {
 		})); err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		if err := mid.MoveTo(ctx); err != nil {
 			return err
 		}
@@ -60,10 +60,10 @@ func TestDetachLetsTheItemMoveOnWithoutWaiting(t *testing.T) {
 	}
 }
 
-// TestDetachedSlotOutlivesTheItemsPresence is the reason detaching is safe: the fan-out's slot follows the work, not
+// TestRetainedSlotOutlivesTheItemsPresence is the reason retaining is safe: the fan-out's slot follows the work, not
 // the item. So the node is still occupied while the item sits in a later stage, and its limit still bounds how many
 // items have work outstanding.
-func TestDetachedSlotOutlivesTheItemsPresence(t *testing.T) {
+func TestFanOutRetainedSlotOutlivesTheItemsPresence(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo")).SetLimit(1)
 	pool := fo.AddPool(OptName("pool"))
@@ -97,7 +97,7 @@ func TestDetachedSlotOutlivesTheItemsPresence(t *testing.T) {
 		})); err != nil {
 			return err
 		}
-		w := fo.Detach(ic)
+		w := fo.Retain(ic)
 		if err := commit.MoveTo(ic); err != nil {
 			return err
 		}
@@ -116,9 +116,9 @@ func TestDetachedSlotOutlivesTheItemsPresence(t *testing.T) {
 	}
 }
 
-// TestDetachedWorkStillBoundedByTheLimit: detaching moves the wait, not the ceiling. Even though every item leaves the
+// TestRetainedWorkStillBoundedByTheLimit: retaining moves the wait, not the ceiling. Even though every item leaves the
 // fan-out immediately, no more than its limit may have work outstanding at once.
-func TestDetachedWorkStillBoundedByTheLimit(t *testing.T) {
+func TestFanOutRetainedWorkStillBoundedByTheLimit(t *testing.T) {
 	const items = 8
 	const limit = 2
 	c := NewConveyor()
@@ -139,7 +139,7 @@ func TestDetachedWorkStillBoundedByTheLimit(t *testing.T) {
 		})); err != nil {
 			return err
 		}
-		wave := fo.Detach(ctx)
+		wave := fo.Retain(ctx)
 		w.scheduled()
 		if err := commit.MoveTo(ctx); err != nil {
 			return err
@@ -148,14 +148,14 @@ func TestDetachedWorkStillBoundedByTheLimit(t *testing.T) {
 	})
 
 	if peak := wg.peakValue(); peak > limit {
-		t.Fatalf("%d items had detached work outstanding at once, fan-out limit is %d", peak, limit)
+		t.Fatalf("%d items had retained work outstanding at once, fan-out limit is %d", peak, limit)
 	}
 }
 
-// TestDetachedErrorNobodyJoinedFailsTheItem: a detached wave is the caller's to join, and if nobody ever looks at it
+// TestRetainedErrorNobodyJoinedFailsTheItem: a retained wave is the caller's to join, and if nobody ever looks at it
 // its failure still reaches the run — delayed, never lost.
-func TestDetachedErrorNobodyJoinedFailsTheItem(t *testing.T) {
-	boom := errors.New("detached boom")
+func TestFanOutRetainedErrorNobodyJoinedFailsTheItem(t *testing.T) {
+	boom := errors.New("retained boom")
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
@@ -168,18 +168,18 @@ func TestDetachedErrorNobodyJoinedFailsTheItem(t *testing.T) {
 		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return boom })); err != nil {
 			return err
 		}
-		_ = fo.Detach(ctx) // deliberately never joined
+		_ = fo.Retain(ctx) // deliberately never joined
 		return commit.MoveTo(ctx)
 	})
 	if !errors.Is(err, boom) {
-		t.Fatalf("run error = %v, want the detached work's %v", err, boom)
+		t.Fatalf("run error = %v, want the retained work's %v", err, boom)
 	}
 }
 
-// TestDetachAfterWorkAlreadyFinished: the task may finish before the ItemProcessor gets around to calling Detach —
-// nothing about a wave settling depends on Detach ever being called (see run.joinPending, which waits for it just
-// the same). Detaching such a fan-out must still succeed, handing back a wave that is already finished.
-func TestDetachAfterWorkAlreadyFinished(t *testing.T) {
+// TestRetainAfterWorkAlreadyFinished: the task may finish before the ItemProcessor gets around to calling Retain —
+// nothing about a wave settling depends on Retain ever being called (see run.joinPending, which waits for it just
+// the same). Retaining such a fan-out must still succeed, handing back a wave that is already finished.
+func TestFanOutRetainAfterWorkAlreadyFinished(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
@@ -200,11 +200,11 @@ func TestDetachAfterWorkAlreadyFinished(t *testing.T) {
 		// itself has run — confirmed by the channel receive, a real happens-before edge, not a poll that could catch
 		// it either side of that instant — the slot going back to 0 can only mean runWork already released it and
 		// settled the wave under the same lock hold (see run.runWork). That is what guarantees the work, and the
-		// wave, are already done by the time Detach is called below.
+		// wave, are already done by the time Retain is called below.
 		<-taskRan
 		waitFor(t, "the task to finish", func() bool { return occupancyOf(c, pool) == 0 })
 
-		w := fo.Detach(ctx) // must not panic, even though there is nothing left to wait for
+		w := fo.Retain(ctx) // must not panic, even though there is nothing left to wait for
 		select {
 		case <-w.Finished():
 		default:
@@ -223,23 +223,23 @@ func TestDetachAfterWorkAlreadyFinished(t *testing.T) {
 	}
 }
 
-// TestDetachWithoutWorkPanics: there is nothing to hand over if the item never scheduled anything here.
-func TestDetachWithoutWorkPanics(t *testing.T) {
+// TestRetainWithoutWorkPanics: there is nothing to hand over if the item never scheduled anything here.
+func TestFanOutRetainWithoutWorkPanics(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	_ = fo.AddPool(OptName("lane"))
 
-	panicsInItem(t, c, errNothingToDetach, func(ctx context.Context) {
+	panicsInItem(t, c, errNothingToRetain, func(ctx context.Context) {
 		if err := fo.MoveTo(ctx); err != nil {
 			t.Fatalf("move failed: %v", err)
 		}
-		_ = fo.Detach(ctx) // legal: an empty submission still has a wave to hand over
-		_ = fo.Detach(ctx) // misuse: it has already been handed over
+		_ = fo.Retain(ctx) // legal: an empty submission still has a wave to hand over
+		_ = fo.Retain(ctx) // misuse: it has already been handed over
 	})
 }
 
-// TestDetachNodeNotOccupiedPanics: the slot to hand over must be one the item is holding.
-func TestDetachNodeNotOccupiedPanics(t *testing.T) {
+// TestRetainNodeNotOccupiedPanics: the slot to hand over must be one the item is holding.
+func TestFanOutRetainNodeNotOccupiedPanics(t *testing.T) {
 	c := NewConveyor()
 	s := c.AddStage(OptName("s"))
 	fo := c.AddFanOut(OptName("fo"))
@@ -249,19 +249,19 @@ func TestDetachNodeNotOccupiedPanics(t *testing.T) {
 		if err := s.MoveTo(ctx); err != nil {
 			t.Fatalf("move failed: %v", err)
 		}
-		_ = fo.Detach(ctx) // the item is in s, not in the fan-out
+		_ = fo.Retain(ctx) // the item is in s, not in the fan-out
 	})
 }
 
-// TestDetachAfterMovingOnPanics: leaving the fan-out joins its work and closes the body, so afterwards there is nothing
-// left to detach — the body state answers, whether or not the item still occupies the node.
-func TestDetachAfterMovingOnPanics(t *testing.T) {
+// TestRetainAfterMovingOnPanics: leaving the fan-out joins its work and closes the body, so afterwards there is nothing
+// left to retain — the body state answers, whether or not the item still occupies the node.
+func TestFanOutRetainAfterMovingOnPanics(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
 	commit := c.AddStage(OptName("commit"))
 
-	panicsInItem(t, c, errNothingToDetach, func(ctx context.Context) {
+	panicsInItem(t, c, errNothingToRetain, func(ctx context.Context) {
 		if err := fo.MoveTo(ctx); err != nil {
 			t.Fatalf("move failed: %v", err)
 		}
@@ -271,20 +271,20 @@ func TestDetachAfterMovingOnPanics(t *testing.T) {
 		if err := commit.MoveTo(ctx); err != nil {
 			t.Fatalf("move failed: %v", err)
 		}
-		_ = fo.Detach(ctx)
+		_ = fo.Retain(ctx)
 	})
 }
 
-// TestDetachOfAnEarlierFanOutPanics: an item that detached at one fan-out still occupies it, so occupancy alone cannot
-// say which work is pending. Detaching there again must not reach for the work of the node the item is in now.
-func TestDetachOfAnEarlierFanOutPanics(t *testing.T) {
+// TestRetainOfAnEarlierFanOutPanics: an item that retained at one fan-out still occupies it, so occupancy alone cannot
+// say which work is pending. Retaining there again must not reach for the work of the node the item is in now.
+func TestFanOutRetainOfAnEarlierFanOutPanics(t *testing.T) {
 	c := NewConveyor()
 	first := c.AddFanOut(OptName("first"))
 	firstPool := first.AddPool(OptName("firstPool"))
 	second := c.AddFanOut(OptName("second"))
 	secondPool := second.AddPool(OptName("secondPool"))
 
-	// The work must still be running when the second Detach is attempted, so that first is still occupied — and it is
+	// The work must still be running when the second Retain is attempted, so that first is still occupied — and it is
 	// released from inside the item, since an unlimited shutdown timeout would otherwise wait for it forever.
 	release := make(chan struct{})
 	var checked atomic.Bool
@@ -301,7 +301,7 @@ func TestDetachOfAnEarlierFanOutPanics(t *testing.T) {
 		})); err != nil {
 			return err
 		}
-		_ = first.Detach(ctx) // not joined here: joining it would wait for the work that is holding first's slot
+		_ = first.Retain(ctx) // not joined here: joining it would wait for the work that is holding first's slot
 		if err := second.MoveTo(ctx); err != nil {
 			return err
 		}
@@ -309,10 +309,10 @@ func TestDetachOfAnEarlierFanOutPanics(t *testing.T) {
 			return err
 		}
 		if occ := occupancyOf(c, first); occ != 1 {
-			t.Errorf("first occupancy = %d, want 1 — the detached work still holds its slot", occ)
+			t.Errorf("first occupancy = %d, want 1 — the retained work still holds its slot", occ)
 		}
-		// first is occupied — by the detached work — but its pending wave is gone.
-		assertPanics(t, errNothingToDetach, func() { _ = first.Detach(ctx) })
+		// first is occupied — by the retained work — but its pending wave is gone.
+		assertPanics(t, errNothingToRetain, func() { _ = first.Retain(ctx) })
 		checked.Store(true)
 		close(release)
 		return nil
@@ -325,10 +325,10 @@ func TestDetachOfAnEarlierFanOutPanics(t *testing.T) {
 	}
 }
 
-// TestDetachedSlotFreedWhenTheWorkFinishes is the other half of the contract: once the detached work is done, the
+// TestRetainedSlotFreedWhenTheWorkFinishes is the other half of the contract: once the retained work is done, the
 // fan-out's slot goes back even though the item is still sitting in a later stage. Held until the work finishes, not
 // until the item does.
-func TestDetachedSlotFreedWhenTheWorkFinishes(t *testing.T) {
+func TestFanOutRetainedSlotFreedWhenTheWorkFinishes(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo")).SetLimit(1)
 	pool := fo.AddPool(OptName("pool"))
@@ -344,7 +344,7 @@ func TestDetachedSlotFreedWhenTheWorkFinishes(t *testing.T) {
 
 	go func() {
 		<-taskDone
-		freed.Store(waitFor(t, "the detached slot to be given back", func() bool {
+		freed.Store(waitFor(t, "the retained slot to be given back", func() bool {
 			return occupancyOf(c, fo) == 0
 		}))
 		close(stay)
@@ -368,7 +368,7 @@ func TestDetachedSlotFreedWhenTheWorkFinishes(t *testing.T) {
 		})); err != nil {
 			return err
 		}
-		w := fo.Detach(ic)
+		w := fo.Retain(ic)
 		if err := commit.MoveTo(ic); err != nil {
 			return err
 		}
@@ -383,27 +383,27 @@ func TestDetachedSlotFreedWhenTheWorkFinishes(t *testing.T) {
 	})
 
 	if !freed.Load() {
-		t.Fatalf("the fan-out slot was still held after its detached work had finished")
+		t.Fatalf("the fan-out slot was still held after its retained work had finished")
 	}
 }
 
-// TestDetachTwiceAfterMovingOnPanics: a body once detached stays detached. After the detached work finished and the
-// item moved on, the node is free — the diagnostic is still errNothingToDetach, from the body state, not
+// TestRetainTwiceAfterMovingOnPanics: a body once retained stays retained. After the retained work finished and the
+// item moved on, the node is free — the diagnostic is still errNothingToRetain, from the body state, not
 // errStageNotEntered from the empty occupancy.
-func TestDetachTwiceAfterMovingOnPanics(t *testing.T) {
+func TestFanOutRetainTwiceAfterMovingOnPanics(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
 	commit := c.AddStage(OptName("commit"))
 
-	panicsInItem(t, c, errNothingToDetach, func(ctx context.Context) {
+	panicsInItem(t, c, errNothingToRetain, func(ctx context.Context) {
 		if err := fo.MoveTo(ctx); err != nil {
 			t.Fatalf("move failed: %v", err)
 		}
 		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil })); err != nil {
 			t.Fatalf("schedule failed: %v", err)
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		if err := commit.MoveTo(ctx); err != nil {
 			t.Fatalf("move failed: %v", err)
@@ -414,6 +414,6 @@ func TestDetachTwiceAfterMovingOnPanics(t *testing.T) {
 		if occ := occupancyOf(c, fo); occ != 0 {
 			t.Errorf("fan-out occupancy = %d after the item moved on, want 0", occ)
 		}
-		_ = fo.Detach(ctx)
+		_ = fo.Retain(ctx)
 	})
 }

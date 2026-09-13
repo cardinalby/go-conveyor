@@ -46,17 +46,18 @@ func (w *windowedInt) snapshot() Gauge {
 }
 
 // UnitStat is the per-node portion of Stats. Unit is the handle (a Stage, a FanOut, a Pool, a Lane, or
-// Conveyor.StartUnit) that produced it, for matching a stat back to what was built.
+// Conveyor.StartUnit) that produced it.
 //
-// Occupied and Limit describe the node itself: items running its code, with work outstanding, or occupying a
-// branch's entrance. A slot also counts while a Stage.Retain or a FanOut.Detach keeps it for work in flight, and
-// while an item admitted to an AdmitByPoolsStrict fan-out keeps the previous node's slot until its first Schedule has
-// started (see FanOutAdmission) — so a node's occupancy may include items that are already in the next one. Queued
-// describes what is waiting in front of it — items in a stage's or fan-out's waiting room (under AdmitByPoolsStrict
-// possibly a token kept by an item already admitted from that room), or, for a branch, the collections (the tasks
-// one Schedule call queued there) not yet fully handed out. An item may have several collections queued on one
-// branch, so a branch's backlog is not bounded by its fan-out's limit; running work is never counted. Held tokens
-// are not reported separately.
+// Occupied and Limit describe the node itself. A slot counts while an item runs the node's code or has work
+// outstanding there, while Stage.Retain or FanOut.Retain keeps it for work in flight, and while an item admitted to a
+// Balanced or Strict fan-out still keeps the previous node's slot (see FanOutBackpressure). So a node's occupancy
+// may include items that are already in the next node. Work prepared with Schedule before entering a fan-out is
+// not counted anywhere.
+//
+// Queued describes what waits in front of the node: items in a waiting room (under Balanced or Strict, possibly an
+// item already admitted to the fan-out from that room), or, for a branch, the submissions whose tasks are not all
+// handed out yet: one per Schedule call after entry, and one for all calls before entry together. Running work is
+// never counted, and a branch's backlog is not bounded by its fan-out's limit.
 type UnitStat struct {
 	Unit     Unit
 	Occupied Gauge // slots of the node in use since the previous Stats read

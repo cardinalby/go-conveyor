@@ -140,13 +140,14 @@ func TestFanOutSlotHeldUntilNextAdmission(t *testing.T) {
 	})
 }
 
-// TestFanOutReleasesPreviousStageAtAdmission: the previous stage is freed as soon as the item is admitted to the
-// fan-out — before it schedules anything, and long before that work finishes. The fan-out's door is another matter:
-// the item behind cannot enter the node until the item ahead has scheduled once, whatever the limit says.
+// TestFanOutReleasesPreviousStageAtAdmission: under Buffered backpressure the previous stage is freed as soon as the
+// item is admitted to the fan-out — before it schedules anything, and long before that work finishes. The fan-out's
+// door is another matter: the item behind cannot enter the node until the item ahead has scheduled once, whatever
+// the limit says.
 func TestFanOutReleasesPreviousStageAtAdmission(t *testing.T) {
 	c := NewConveyor()
 	write := c.AddStage(OptName("write"))
-	fo := c.AddFanOut(OptName("fo")).SetLimit(4)
+	fo := c.AddFanOut(OptName("fo")).SetLimit(4).SetBackpressure(BackpressureBuffered)
 	pool := fo.AddPool(OptName("pool")).SetLimit(4)
 
 	secondAtDoor := make(chan struct{})
@@ -217,7 +218,7 @@ func TestPoolRunsTasksInParallelUpToLimit(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		return w.Err()
 	})
@@ -250,7 +251,7 @@ func TestPoolRunsSequentiallyByDefault(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		return w.Err()
 	})
@@ -323,7 +324,7 @@ func TestFanOutOverSubscribedPoolDrains(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		return w.Err()
 	})
@@ -367,7 +368,7 @@ func TestFanOutMultiplePoolsDifferentLimits(t *testing.T) {
 }
 
 // TestFanOutEmptyScheduleIsLegal: scheduling nothing is legal — the item is inside the node with an empty body, and
-// detaching it hands back an already-finished wave.
+// retaining it hands back an already-finished wave.
 func TestFanOutEmptyScheduleIsLegal(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -392,7 +393,7 @@ func TestFanOutEmptyScheduleIsLegal(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				w := fo.Detach(ctx)
+				w := fo.Retain(ctx)
 				select {
 				case <-w.Finished():
 				default:
@@ -470,7 +471,7 @@ func TestFanOutJoinHappensBeforeNewWorkStarts(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w1 := first.Detach(ctx)
+		w1 := first.Retain(ctx)
 		err = second.MoveTo(ctx)
 		if err == nil {
 			err = w1.Wait(ctx) // wait for w1 here: all of first's work must be done before second's starts
@@ -530,7 +531,7 @@ func TestDeferredJoinOverlapsInlineWork(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		if err := transform.MoveTo(ctx); err != nil { // no join here
 			return err
 		}
@@ -626,7 +627,7 @@ func TestFanOutSiblingTasksSeeCancellation(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ic)
+		w := fo.Retain(ic)
 		<-w.Finished()
 		return w.Err()
 	})

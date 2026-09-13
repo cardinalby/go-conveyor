@@ -149,6 +149,7 @@ func (c *conveyor) actingItem(ctx context.Context, verb string, u *unit, checkCa
 	}
 	if checkCancel {
 		if err := it.cancelCause(ctx); err != nil {
+			r.dropDormantIfCanceled(it)
 			r.mu.Unlock()
 			return nil, nil, err
 		}

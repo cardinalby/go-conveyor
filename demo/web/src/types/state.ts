@@ -1,6 +1,6 @@
 // Mirrors demo/internal/runtime.State / NodeState — the run-mode poll response. Keep in sync by hand.
 
-import type { FanOutAdmission } from "./pipeline";
+import type { FanOutBackpressure } from "./pipeline";
 
 /** One (item number, lane-child ordinal path) pair currently occupying a node reachable through some lane's
  * interior — see Go's topology.LanePathEntry. A child always inherits its parent's item number, so this is the
@@ -12,8 +12,8 @@ export interface LanePathEntry {
 }
 
 /** One node's live state: its current dials and exactly who occupies it (null once nothing is running).
- * pendingEntry is only ever non-empty for a fan-out: the items entering it (MoveTo) or admitted but whose
- * Schedule call has not returned yet (tasks not dispatched). blockedLeaving is only ever non-empty for the start
+ * pendingEntry is only ever non-empty for a fan-out: the items that prepared their work (Schedule, before entry)
+ * but have not yet been admitted with that work activated (MoveTo). blockedLeaving is only ever non-empty for the start
  * stage or a plain stage: the InBody items that finished this node's own work and are now trying to advance into
  * the next one.
  * See pipeline/itemPositions.ts's ItemFill for how both feed the item circle's fill. */
@@ -21,8 +21,8 @@ export interface NodeState {
   id: string;
   limit: number;
   queueSize: number;
-  /** A fan-out's live admission policy; absent for every other kind of node. */
-  admission?: FanOutAdmission;
+  /** A fan-out's live backpressure mode; absent for every other kind of node. */
+  backpressure?: FanOutBackpressure;
   delayMs: number;
   /** How many tasks/children (see Go's Branch.NewTasks) one item schedules on this branch. Always 0 for anything
    * but a pool or a lane. */

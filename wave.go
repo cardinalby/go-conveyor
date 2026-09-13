@@ -5,21 +5,21 @@ import (
 	"fmt"
 )
 
-// Wave is a handle to background work an item started: a Stage.Retain operation, or work at a fan-out taken over
-// with FanOut.Detach. Wait for it with Wait, before or after the next MoveTo — the choice decides which node's slot
-// the item holds meanwhile — or read Finished and Err.
+// Wave is a handle to background work an item started: a Stage.Retain operation, or fan-out work handed over with
+// FanOut.Retain. Wait for it with Wait, before or after the next MoveTo (the choice decides which node's slot the
+// item holds meanwhile), or read Finished and Err.
 //
 // A wave whose error nobody observes still fails the item when it completes.
 type Wave interface {
-	// Started is closed once the wave is sealed (detached, or its item moved on) and every task the ItemProcessor
-	// scheduled into it has been handed out — its streaming sources drained, or the item canceled. Work that tasks
-	// or lane children scheduled themselves does not count and does not delay it. Relevant mainly for streaming
-	// sources (NewTasksGen, NewTasksChan): state they read must not be mutated until it closes.
+	// Started is closed once the item has stopped adding to the wave (it retained or moved on) and every task the
+	// ItemProcessor scheduled into it has been handed out: its streaming sources drained, or the item canceled. Work
+	// that tasks or lane children scheduled themselves does not delay it. Use it with streaming sources (NewTasksGen,
+	// NewTasksChan): state they read must not be mutated until it closes.
 	Started() <-chan struct{}
 
-	// Finished is closed once the wave is sealed and every task of this wave has finished — including work those
-	// tasks scheduled themselves — or was skipped because the item was canceled. After it is closed, Err reports
-	// the outcome.
+	// Finished is closed once every task of this wave has finished, including work those tasks scheduled themselves,
+	// or was skipped because the item was canceled, and the item has stopped adding to the wave. After it is closed, Err
+	// reports the outcome.
 	Finished() <-chan struct{}
 
 	// Err returns the first error the wave's work produced, or nil. It is only final once Finished is closed.
@@ -30,15 +30,15 @@ type Wave interface {
 	// ("<node> work: ..."), or nil. Only the item that created the wave may call it, with its own context or one
 	// derived from it.
 	//
-	// A failing task poisons the item, so a wait in progress wakes at once. If the wave is finished by then, its
-	// error is returned and counts as observed. If the wave is still winding down (other tasks running), the
-	// item's cancellation cause is returned and the outcome stays unobserved: wait for Finished and read Err, or
-	// call Wait again after Finished is closed. A canceled item never gets nil. A canceled call context (a deadline
-	// the caller added) ends the wait the same way.
+	// A failing task cancels the item, so a wait in progress wakes at once. If the wave is finished by then, its error
+	// is returned and counts as observed. If other tasks are still winding down, the item's cancellation cause is
+	// returned and the outcome stays unobserved: wait for Finished and read Err, or call Wait again after Finished is
+	// closed. A canceled item never gets nil. A canceled call context (a deadline the caller added) ends the wait the
+	// same way.
 	//
-	// It returns ErrForeignContext for a context without an item and ErrStaleContext once the item has finished.
-	// It panics on misuse: a wave of another item (a lane child may wait only on its own waves), or a task's
-	// context (a task must never wait for other work).
+	// It returns ErrForeignContext for a context without an item and ErrStaleContext once the item has finished. It
+	// panics on misuse: a wave of another item (a lane child may wait only on its own waves), or a task's context (a
+	// task must never wait for other work).
 	Wait(ctx context.Context) error
 }
 
@@ -51,18 +51,18 @@ type wave struct {
 	it *item
 
 	// retainUnit is the unit whose slot this wave holds until its work is done: the stage a Stage.Retain was called
-	// on, or the fan-out a FanOut.Detach handed over. nil while a fan-out's work is still the node's body — then the
+	// on, or the fan-out a FanOut.Retain handed over. nil while a fan-out's work is still the node's body — then the
 	// item itself holds the slot, because it cannot leave until the work is done.
 	retainUnit *unit
 
-	// atNode is the fan-out node whose body this wave is (nil for a Retain or standalone wave). It names the node in
-	// the error of an implicit join, and it is what lets Detach tell this wave apart from one the item detached at an
-	// earlier fan-out and is still carrying.
+	// atNode is the fan-out node whose body this wave is (nil for a Stage.Retain or standalone wave). It names the node
+	// in the error of an implicit join, and it is what lets FanOut.Retain tell this wave apart from one the item
+	// retained at an earlier fan-out and is still carrying.
 	atNode *unit
 
 	// sealed records that nothing more can be added to the wave through its item's own path; only the wave's own
 	// running work may still add to it. The channels close only once the wave is sealed (see settle). Every wave is
-	// born sealed except a fan-out body, which is sealed when its item leaves the node, detaches, or completes.
+	// born sealed except a fan-out body, which is sealed when its item leaves the node, retains, or completes.
 	sealed bool
 	// unexhausted is the number of this wave's task collections (one per branch touched by a submission) that may
 	// still produce work. Together with running it decides idle.
@@ -74,8 +74,11 @@ type wave struct {
 	// running is the number of this wave's tasks (or child items) that have started but not finished.
 	running int
 	// rootSubmitted records that a root submission has reached this body, so only the first one is the entering
-	// submission of an AdmitByPools admission (see run.markEntering).
+	// submission of a Balanced/Strict admission (see run.markEntering).
 	rootSubmitted bool
+	// hold is the upstream hold the admission that opened this body deferred, nil under Buffered (see upstreamHold).
+	// It lives on the wave, not the item, so the body's own progress finds it after the item has moved on.
+	hold *upstreamHold
 
 	// err is the first error produced by the wave's work; it is also set as the cancellation cause of the
 	// owning item's context (fail-fast).
@@ -112,8 +115,8 @@ func newWave(r *run, it *item) *wave {
 }
 
 // finishedWave returns a wave of it that is already complete, carrying err. It is used for the degenerate cases
-// that must still hand back a usable handle: a MoveTo that could not enter, and a Retain that declined to run its
-// bgOp. The error is registered on the item, so ignoring the handle still fails the item (see Wave). Caller holds
+// that must still hand back a usable handle: a MoveTo that could not enter, and a Stage.Retain that declined to run
+// its bgOp. The error is registered on the item, so ignoring the handle still fails the item (see Wave). Caller holds
 // run.mu.
 func finishedWave(r *run, it *item, err error) *wave {
 	w := newWave(r, it)
@@ -274,7 +277,7 @@ func (w *wave) settle() {
 }
 
 // releaseRetained gives back the slot this wave was holding on its item's behalf — the stage of a Stage.Retain, or the
-// fan-out of a FanOut.Detach — now that its work is done. It only frees it if the item has already moved past that
+// fan-out of a FanOut.Retain — now that its work is done. It only frees it if the item has already moved past that
 // node; if the item is still in it, the item's next move does the freeing (releaseBelow no longer skips the unit once
 // the wave has finished). Together those two are the "whichever happens last" half of the contract: an item never sits
 // in a node holding nothing, and a slot never outlives the work it was kept for.

@@ -3,17 +3,27 @@
 
 export type BranchKind = "pool" | "lane";
 
-/** A fan-out's admission policy — mirrors Go's topology.Admission / conveyor.FanOutAdmission. "limit" (the default)
- * admits on a free item slot and releases the previous node at once; "pools" also needs a branch with free capacity
- * (conveyor.AdmitByPools); "poolsStrict" on top keeps the previous node's slot until the item's first Schedule has
- * started on every branch it touched, so a saturated pool pushes back upstream (conveyor.AdmitByPoolsStrict). */
-export type FanOutAdmission = "limit" | "pools" | "poolsStrict";
+/** A fan-out's backpressure mode — mirrors Go's topology.Backpressure / conveyor.FanOutBackpressure: when an item
+ * that entered the fan-out releases the slot it held in the previous node (or its waiting-room token). "buffered"
+ * releases it on entry; "balanced" (the default) when the first task of its initial batch starts; "strict" when every
+ * branch of that batch has started one task, so a saturated pool pushes back upstream. */
+export type FanOutBackpressure = "buffered" | "balanced" | "strict";
 
-export const FAN_OUT_ADMISSIONS: readonly FanOutAdmission[] = ["limit", "pools", "poolsStrict"];
+export const FAN_OUT_BACKPRESSURES: readonly FanOutBackpressure[] = ["buffered", "balanced", "strict"];
 
-/** Narrows an untrusted string (URL state, a <select> value) to a policy; anything unknown is the default. */
-export function toFanOutAdmission(v: unknown): FanOutAdmission {
-  return v === "pools" || v === "poolsStrict" ? v : "limit";
+/** Narrows an untrusted string (URL state, a <select> value) to a mode; anything unknown is the default. The three
+ * names of the removed admission policies still decode, so an old link keeps its meaning. */
+export function toFanOutBackpressure(v: unknown): FanOutBackpressure {
+  switch (v) {
+    case "buffered":
+    case "limit":
+      return "buffered";
+    case "strict":
+    case "poolsStrict":
+      return "strict";
+    default:
+      return "balanced";
+  }
 }
 
 export interface PoolBranch {
@@ -58,7 +68,7 @@ export interface FanOutNode {
   name: string;
   limit: number;
   queueSize: number;
-  admission: FanOutAdmission;
+  backpressure: FanOutBackpressure;
   branches: BranchNode[];
 }
 

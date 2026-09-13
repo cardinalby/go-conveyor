@@ -298,7 +298,7 @@ func TestUnclosedChannelSourceBlocksWait(t *testing.T) {
 // --- misuse ---
 
 // TestWaitOutsideAnOpenBodyPanics: Wait needs an open body at this fan-out: none before entering, a closed one after
-// leaving, a detached one after Detach.
+// leaving, a retained one after Retain.
 func TestWaitOutsideAnOpenBodyPanics(t *testing.T) {
 	t.Run("before entering", func(t *testing.T) {
 		c := NewConveyor()
@@ -321,15 +321,15 @@ func TestWaitOutsideAnOpenBodyPanics(t *testing.T) {
 			_ = fo.Wait(ctx)
 		})
 	})
-	t.Run("after Detach", func(t *testing.T) {
+	t.Run("after Retain", func(t *testing.T) {
 		c := NewConveyor()
 		fo := c.AddFanOut(OptName("fo"))
 		_ = fo.AddPool(OptName("pool"))
-		panicsInItem(t, c, errWorkDetached, func(ctx context.Context) {
+		panicsInItem(t, c, errWorkRetained, func(ctx context.Context) {
 			if err := fo.MoveTo(ctx); err != nil {
 				t.Fatalf("move failed: %v", err)
 			}
-			_ = fo.Detach(ctx)
+			_ = fo.Retain(ctx)
 			_ = fo.Wait(ctx)
 		})
 	})

@@ -2,6 +2,7 @@ package conveyor
 
 import (
 	"context"
+	"math"
 	"sync"
 )
 
@@ -49,17 +50,16 @@ type run struct {
 	shutdownCh   chan struct{}
 }
 
-// ItemProcessor processes one item, moving it through the conveyor's nodes with Stage.MoveTo / FanOut.MoveTo,
-// using the context it receives. It need not enter every node and may return early.
+// ItemProcessor processes one item, moving it through the conveyor's nodes with Stage.MoveTo / FanOut.MoveTo using
+// the context it receives. It need not enter every node and may return early.
 //
 // Returning an error shuts the conveyor down: no new items are created, later items are canceled, and earlier ones
 // are allowed to finish.
 //
-// Cancellation is judged by the item, not by the context passed to a node method: once the item's own context is
-// canceled (a failed task or Retain, a shutdown), every node method returns the cause, even when called with a
-// context that hides the cancellation (context.WithoutCancel). A derived context with its own deadline still works.
-// Code that must run after cancellation can still run in plain Go once the node method has returned; it just cannot
-// run inside a node.
+// Cancellation is judged by the item's own context. Once it is canceled (a failed task or Retain, a shutdown), every
+// node method returns the cause, even when called with a context that hides the cancellation
+// (context.WithoutCancel). A derived context with its own deadline still works. Code that must run after
+// cancellation can still run in plain Go once the node method has returned; it just cannot run inside a node.
 type ItemProcessor func(ctx context.Context) error
 
 // Run drives items through the conveyor until ctx is canceled or an item fails (see the Conveyor interface).
@@ -277,6 +277,7 @@ func (r *run) completeItem(it *item, procErr error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	it.returned = true
+	r.dropDormant(it, math.MaxInt) // work prepared for a fan-out never entered: nothing waits for it
 
 	// A real processor error aborts the item's own still-running background work; a graceful return lets it
 	// finish (a live task owns its slot and cannot be force-freed).

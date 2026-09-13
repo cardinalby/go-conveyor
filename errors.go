@@ -92,22 +92,22 @@ var (
 	// from the first Run on).
 	errConveyorFinalized = errors.New("cannot change the topology after the conveyor has run")
 
-	// errStageNotEntered is panicked with by Stage.Retain and FanOut.Detach when the current item does not occupy the
+	// errStageNotEntered is panicked with by Stage.Retain and FanOut.Retain when the current item does not occupy the
 	// node it is trying to hand its slot to, and by FanOut.Schedule / FanOut.Wait at a fan-out the item never entered.
 	// Its message reads as a trailing clause of the wrapped panic.
 	errStageNotEntered = errors.New("the item does not currently occupy it")
 
-	// errNothingToDetach is panicked with by FanOut.Detach when the item has no body to hand over at this fan-out:
-	// the body is closed (the item left, or tried to and failed), or it was already detached.
-	errNothingToDetach = errors.New("the item has no work to detach here")
+	// errNothingToRetain is panicked with by FanOut.Retain when the item has no body to hand over at this fan-out:
+	// the body is closed (the item left, or tried to and failed), or it was already retained.
+	errNothingToRetain = errors.New("the item has no work to retain here")
 
 	// errBodyClosed is panicked with when the ItemProcessor adds to or waits for its body at a fan-out after closing
 	// it: by leaving (a leave that fails after the body was joined still closes it), or by returning.
 	errBodyClosed = errors.New("the item's body at this fan-out is closed")
 
-	// errWorkDetached is panicked with when the ItemProcessor adds to or waits for its body at a fan-out where it
-	// detached the work: from Detach on, the body belongs to the returned wave.
-	errWorkDetached = errors.New("the item's work at this fan-out was detached")
+	// errWorkRetained is panicked with when the ItemProcessor adds to or waits for its body at a fan-out where it
+	// retained the work: from Retain on, the body belongs to the returned wave.
+	errWorkRetained = errors.New("the item's work at this fan-out was retained")
 
 	// errWrongEnterOrder is panicked with by MoveTo when the target is behind the item's furthest rank (items move
 	// forward only).

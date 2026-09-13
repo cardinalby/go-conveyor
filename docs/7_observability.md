@@ -52,9 +52,9 @@ And per node, in `UnitStat`:
 
 | Field      | Meaning                                                                                                                                                                                |
 |------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `Occupied` | items running a stage's code / items with work outstanding in a fan-out / pieces of a branch's work in flight (for a lane: children at its entrance).                                  |
+| `Occupied` | items running a stage's code / items inside a fan-out (entered and not yet moved on) / pieces of a branch's work in flight (for a lane: children at its entrance). Also a slot kept by an item that has moved on: a `Retain` in flight, or the previous stage's slot an item already inside a `Balanced` or `Strict` fan-out still holds (see below). |
 | `Limit`    | that node's capacity — the denominator. It travels with `Occupied` because 3 is saturated at limit 3 and idle at limit 300, and the two are read under one lock, so they always agree. |
-| `Queued`   | what is piled up **in front of** the node: items in a stage's or fan-out's waiting room, or — for a branch — collections of work (one per `Schedule` call that touched the branch) not yet fully handed out. |
+| `Queued`   | what is piled up **in front of** the node: items in a stage's or fan-out's waiting room, or — for a branch — collections of work not yet fully handed out (one per `Schedule` call after entry that touched the branch; all calls before entry form one). |
 
 `Queued` needs no capacity to interpret: any queueing at all means that node is not keeping up with its input, which
 is why the configured waiting-room size is not reported here. Read it back from the handle (`Stage.QueueSize` /
@@ -62,6 +62,23 @@ is why the configured waiting-room size is not reported here. Read it back from 
 the fan-out may have several collections queued on one branch (a later round, follow-ups scheduled by its tasks), so
 the backlog is not bounded by the fan-out's limit either. Running work is never counted there — a collection leaves
 the backlog as soon as its last callback has been handed out.
+
+## Slots held by items that moved on
+
+Some slots belong to an item that is already in a later node:
+
+- a `Stage.Retain` or `FanOut.Retain` in flight keeps its node's slot until the work is done;
+- under `BackpressureBalanced` or `BackpressureStrict` an item inside a fan-out keeps the previous stage's slot (or
+  its waiting-room slot, counted in that node's `Queued`) until its initial batch has started
+  (see [SetBackpressure](4_fan-out.md#setbackpressure-when-the-previous-stage-is-released)).
+
+Both show up as ordinary `Occupied` (or `Queued`) of the earlier node, and
+[DebugUnitOccupants](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Conveyor.DebugUnitOccupants) lists the item
+under both nodes. A `read` stage that stays saturated while `dbsWrite` has room is the sign of items waiting for a
+full pool; the pool's `Queued` names it. Held slots are not reported as a separate figure.
+
+Work prepared with `Schedule` before entering a fan-out is not shown anywhere: it is neither occupancy nor backlog
+until the item enters.
 
 So the two signals worth alerting on are `Occupied.Max == Limit` (saturated) and a `Queued` that never returns to
 zero (falling behind) — and the node they point at is the one to give more capacity, with `SetLimit` or

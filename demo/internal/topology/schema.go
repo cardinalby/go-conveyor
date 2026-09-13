@@ -31,14 +31,14 @@ const (
 	KindLane BranchKind = "lane"
 )
 
-// Admission names a fan-out's admission policy (see conveyor.FanOutAdmission). The zero value means AdmissionByLimit,
-// so a Spec saved before this field existed keeps the behavior it had.
-type Admission string
+// Backpressure names a fan-out's backpressure mode (see conveyor.FanOutBackpressure). The zero value means
+// BackpressureBalanced, the library's default.
+type Backpressure string
 
 const (
-	AdmissionByLimit       Admission = "limit"       // conveyor.AdmitByLimit
-	AdmissionByPools       Admission = "pools"       // conveyor.AdmitByPools: enter only while a pool has room
-	AdmissionByPoolsStrict Admission = "poolsStrict" // conveyor.AdmitByPoolsStrict: also keep the previous node until the work starts
+	BackpressureBuffered Backpressure = "buffered" // conveyor.BackpressureBuffered: release the previous slot on entry
+	BackpressureBalanced Backpressure = "balanced" // conveyor.BackpressureBalanced: release it when the first task starts
+	BackpressureStrict   Backpressure = "strict"   // conveyor.BackpressureStrict: release it when every touched branch has started a task
 )
 
 // BranchSpec is one branch of a FanOutSpec, built as a conveyor.Pool or a conveyor.Lane depending on Kind.
@@ -65,14 +65,14 @@ type BranchSpec struct {
 // to a node's Kind are left zero and ignored (Branches for a stage, DelayMs for a fan-out — a fan-out runs no code
 // of its own, only its branches do).
 type NodeSpec struct {
-	ID        string       `json:"id"`
-	Kind      NodeKind     `json:"kind"`
-	Name      string       `json:"name"`
-	Limit     int          `json:"limit"`
-	QueueSize int          `json:"queueSize"`
-	DelayMs   int          `json:"delayMs"`             // stage only
-	Admission Admission    `json:"admission,omitempty"` // fanout only; empty means AdmissionByLimit
-	Branches  []BranchSpec `json:"branches,omitempty"`  // fanout only, at least 2 branches
+	ID           string       `json:"id"`
+	Kind         NodeKind     `json:"kind"`
+	Name         string       `json:"name"`
+	Limit        int          `json:"limit"`
+	QueueSize    int          `json:"queueSize"`
+	DelayMs      int          `json:"delayMs"`                // stage only
+	Backpressure Backpressure `json:"backpressure,omitempty"` // fanout only; empty means BackpressureBalanced
+	Branches     []BranchSpec `json:"branches,omitempty"`     // fanout only, at least 2 branches
 }
 
 // Spec is a full pipeline topology built by the UI's build mode: an ordered list of nodes, left to right. The

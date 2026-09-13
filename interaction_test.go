@@ -48,7 +48,7 @@ func TestCanceledItemsQueuedWorkIsSkipped(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ic)
+		w := fo.Retain(ic)
 		<-w.Finished() // must resolve even though most of the work was dropped
 		resolved <- ran.Load()
 		return w.Err()
@@ -156,12 +156,12 @@ func TestRetainReleasesWhileItemSitsInFanOut(t *testing.T) {
 }
 
 // TestEmptyFanOutIsAUsableNode: a fan-out with no branches is a degenerate but legal node — it still occupies a
-// position and can be entered (releasing the previous node). An empty visit never schedules, so it holds the item
-// behind at the door until the visitor leaves: the node behaves as if its limit were one.
+// position and can be entered (releasing the previous node under Buffered). An empty visit never schedules, so it
+// holds the item behind at the door until the visitor leaves: the node behaves as if its limit were one.
 func TestEmptyFanOutIsAUsableNode(t *testing.T) {
 	c := NewConveyor()
 	write := c.AddStage(OptName("write"))
-	empty := c.AddFanOut(OptName("empty")).SetLimit(4)
+	empty := c.AddFanOut(OptName("empty")).SetLimit(4).SetBackpressure(BackpressureBuffered)
 	commit := c.AddStage(OptName("commit"))
 
 	secondInWrite := make(chan struct{}) // item 2 left the start: item 1 is inside empty and released write

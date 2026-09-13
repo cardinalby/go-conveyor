@@ -30,7 +30,7 @@ func TestNewTaskRunsExactlyOneCallback(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		return w.Err()
 	})
@@ -78,7 +78,7 @@ func TestNewTasksAreBuiltLazilyOnePerFreedSlot(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-firstIn
 		// Index 0 holds the pool's only slot: no later index can have been built or started, and the wave cannot
 		// have handed out all of its work yet.
@@ -130,7 +130,7 @@ func TestNewTasksNonPositiveCountIsNoOp(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			w := fo.Detach(ctx)
+			w := fo.Retain(ctx)
 			select {
 			case <-w.Finished():
 				bornFinished.Store(true)
@@ -188,7 +188,7 @@ func TestNewTasksGenPulledOnePerFreedSlot(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-firstIn
 		pullsWhileBlocked = pulls.Load()
 		select {
@@ -253,7 +253,7 @@ func TestNewTasksGenPullIsSerializedAndHoldsASlot(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-pulling
 		waitFor(t, "the pending pull to reserve a pool slot", func() bool {
 			return started.Load() == 1 && occupancyOf(c, pool) == 2
@@ -310,7 +310,7 @@ func TestNewTasksGenStopsPullingWhenItemIsCanceled(t *testing.T) {
 		if ferr != nil {
 			return ferr
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Started()
 		<-w.Finished()
 		return w.Err()
@@ -342,7 +342,7 @@ func TestNewTasksGenNilIsNoOp(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		select {
 		case <-w.Finished():
 			bornFinished.Store(true)
@@ -417,7 +417,7 @@ func TestNewTasksChanArrivesAsSentAndStartedWaitsForClose(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		if err := mid.MoveTo(ctx); err != nil { // the conveyor consumes the channel while the item moves on
 			return err
 		}
@@ -485,7 +485,7 @@ func TestNewTasksChanStopsConsumingWhenItemIsCanceled(t *testing.T) {
 		if ferr != nil {
 			return ferr
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		return w.Err()
 	})
@@ -517,7 +517,7 @@ func TestNewTasksChanNilIsNoOp(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		select {
 		case <-w.Finished():
 			bornFinished.Store(true)
@@ -575,7 +575,7 @@ func TestMixedSourcesOnOnePoolConsumeInSubmissionOrder(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		if got := len(events.all()); got != len(want) {
 			t.Errorf("%d callbacks had run when the wave finished, want all %d", got, len(want))
@@ -633,7 +633,7 @@ func TestMixedSourcesAcrossPoolsInOneSchedule(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		if la, lb, ld := len(aEvents.all()), len(bEvents.all()), len(dEvents.all()); la != 3 || lb != 3 || ld != 2 {
 			t.Errorf("when the wave finished: a=%d b=%d d=%d, want 3/3/2", la, lb, ld)
@@ -738,7 +738,7 @@ func TestOverSubscribedStreamingPoolDrains(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		return w.Err()
 	})

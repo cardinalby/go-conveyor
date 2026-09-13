@@ -1,6 +1,6 @@
 import { START_ID } from "../types/topology";
 import { DEFAULT_ENTRANCE_NAME, DEFAULT_START_NAME, positionalBranchName, positionalNodeName } from "./names";
-import type { FanOutAdmission, Pipeline, PipelineNode } from "../types/pipeline";
+import type { FanOutBackpressure, Pipeline, PipelineNode } from "../types/pipeline";
 import type { LanePathEntry, NodeState, RunState } from "../types/state";
 
 export interface ResolvedPool {
@@ -66,7 +66,7 @@ export interface ResolvedFanOut {
   name: string;
   limit: number;
   queueSize: number;
-  admission: FanOutAdmission;
+  backpressure: FanOutBackpressure;
   inBody: number[];
   inQueue: number[];
   pendingEntry: number[];
@@ -169,7 +169,7 @@ function sameFanOut(a: ResolvedFanOut, b: ResolvedFanOut): boolean {
     a.name === b.name &&
     a.limit === b.limit &&
     a.queueSize === b.queueSize &&
-    a.admission === b.admission &&
+    a.backpressure === b.backpressure &&
     sameNums(a.inBody, b.inBody) &&
     sameNums(a.inQueue, b.inQueue) &&
     sameNums(a.pendingEntry, b.pendingEntry) &&
@@ -243,7 +243,7 @@ function resolveNodes(nodes: PipelineNode[], live: Map<string, NodeState>): Reso
       name: fanoutName,
       limit: fo?.limit ?? n.limit,
       queueSize: fo?.queueSize ?? n.queueSize,
-      admission: fo?.admission ?? n.admission,
+      backpressure: fo?.backpressure ?? n.backpressure,
       inBody: fo?.inBody ?? [],
       inQueue: fo?.inQueue ?? [],
       pendingEntry: fo?.pendingEntry ?? [],

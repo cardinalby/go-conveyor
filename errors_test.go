@@ -325,7 +325,7 @@ func TestWaveErrorSurfacesFromJoinAndFromErr(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		// The task may fail before or after this move: the move then returns the poison, or nil. Either way the
 		// wave's own error is what Wait reports once the wave is finished.
 		if err := commit.MoveTo(ctx); err != nil && !errors.Is(err, boom) {
@@ -438,7 +438,7 @@ func TestErrNodeAlreadyEnteredFanOut(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		assertPanics(t, errNodeAlreadyEntered, func() {
 			_ = fo.MoveTo(ctx)
 			_ = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
@@ -560,7 +560,7 @@ func TestErrNilTaskFuncFromGeneratorFailsItem(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		return w.Err()
 	})
@@ -587,7 +587,7 @@ func TestErrNilTaskFuncFromChannelFailsItem(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		return w.Err()
 	})
@@ -609,7 +609,7 @@ func TestErrStageNotEnteredOnUnenteredStage(t *testing.T) {
 
 // TestErrStageNotEnteredAfterLeaving: the same once the item has moved on — the stage was entered, but is no longer
 // occupied. A fan-out left behind answers with its body state instead: closed by the leave (errBodyClosed), or handed
-// over by Detach (errWorkDetached), whether or not the item still occupies the node.
+// over by Retain (errWorkRetained), whether or not the item still occupies the node.
 func TestErrStageNotEnteredAfterLeaving(t *testing.T) {
 	t.Run("leave", func(t *testing.T) {
 		c := NewConveyor()
@@ -635,17 +635,17 @@ func TestErrStageNotEnteredAfterLeaving(t *testing.T) {
 			_ = first.Retain(ctx, func() error { return nil })
 		})
 	})
-	t.Run("detach", func(t *testing.T) {
+	t.Run("retain", func(t *testing.T) {
 		c := NewConveyor()
 		fo := c.AddFanOut(OptName("fo"))
 		pool := fo.AddPool(OptName("pool"))
 
-		panicsInItem(t, c, errWorkDetached, func(ctx context.Context) {
+		panicsInItem(t, c, errWorkRetained, func(ctx context.Context) {
 			if err := fo.MoveTo(ctx); err != nil {
 				return
 			}
-			_ = fo.Detach(ctx) // the item still occupies the node, but its body is gone
-			assertPanics(t, errWorkDetached, func() { _ = fo.Wait(ctx) })
+			_ = fo.Retain(ctx) // the item still occupies the node, but its body is gone
+			assertPanics(t, errWorkRetained, func() { _ = fo.Wait(ctx) })
 			_ = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
 		})
 	})
@@ -676,7 +676,7 @@ func TestErrWrongScopeChildMovingToConveyorNode(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		return w.Err()
 	})
@@ -721,7 +721,7 @@ func TestErrWrongScopeIsCheckedOnEveryEntryPoint(t *testing.T) {
 		{"FanOut.TryMoveTo", func(_ Stage, f FanOut, b Branch, ctx context.Context) {
 			_, _ = f.TryMoveTo(ctx)
 		}},
-		{"FanOut.Detach", func(_ Stage, f FanOut, _ Branch, ctx context.Context) { _ = f.Detach(ctx) }},
+		{"FanOut.Retain", func(_ Stage, f FanOut, _ Branch, ctx context.Context) { _ = f.Retain(ctx) }},
 		{"FanOut.Schedule", func(_ Stage, f FanOut, b Branch, ctx context.Context) {
 			_ = f.Schedule(ctx, b.NewTask(func(context.Context) error { return nil }))
 		}},
@@ -774,7 +774,7 @@ func TestErrCannotMoveFromNonTravellingWork(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		return w.Err()
 	})
@@ -813,7 +813,7 @@ func TestErrForeignWaveFromAnotherItem(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			w := fo.Detach(ic)
+			w := fo.Retain(ic)
 			waves <- w
 			return commit.MoveTo(ic)
 		case 2:

@@ -43,6 +43,8 @@ func (t Task) branchName() string {
 type taskSource interface {
 	// claim marks the source as consumed by a Schedule call; it reports false if it was already claimed.
 	claim() bool
+	// isClaimed reports whether claim has succeeded, without claiming.
+	isClaimed() bool
 	// isSync reports whether pull is free of user code and safe to call under run.mu.
 	isSync() bool
 	// pull returns the next callback, or ok == false once the source is exhausted. Async sources treat ctx
@@ -70,6 +72,8 @@ func (s *sourceState) claim() bool {
 	s.claimed = true
 	return true
 }
+
+func (s *sourceState) isClaimed() bool { return s.claimed }
 
 // release is a no-op for the eager sources, which hold nothing but their own state; the streaming ones override it.
 func (s *sourceState) release() {}

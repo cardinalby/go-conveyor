@@ -130,11 +130,11 @@ type propNode struct {
 // propJitter is one node a scenario may resize while the conveyor runs. setQueue is nil for a lane, which has no
 // waiting room of its own; g is nil for a fan-out node, whose occupancy no instrumented region measures.
 type propJitter struct {
-	name         string
-	setLimit     func(int)
-	setQueue     func(int)
-	setAdmission func(FanOutAdmission) // fan-out nodes only: the admission policy is live too
-	g            *propGauge
+	name            string
+	setLimit        func(int)
+	setQueue        func(int)
+	setBackpressure func(FanOutBackpressure) // fan-out nodes only: the backpressure mode is live too
+	g               *propGauge
 }
 
 // propTopology is a generated conveyor plus everything the invariants are checked against.
@@ -156,7 +156,7 @@ type propTopology struct {
 	// run is the live run, captured through implOf by the first item to be processed, so the leak check can inspect
 	// its counters after Run returned (Stats is the zero value by then).
 	run atomic.Pointer[run]
-	// waves collects every wave the scenario detached, root and interior alike; all must be finished after the run.
+	// waves collects every wave the scenario retained, root and interior alike; all must be finished after the run.
 	wavesMu sync.Mutex
 	waves   []Wave
 	// orderViolations counts slot hand-outs that found an older item's work still queued on the branch (see onAssign).
@@ -251,12 +251,12 @@ func buildPropTopology(rnd *rand.Rand, seed int64) *propTopology {
 		if rnd.Intn(4) == 0 {
 			fo.SetQueueSize(1 + rnd.Intn(3))
 		}
-		fo.SetAdmission(FanOutAdmission(rnd.Intn(3))) // by limit, by pools, or by pools with an upstream hold
+		fo.SetBackpressure(FanOutBackpressure(rnd.Intn(3))) // Balanced or Strict opens an upstream hold; Buffered does not
 		top.jitters = append(top.jitters, propJitter{
-			name:         name,
-			setLimit:     func(n int) { fo.SetLimit(n) },
-			setQueue:     func(n int) { fo.SetQueueSize(n) },
-			setAdmission: func(a FanOutAdmission) { fo.SetAdmission(a) },
+			name:            name,
+			setLimit:        func(n int) { fo.SetLimit(n) },
+			setQueue:        func(n int) { fo.SetQueueSize(n) },
+			setBackpressure: func(m FanOutBackpressure) { fo.SetBackpressure(m) },
 		})
 		pf := &propFanOut{fo: fo}
 		for j, nl := 0, 1+rnd.Intn(3); j < nl; j++ {
@@ -305,7 +305,7 @@ func (top *propTopology) buildLane(rnd *rand.Rand, fo FanOut, name string, inter
 
 	if innerFanOut {
 		inner := l.AddFanOut(OptName(name + ".ifo")).SetLimit(1 + rnd.Intn(2))
-		inner.SetAdmission(FanOutAdmission(rnd.Intn(3))) // strict: a child holds the lane's entrance until its work starts
+		inner.SetBackpressure(FanOutBackpressure(rnd.Intn(3))) // Balanced/Strict: a child holds the lane's entrance until its work starts
 		pf := &propFanOut{fo: inner}
 		for j, nl := 0, 1+rnd.Intn(2); j < nl; j++ {
 			pf.lanes = append(pf.lanes, top.buildLane(rnd, inner, fmt.Sprintf("%s.ifo.l%d", name, j), false))
@@ -336,7 +336,7 @@ func spin() {
 }
 
 // process is the ItemProcessor of a generated scenario: it walks the root nodes, skipping some, scheduling random
-// work on the fan-outs' lanes — in one go and detached, or in rounds with Wait between them — joining waves either at
+// work on the fan-outs' lanes — in one go and retained, or in rounds with Wait between them — joining waves either at
 // the next node or later, and finally committing. Some moves are tried first. With inj set it instead plants exactly
 // one failure (and takes no random shortcuts, so the failure is always reached).
 func (top *propTopology) process(ctx context.Context, no int64, inj *propInjection) error {
@@ -385,13 +385,13 @@ func (top *propTopology) process(ctx context.Context, no int64, inj *propInjecti
 				return err
 			}
 			// The failing item takes the plain shape, so its failure is always scheduled. Otherwise the body is either
-			// scheduled once and detached, or grown in 0-2 rounds of Schedule then Wait and left open — for the next
+			// scheduled once and retained, or grown in 0-2 rounds of Schedule then Wait and left open — for the next
 			// move to join, or for completion to seal if the item returns early or skips the rest.
 			if inj != nil || rnd.Intn(2) == 0 {
 				if err := fo.Schedule(ctx, top.fanOutTasks(ctx, nd.fanOut, rnd, failing, inj, i)...); err != nil {
 					return err
 				}
-				w := fo.Detach(ctx)
+				w := fo.Retain(ctx)
 				top.addWave(w)
 				pending = append(pending, w)
 			} else {
@@ -506,7 +506,7 @@ func (top *propTopology) laneWork(pl *propLane, inject bool, depth int) func(con
 			if err := pl.inner.fo.Schedule(cctx, top.innerTasks(pl.inner)...); err != nil {
 				return err
 			}
-			iw = pl.inner.fo.Detach(cctx)
+			iw = pl.inner.fo.Retain(cctx)
 			top.addWave(iw)
 		}
 		for k, si := range pl.stages {
@@ -579,8 +579,8 @@ func (top *propTopology) jitterCapacities(stop <-chan struct{}, seed int64) {
 		if j.setQueue != nil {
 			j.setQueue(rnd.Intn(4)) // 0 included: taking a waiting room away entirely
 		}
-		if j.setAdmission != nil {
-			j.setAdmission(FanOutAdmission(rnd.Intn(3))) // flip the policy under items waiting at the door
+		if j.setBackpressure != nil {
+			j.setBackpressure(FanOutBackpressure(rnd.Intn(3))) // flip the mode under items waiting at the door
 		}
 		time.Sleep(50 * time.Microsecond) // often enough to interleave, cheap enough not to dominate the run
 	}
@@ -646,8 +646,8 @@ func (top *propTopology) assertBranchOrder(t *testing.T) {
 	}
 }
 
-// assertWavesFinished pins the WAVES FINISH invariant: every wave the scenario detached is finished once Run returned,
-// including the ones whose trees kept growing after the detach.
+// assertWavesFinished pins the WAVES FINISH invariant: every wave the scenario retained is finished once Run returned,
+// including the ones whose trees kept growing after the retain.
 func (top *propTopology) assertWavesFinished(t *testing.T) {
 	t.Helper()
 	top.wavesMu.Lock()
@@ -656,7 +656,7 @@ func (top *propTopology) assertWavesFinished(t *testing.T) {
 		select {
 		case <-w.Finished():
 		default:
-			t.Errorf("seed %d: detached wave %d of %d is not finished after the run", top.seed, i, len(top.waves))
+			t.Errorf("seed %d: retained wave %d of %d is not finished after the run", top.seed, i, len(top.waves))
 		}
 	}
 }
@@ -764,7 +764,7 @@ func TestPropertyRandomFailFast(t *testing.T) {
 }
 
 // TestPropertyCapacityJitterHoldsInvariants is the invariant checker again, with every node's limit and waiting room
-// being resized, and every fan-out's admission policy flipped, from another goroutine throughout the run. It is a separate test rather than an option on the base
+// being resized, and every fan-out's backpressure mode flipped, from another goroutine throughout the run. It is a separate test rather than an option on the base
 // one so a failure says whether live resizing is implicated.
 //
 // Capacity changes are admission-only in both directions, so none of the invariants may bend: order still holds at the

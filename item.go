@@ -51,9 +51,10 @@ type item struct {
 	// nothing per item beyond this int (see the capacity discussion in unit.go).
 	queuedAt int
 	// maxRank is the highest rank this item has published within its scope (its high-water mark). It only ever
-	// increases and drives the ordering gate for the items behind it. A fan-out publishes it at the item's first
-	// Schedule (or leave, or Detach), not at admission, so an item that is inside the node but has not yet scheduled
-	// its work still blocks the next item's entry — which is what keeps each branch's work in item order.
+	// increases and drives the ordering gate for the items behind it. A fan-out publishes it at the item's initial
+	// batch — the activation of prepared work, else the first Schedule (or leave, or Retain) — not at admission
+	// itself, so an item that is inside the node but has not yet scheduled its work still blocks the next item's
+	// entry — which is what keeps each branch's work in item order.
 	maxRank int
 	// reachedRank is the highest rank this item has actually occupied, whether or not it has been published yet. It
 	// says where the item *is*, while maxRank says what the items behind it are allowed to see — the two differ only
@@ -72,25 +73,47 @@ type item struct {
 	// waves are the background-work handles this item created (a fan-out body, Stage.Retain). They are joined when
 	// the item completes, and an error none of them had observed fails the item.
 	waves []*wave
-	// pending is the item's open body: the work scheduled at the fan-out it currently occupies and has not detached,
+	// pending is the item's open body: the work scheduled at the fan-out it currently occupies and has not retained,
 	// which the item must see finish before it may leave (see run.joinPending). nil when the item is not in a
-	// fan-out, or has handed its work over with FanOut.Detach — that is, whenever no entry of body is bodyOpen.
+	// fan-out, or has handed its work over with FanOut.Retain — that is, whenever no entry of body is bodyOpen.
 	pending *wave
 
-	// hold is the release deferred by this item's admission to an AdmitByPoolsStrict fan-out, nil when there is none (see
-	// upstreamHold). At most one at a time: it lives between that admission and the discharge, which comes no later
-	// than the sealing of the body opened by the same admission.
-	hold *upstreamHold
+	// holds are the releases deferred by this item's admissions to Balanced/Strict fan-outs, one per such admission
+	// still pending (see upstreamHold). Several can be live at once: a retained body keeps its hold while the item
+	// enters the next fan-out, whose admission opens another. Each ends on its own body's progress.
+	holds []*upstreamHold
+
+	// dormant is the work this item prepared with FanOut.Schedule for fan-outs of its own scope it has not entered
+	// yet, by the fan-out's unit index; nil while nothing is prepared. It is activated as the initial batch when the
+	// item enters (see run.activateDormant) and discarded when the item passes the fan-out, returns, or is canceled
+	// (see run.dropDormant). It takes no capacity, stands in no queue, and no source of it is pulled before entry.
+	dormant map[int]*dormantWork
 
 	// parentWave is the wave whose work created this child item (nil for a root item). The child's outcome is
 	// reported to it.
 	parentWave *wave
 }
 
+// dormantWork is what an item prepared for one fan-out before entering it: its claimed tasks, in submission order,
+// without the statically-empty ones. Its presence says the initial batch is known: an explicit empty Schedule
+// prepares an entry with no tasks, which activates as a known-empty batch (publishes the rank, ends any hold).
+type dormantWork struct {
+	tasks []Task
+}
+
+// sources returns the prepared sources, for release once the work will never run (see releaseSources).
+func (d *dormantWork) sources() []taskSource {
+	out := make([]taskSource, 0, len(d.tasks))
+	for _, t := range d.tasks {
+		out = append(out, t.src)
+	}
+	return out
+}
+
 // bodyState is where an item stands with its body at one fan-out — the work it may add there through its own path
 // (the ItemProcessor, or a lane child's callback at an interior fan-out). Recorded per item and fan-out (item.body),
 // it drives what the item may still do at that node. It is independent of occupancy: an item may still occupy the
-// node with a closed body (a detached wave in flight, a failed leave), or may have moved on.
+// node with a closed body (a retained wave in flight, a failed leave), or may have moved on.
 type bodyState uint8
 
 const (
@@ -100,8 +123,8 @@ const (
 	bodyOpen
 	// bodyClosed: the body was joined when the item left (or tried to), or the item's processor returned. Terminal.
 	bodyClosed
-	// bodyDetached: the body was handed to the caller with FanOut.Detach. Terminal.
-	bodyDetached
+	// bodyRetained: the body was handed to the caller with FanOut.Retain. Terminal.
+	bodyRetained
 )
 
 // poison cancels this item's context with cause (fail-fast). A child has no context of its own to cancel, so it
@@ -149,22 +172,30 @@ func (it *item) firstUnackedWaveErr() error {
 }
 
 // sealBody ends the item's own path into its open body w: the wave is sealed (finishing now if idle), it is no longer
-// pending, and the body state at its node becomes state (bodyClosed on leave/completion, bodyDetached on Detach).
+// pending, and the body state at its node becomes state (bodyClosed on leave/completion, bodyRetained on Retain).
 // Only the wave's own running work may add to it from here on. Caller holds run.mu and must broadcast.
 func (it *item) sealBody(w *wave, state bodyState) {
 	it.pending = nil
 	it.body[w.atNode.index] = state
 	w.seal()
-	w.run.dischargeHold(it) // the item's own path is over; nothing more it schedules can start the held-for work
+	if w.hold != nil && !w.rootSubmitted {
+		// No root submission ever came: the initial batch closes as empty, which is the milestone. A nonempty batch
+		// keeps its hold until its work starts, runs out, or is dropped — sealing does not bypass the backpressure.
+		w.run.dischargeHold(it, w.hold)
+	}
 }
 
-// holdsQueued reports whether the item's upstream hold protects its queued slot. Caller holds run.mu.
-func (it *item) holdsQueued() bool { return it.hold != nil && it.hold.queued }
+// holdsUnit reports whether an upstream hold of the item protects its slot in unit j. Caller holds run.mu.
+func (it *item) holdsUnit(j int) bool {
+	for _, h := range it.holds {
+		if h.unit == j {
+			return true
+		}
+	}
+	return false
+}
 
-// holdsUnit reports whether the item's upstream hold protects its slot in unit j. Caller holds run.mu.
-func (it *item) holdsUnit(j int) bool { return it.hold != nil && it.hold.unit == j }
-
-// isRetaining reports whether a live wave of this item holds unit j — a Stage.Retain's stage or a FanOut.Detach's
+// isRetaining reports whether a live wave of this item holds unit j — a Stage.Retain's stage or a FanOut.Retain's
 // node. Such a slot must not be taken away when the item moves on; it is freed when the work returns. Caller holds
 // run.mu.
 func (it *item) isRetaining(j int) bool {

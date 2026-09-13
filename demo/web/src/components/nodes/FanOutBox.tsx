@@ -1,5 +1,5 @@
 import { EditableTitle } from "../shared/EditableTitle";
-import { AdmissionSelect } from "../shared/AdmissionSelect";
+import { BackpressureSelect } from "../shared/BackpressureSelect";
 import { LabeledSlider } from "../shared/LabeledSlider";
 import { SlotStrip } from "../shared/SlotStrip";
 import { BranchBox } from "./BranchBox";
@@ -23,7 +23,7 @@ interface Props {
 /** The visual content shared by a top-level fan-out node (FanOutNodeView) and a fan-out nested inside some lane's
  * interior chain (see NodeBox) — matching the library's own model directly, a fan-out is one node containing its
  * branches, not sibling nodes. Its own entry slot strip (top) is where an item parks for as long as its branches'
- * work is outstanding, filled to reflect how far it's progressed — dashed outline ("pending": Schedule not returned
+ * work is outstanding, filled to reflect how far it's progressed — dashed outline ("pending": entry not confirmed
  * yet, or some of its work still queued on a branch), solid ("nothing queued, some of it running"), solid outline
  * ("blocked": none of its work left on any branch, waiting to advance) — see pipeline/itemPositions.ts's ItemFill. */
 export function FanOutBox({ fanout, callbacks, handles, shellRef }: Props) {
@@ -70,7 +70,7 @@ export function FanOutBox({ fanout, callbacks, handles, shellRef }: Props) {
           onChange={(v) => callbacks.onEditNode(fanout.id, "queueSize", v)}
           title="Maximum number of items waiting to enter this fan-out"
         />
-        <AdmissionSelect value={fanout.admission} onChange={(v) => callbacks.onEditAdmission(fanout.id, v)} />
+        <BackpressureSelect value={fanout.backpressure} onChange={(v) => callbacks.onEditBackpressure(fanout.id, v)} />
         <SlotStrip nodeId={fanout.id} variant="body" count={bodySlotCount(fanout.limit, fanout.inBody)} reserve={MAX_LIMIT} />
         <div className="fanout-branches">
           {fanout.branches.map((branch) => (

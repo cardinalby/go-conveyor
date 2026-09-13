@@ -32,8 +32,8 @@ type nodeValueRequest struct {
 	Value int    `json:"value"`
 }
 
-// nodeStringRequest is the body shape of setAdmission: like nodeValueRequest, but the value is a name (see
-// topology.Admission), not a number.
+// nodeStringRequest is the body shape of setBackpressure: like nodeValueRequest, but the value is a name (see
+// topology.Backpressure), not a number.
 type nodeStringRequest struct {
 	ID    string `json:"id"`
 	Value string `json:"value"`
@@ -110,8 +110,8 @@ func (h *handler) dispatch(req methodRequest) (any, error) {
 		return h.applyNodeValue(req.Body, h.manager.SetLimit)
 	case "setQueueSize":
 		return h.applyNodeValue(req.Body, h.manager.SetQueueSize)
-	case "setAdmission":
-		return h.applyNodeString(req.Body, h.manager.SetAdmission)
+	case "setBackpressure":
+		return h.applyNodeString(req.Body, h.manager.SetBackpressure)
 	case "setDelay":
 		return h.applyNodeValue(req.Body, h.manager.SetDelay)
 	case "setTasksPerItem":

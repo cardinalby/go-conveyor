@@ -300,9 +300,9 @@ func TestLaneChildSpawnsIntoItsParentsFanOut(t *testing.T) {
 	}
 }
 
-// TestSpawnIntoDetachedWaveKeepsTheSlot: a task of a detached wave may still spawn; the wave finishes only when the
+// TestSpawnIntoRetainedWaveKeepsTheSlot: a task of a retained wave may still spawn; the wave finishes only when the
 // whole tree is done, and the fan-out slot follows the tree meanwhile.
-func TestSpawnIntoDetachedWaveKeepsTheSlot(t *testing.T) {
+func TestSpawnIntoRetainedWaveKeepsTheSlot(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool")).SetLimit(2)
@@ -327,7 +327,7 @@ func TestSpawnIntoDetachedWaveKeepsTheSlot(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		if err := commit.MoveTo(ctx); err != nil {
 			return err
 		}
@@ -339,7 +339,7 @@ func TestSpawnIntoDetachedWaveKeepsTheSlot(t *testing.T) {
 		default:
 		}
 		if got := occupancyOf(c, fo); got != 1 {
-			t.Errorf("fan-out occupancy = %d while the detached tree still runs, want 1", got)
+			t.Errorf("fan-out occupancy = %d while the retained tree still runs, want 1", got)
 		}
 		close(release)
 		<-w.Finished()
@@ -487,13 +487,19 @@ func TestScheduleFromFinishedWorkIsStale(t *testing.T) {
 
 // --- misuse ---
 
-// TestScheduleBeforeEnteringPanics: there is no body to add to before MoveTo.
-func TestScheduleBeforeEnteringPanics(t *testing.T) {
+// TestScheduleForAPassedFanOutPanics: Schedule before entry prepares work for a fan-out ahead of the item (see
+// schedule_before_entry_test.go); a fan-out the item has already passed can never be entered, so it is misuse, the
+// same as a MoveTo to it.
+func TestScheduleForAPassedFanOutPanics(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
+	commit := c.AddStage(OptName("commit"))
 
-	panicsInItem(t, c, errStageNotEntered, func(ctx context.Context) {
+	panicsInItem(t, c, errWrongEnterOrder, func(ctx context.Context) {
+		if err := commit.MoveTo(ctx); err != nil {
+			t.Errorf("move failed: %v", err)
+		}
 		_ = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
 	})
 }
@@ -516,17 +522,17 @@ func TestScheduleAfterLeavingPanics(t *testing.T) {
 	})
 }
 
-// TestScheduleAfterDetachPanics: from Detach on the body belongs to the returned wave, whatever its progress.
-func TestScheduleAfterDetachPanics(t *testing.T) {
+// TestScheduleAfterRetainPanics: from Retain on the body belongs to the returned wave, whatever its progress.
+func TestScheduleAfterRetainPanics(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
 
-	panicsInItem(t, c, errWorkDetached, func(ctx context.Context) {
+	panicsInItem(t, c, errWorkRetained, func(ctx context.Context) {
 		if err := fo.MoveTo(ctx); err != nil {
 			t.Fatalf("move failed: %v", err)
 		}
-		_ = fo.Detach(ctx)
+		_ = fo.Retain(ctx)
 		_ = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
 	})
 }
@@ -1040,7 +1046,7 @@ func TestDisplacedPullCanceledMidPullRecordsAbandonment(t *testing.T) {
 			<-poison.Finished()
 			_ = poison.Err()
 			waitErr = fo.Wait(ctx) // the cause, or the body's error once the pull has ended
-			w := fo.Detach(ctx)    // the body itself says how its work ended
+			w := fo.Retain(ctx)    // the body itself says how its work ended
 			<-w.Finished()
 			bodyErr = w.Err()
 			<-spawnRan
@@ -1112,9 +1118,9 @@ func TestConcurrentSchedulesAllLandOnce(t *testing.T) {
 	}
 }
 
-// TestStartedOnDetachedWaveCountsRootSourcesOnly: Started closes once the root generator is drained, even while a
+// TestStartedOnRetainedWaveCountsRootSourcesOnly: Started closes once the root generator is drained, even while a
 // generator spawned by one of its tasks is still being pulled; Finished waits for that too.
-func TestStartedOnDetachedWaveCountsRootSourcesOnly(t *testing.T) {
+func TestStartedOnRetainedWaveCountsRootSourcesOnly(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool")) // limit 1: the root generator is drained before the spawned one is pulled
@@ -1138,7 +1144,7 @@ func TestStartedOnDetachedWaveCountsRootSourcesOnly(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-spawnedPulling // the spawned generator is mid-pull, so the root generator has already been drained
 		select {
 		case <-w.Started():
@@ -1226,7 +1232,7 @@ func TestChildRunsRoundsAndSpawnsInsideItsLane(t *testing.T) {
 }
 
 // TestScheduleFromReturnedChildIsStale: a lane child's callback has returned but the child is not finished yet, because
-// it detached work at an interior fan-out that is still running. Its context is over for its own code: a Schedule into
+// it retained work at an interior fan-out that is still running. Its context is over for its own code: a Schedule into
 // the parent's fan-out with it is refused with ErrStaleContext, not redirected into the parent's wave.
 func TestScheduleFromReturnedChildIsStale(t *testing.T) {
 	c := NewConveyor()
@@ -1254,7 +1260,7 @@ func TestScheduleFromReturnedChildIsStale(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			_ = inner.Detach(cctx) // the child returns while its work runs on: returned, not finished
+			_ = inner.Retain(cctx) // the child returns while its work runs on: returned, not finished
 			childCtx <- cctx
 			return nil
 		}))

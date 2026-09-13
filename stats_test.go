@@ -261,8 +261,10 @@ func TestStatsInFlightCountsOwnItemsOnly(t *testing.T) {
 // out, the backlog counts unstarted work rather than work still running.
 func TestStatsReportsPoolBacklog(t *testing.T) {
 	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(3) // three items may be inside, so three may enqueue
-	pool := fo.AddPool(OptName("pool"))          // limit 1: one piece of work at a time
+	// Three items may be inside, so three may enqueue. Buffered: under the default, an item whose batch waits for the
+	// pool would keep its start slot, and no third item would be created.
+	fo := c.AddFanOut(OptName("fo")).SetLimit(3).SetBackpressure(BackpressureBuffered)
+	pool := fo.AddPool(OptName("pool")) // limit 1: one piece of work at a time
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()

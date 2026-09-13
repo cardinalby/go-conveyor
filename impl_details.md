@@ -78,10 +78,10 @@ first `Run`, and idempotently from `newRun`.
 ## 3. Per-run state
 
 `conveyor` (the unexported implementation behind the `Conveyor` interface) is immutable topology shared across
-`Run` invocations — except the two atomic capacities and a fan-out node's atomic admission policy. All mutable
+`Run` invocations — except the two atomic capacities and a fan-out node's atomic backpressure mode. All mutable
 state lives on `run`, allocated fresh per `Run`, so nothing leaks between invocations. `conveyor.currentRun` is an
 atomic pointer to the active run (nil outside a run); it backs `Stats` and lets `SetLimit` / `SetQueueSize` /
-`SetAdmission` reach a live run.
+`SetBackpressure` reach a live run.
 
 Everything below `run.mu` is guarded by it:
 
@@ -118,13 +118,19 @@ Position is tracked by two ranks per item:
 - **`reachedRank`** — the highest rank the item has actually occupied. It says where the item *is*.
 - **`maxRank`** — the highest rank it has *published*. It says what the items behind it are allowed to see.
 
-They differ only between a fan-out's admission and the item's first `Schedule` there (or its leave, or `Detach`): an
-item admitted to a fan-out has reached the node, but must not open the gate for the next item until its first work is
-on the branches (see §5).
+They differ only between a fan-out's admission and the item's initial batch there (the activation of prepared work,
+else its first `Schedule`, or its leave, or `Retain`): an item admitted to a fan-out has reached the node, but must not
+open the gate for the next item until its first work is on the branches (see §5).
 
-`item.hold` is the release an admission to an `AdmitByPoolsStrict` fan-out deferred, nil when there is none (§6, "a token
-that follows the work"). It is ownership state, like `occupied`, and is separate from the two ranks: an item may hold
-its previous node's slot while having published the fan-out's rank.
+`item.holds` is the list of releases deferred by admissions to `Balanced` / `Strict` fan-outs, one `upstreamHold`
+per admission still pending (§6, "a token that follows the work"). Several can be live at once: a retained body keeps
+its hold while the item enters the next fan-out, whose admission opens another. It is ownership state, like
+`occupied`, and is separate from the two ranks: an item may hold its previous node's slot while having published the
+fan-out's rank.
+
+`item.dormant` is the work the item prepared with `Schedule` for fan-outs of its own scope it has not entered yet,
+keyed by unit index (`dormantWork`: the claimed tasks in submission order; nil while nothing is prepared). It holds
+no slot, stands in no queue, and no source of it is pulled before entry (§7, "Dormant work").
 
 ### Body state
 
@@ -136,12 +142,13 @@ state is `open`, the body itself in `item.pending` — the wave that holds the w
 | `bodyNone`     | never entered                                            | initial                                                   |
 | `bodyOpen`     | inside; the item's own path may add work                 | `newBody` at admission (`MoveTo` / `TryMoveTo`)           |
 | `bodyClosed`   | joined: the item left, tried to leave, or its processor returned | `closeBody` (leave idle check, `tryEnterUnit`), `completeItem` |
-| `bodyDetached` | handed to the caller as a wave                           | `Detach`                                                  |
+| `bodyRetained` | handed to the caller as a wave                           | `FanOut.Retain`                                           |
 
-`closed` and `detached` are terminal for the item's own path: `Schedule` and `Wait` there panic (`errBodyClosed`,
-`errWorkDetached`), `Detach` panics `errNothingToDetach`. The state is independent of occupancy — an item may still
-occupy the node with a closed body (a failed leave, §5) or a detached one (the wave holds the slot), or may have moved
-on — which is what gives stable diagnostics. `item.sealBody` is the one transition out of `open`: it clears `pending`,
+`closed` and `retained` are terminal for the item's own path: `Schedule` and `Wait` there panic (`errBodyClosed`,
+`errWorkRetained`), `Retain` panics `errNothingToRetain`. `bodyNone` is not terminal: `Schedule` there prepares work
+for the entry (`run.prepare`), unless the fan-out's rank is below `reachedRank` — passed, `errWrongEnterOrder`. The
+state is independent of occupancy — an item may still occupy the node with a closed body (a failed leave, §5) or a
+retained one (the wave holds the slot), or may have moved on — which is what gives stable diagnostics. `item.sealBody` is the one transition out of `open`: it clears `pending`,
 records the new state and seals the wave (§8).
 
 Each scope keeps its in-flight items in a doubly-linked list in creation order (`scopeList`). That gives an O(1)
@@ -155,12 +162,9 @@ Three checks, deliberately separate:
 - **`checkEnterOrder`** — permanent misuse, panics: moving backward (`target.rank < it.reachedRank`) or re-entering
   a node (`it.entered[target.index]`). Compared against the node's own rank, never its waiting room's.
 - **`canEnter`** — transient: a free slot (`unitHasFreeSlot`) **and** ordering
-  (`it.prev == nil || it.prev.maxRank >= u.rank`) **and**, for a fan-out node whose policy is `AdmitByPools` or
-  `AdmitByPoolsStrict` (`unit.needsPoolCapacity`), free capacity on some branch (`branchHasFreeCapacity`: a branch with a free slot and an
-  empty queue; a fan-out with no branches passes). The empty-queue part matters because a freed slot is handed to
-  queued work under the same lock, before any waiter wakes: a branch with a free slot and a non-empty queue has an
-  async pull in flight on its head, so that slot is spoken for. `canEnterQueue` does not ask this question — an item
-  may step into the waiting room while the pools are full.
+  (`it.prev == nil || it.prev.maxRank >= u.rank`). Pool capacity is never part of it: a fan-out's backpressure mode
+  decides what the item keeps holding after entering (§6), not whether it enters, so the item limit bounds the items
+  inside under every mode.
 - **`canEnterQueue`** — the same two questions asked of the waiting room: room in `queued[]` versus `queueSize`,
   and `it.prev.maxRank >= u.queueRank()`.
 
@@ -183,9 +187,11 @@ Three checks, deliberately separate:
    neither holds any more — a dial moved between the predicate and the choice — wait again rather than step into a
    room with no space. The dials are stored under `mu` while a run is live (`storeDial`, `setLimit`), so this is a
    backstop.
-4. `takeUnit`: `occupy`, then — for an `AdmitByPoolsStrict` node (`unit.holdsUpstream`), when the item has no hold yet — `newHold` records the
+4. `takeUnit`: `occupy`, then — for a `Balanced` / `Strict` node (`unit.holdsUpstream`) — `newHold` records the
    token the release below would give up (§6), then `releaseBelow(u.rank)` (which skips that token) + broadcast.
-   The policy is read once, under the same lock hold as the `canEnter` check, so one admission sees one policy.
+   The mode is read once, under the same lock hold as the `canEnter` check, so one admission sees one mode.
+5. For a fan-out, still in the same lock hold: `newBody`, then `activateDormant` submits the prepared work, if any,
+   as the initial batch (§7). The rank is therefore published before the item behind can pass the gate.
 
 A move that fails (a deadline on the call context, poison, shutdown) after step 1 leaves the body **closed** and the
 item in one of two places: still inside the fan-out holding its slot, or standing in the target's waiting room with
@@ -195,9 +201,9 @@ makes a retry to the same node resume waiting instead of taking a second queued 
 **Publishing.** `publish` controls whether taking the target raises `maxRank` to the node's rank. A stage publishes
 immediately. A fan-out passes `false`: `occupy` then publishes the **waiting room's** rank (`rank - 1`), which lets
 the item behind step aside into the fan-out's waiting room and release its previous node, while still holding it out
-of the node itself. The node's own rank is published by whichever comes first: the item's first `Schedule` through
-its own path (`addToBody`, also with zero tasks), `Detach`, or the leave (entering the next node or its waiting room
-publishes a higher rank anyway). This is the **door**, and it is what keeps each branch's work in item order: the
+of the node itself. The node's own rank is published by whichever comes first: the activation of prepared work at
+admission, the item's first `Schedule` through its own path (`addToBody`, also with zero tasks), `Retain`, or the
+leave (entering the next node or its waiting room publishes a higher rank anyway). This is the **door**, and it is what keeps each branch's work in item order: the
 younger item cannot queue anything before the older one has queued its first work. Stepping into a waiting room
 always publishes its rank, whatever `publish` says.
 
@@ -205,7 +211,8 @@ always publishes its rank, whatever `publish` says.
 declined, untouched (it may not leave yet, and waiting is what this variant promises not to do); an item that cannot
 enter (`canEnter` false) is declined, untouched — the body stays open and the item may keep scheduling; otherwise the
 idle body is closed and the target taken, in one lock hold, so a declined attempt never leaves the item inside with
-no body to add to. It **bypasses the waiting room** on purpose: stepping into it would admit the item — releasing the
+no body to add to; a declined attempt at a fan-out leaves prepared work dormant and untouched. It **bypasses the
+waiting room** on purpose: stepping into it would admit the item — releasing the
 previous node, spending its once-per-node entry — and then leave it blocked with no way back, which is the opposite
 of what a non-waiting entry promises. Bypassing does not let it jump an item already waiting there: that item
 published only the lower rank, so the ordering gate refuses. The preamble (`actingItem` with `checkCancel`) declines
@@ -220,7 +227,9 @@ invariant, and with it the correctness of checking only `it.prev`.
 ## 6. Release
 
 `releaseBelow(it, beforeRank)` frees every slot the item holds in units **of its own scope** with rank strictly
-below `beforeRank`, skipping a unit whose slot a live wave is holding (`item.isRetaining`). A queued slot is
+below `beforeRank`, skipping a unit whose slot a live wave is holding (`item.isRetaining`) or a live hold protects
+(`item.holdsUnit`). It first drops the dormant work prepared for fan-outs below `beforeRank` (`dropDormant`): the
+item has passed them without entering. A queued slot is
 released by the same rank rule, which is what makes the waiting room disappear the moment the item is admitted: the
 node's rank is one above its waiting room's, so the ordinary `releaseBelow` inside `takeUnit` performs the swap.
 
@@ -235,67 +244,67 @@ queued piece of work may start now.
 outside its scope: a pool's work cannot travel, so its slot is charged to the scheduling
 item, which lives in the parent scope. By then `completeItem` has already joined all the item's waves, so those
 slots are gone — the wider sweep is a backstop that keeps "no slot outlives its item" true of the function itself
-rather than of the order its callers run in. It also clears `item.hold` first: the held token is one of the slots the
-sweep frees.
+rather than of the order its callers run in. It also clears `item.holds` first, giving back held queued tokens; a held
+unit is one of the slots the sweep frees.
 
 ### A token that follows the work: the upstream hold
 
-`Retain` and `Detach` keep a slot for work that runs *after* the item has moved on. `AdmitByPoolsStrict`
-(`FanOut.SetAdmission`) needs the mirror image: a slot kept for work that has not *started* yet. `AdmitByPools` is the
-same admission predicate without the hold (§5); everything in this section is the strict variant's addition. An item
-admitted under that policy keeps the
-token it would have released on entering the fan-out until its first work has a slot on every branch it touched, so
-an item whose work waits for a saturated pool keeps pushing back on the stage before it, while younger items whose
-work can start pass it on the branches (the door and the next node's ordering gate are unchanged). The design and
-its rationale are in `design_pool_aware_admission.md`; this is how it is built.
+`Stage.Retain` and `FanOut.Retain` keep a slot for work that runs *after* the item has moved on. `Balanced` and
+`Strict` backpressure (`FanOut.SetBackpressure`) need the mirror image: a slot kept for work that has not *started*
+yet. An item admitted under either mode keeps the token it would have released on entering the fan-out until its
+initial batch has made the mode's progress, so an item whose work waits for a saturated pool keeps pushing back on
+the stage before it, while younger items whose work can start pass it on the branches (the door and the next node's
+ordering gate are unchanged). `Buffered` opens no hold.
 
-**The hold** (`upstreamHold`, `item.hold`) is the deferred release, recorded by `newHold` in `takeUnit`. It protects
-exactly one token:
+**The hold** (`upstreamHold`) is the deferred release, recorded by `newHold` in `takeUnit` and appended to
+`item.holds`. `newBody` attaches it to the body's wave (`wave.hold`, matched by `hold.at == f.node`), so
+`addToBody` and `branchStarted` find it without going through the item, and a retained body keeps its own hold when
+the item acquires another at a later fan-out. It snapshots the mode (`hold.mode`) and protects exactly one token:
 
-- `queued` — the item's queued slot (`item.queuedAt`), when the item was admitted from the fan-out's waiting room
-  (`takeQueue` released the previous node already) or still stood in front of an earlier node after a failed move;
-- else `unit` — the highest-rank unit below the fan-out the item occupies (whether or not a `Retain` wave holds it
-  too; such a slot is freed only when both have ended): the previous
-  stage, or the start gate (the conveyor's for a root item, the lane's for a child), which is what throttles item or
-  child creation while the hold lasts; `-1` when the item had nothing behind it.
+- `queued` — the item's queued slot, when the item was admitted from the fan-out's waiting room (`takeQueue`
+  released the previous node already). `newHold` takes the count over from `item.queuedAt` (reset to -1), so a
+  later `takeQueue` cannot give it back; `dischargeHold` returns it;
+- else `unit` — the highest-rank unit below the fan-out the item occupies (whether or not a `Retain` wave or an
+  earlier hold has it too; such a slot is freed only when all have ended): the previous stage, or the start gate
+  (the conveyor's for a root item, the lane's for a child), which is what throttles item or child creation while the
+  hold lasts; `-1` when the item had nothing behind it.
 
-It is a kind of ownership **separate from `wave.retainUnit`**. `releaseBelow` skips the held token (`item.holdsQueued`
-/ `item.holdsUnit`) the same way it skips a retained unit, so the sweep an unrelated `Retain` completion triggers
-(`releaseRetained` → `releaseBelow`) cannot free it, and a unit both a `Retain` wave and the hold keep is freed only
-when both have ended. `takeUnit` still runs `releaseBelow` after creating the hold: anything else the item held behind
-it is released as usual.
+It is a kind of ownership **separate from `wave.retainUnit`**. `releaseBelow` skips a held unit (`item.holdsUnit`)
+the same way it skips a retained one, so the sweep an unrelated `Retain` completion triggers (`releaseRetained` →
+`releaseBelow`) cannot free it. `takeUnit` still runs `releaseBelow` after creating the hold: anything else the item
+held behind it is released as usual.
 
-**Discharge** (`dischargeHold`) is the single funnel: clear `it.hold`, then `releaseBelow(it, it.reachedRank)` — the
-ordinary rule, now no longer skipping the token — unless the item is already finished. The caller broadcasts. Three
-things end a hold, whichever comes first:
+**Discharge** (`dischargeHold`) is the single funnel: mark done, remove from `item.holds`, give back a held queued
+token, then `releaseBelow(it, it.reachedRank)` — the ordinary rule, now no longer skipping the unit — unless the
+item is already finished. The caller broadcasts. Three things end a hold, whichever comes first:
 
-1. **The entering submission has started.** The entering submission is the item's first root `Schedule` at the
-   fan-out. `addToBody` knows it by `wave.rootSubmitted` (set on the first root addition to a body; spawns never
-   set it) and, if the item has a hold, calls `markEntering`: every new collection gets `taskCollection.hold`
-   pointing at the hold, and `hold.awaiting` becomes the set of touched branch indices. A submission that touched
-   no branch (no tasks, or only statically empty ones) discharges at once. From then on `branchStarted` removes a
-   branch from the set when `startWork` assigns work from its collection (for a lane: child creation at the start
-   gate, not admission to an interior stage), or when `dequeue` removes the collection without an assignment
-   (exhausted with zero yield, or dropped by `dropCollection` on cancellation). An empty set discharges. It is "one
-   assignment per touched branch", not "every task handed out": `NewTasks(100)` on a limit-2 pool ends the hold at
-   the first assignment. Later rounds and spawns never hold: `rootSubmitted` is already set.
-2. **The body is sealed.** `item.sealBody` discharges, so a leave (`closeBody`), `Detach` and `completeItem` all end
-   the hold: the item's own path is over, and nothing it schedules from here can start the work the token waited
-   for. A failed leave with running work keeps the body open and therefore keeps the hold; the item is still stuck.
-3. **The item finishes.** `finishItem` clears the hold and frees the token with everything else.
+1. **The initial batch has progressed.** The initial batch is the first root submission to the body: the activation
+   of prepared work at admission, else the first root `Schedule`. `submitClaimed` knows it by `wave.rootSubmitted`
+   (spawns never set it) and calls `markEntering`: every new collection gets `taskCollection.hold`, and
+   `hold.awaiting` becomes the set of touched branch indices. A submission that touched no branch (no tasks, or only
+   statically empty ones) discharges at once. From then on `branchStarted(col, branch, started)` removes the branch
+   from the set: `startWork` reports `started = true` (for a lane: child creation at the start gate), `dequeue`
+   reports `started = false` (exhausted with zero yield, or dropped by `dropCollection` on cancellation). `Strict`
+   discharges when the set empties; `Balanced` also at the first `started = true`. It is "one start per touched
+   branch", not "every task handed out": `NewTasks(100)` on a limit-2 pool ends the hold at the first start. Later
+   rounds and spawns never hold: `rootSubmitted` is already set.
+2. **The body is sealed with no root submission.** `item.sealBody` discharges only when `!w.rootSubmitted`: an
+   unknown batch closes as empty. A leave, `Retain` or `completeItem` after a nonempty initial batch keeps the hold
+   until that batch starts, runs out, or is dropped — retention and further movement never bypass the backpressure.
+   A failed leave with running work keeps the body open and therefore keeps the hold; the item is still stuck.
+3. **The item finishes.** `finishItem` clears every hold and frees the tokens with everything else.
 
-`taskCollection.hold` is a pointer, not a flag, and `branchStarted` checks `col.it.hold == col.hold`: a collection of
-a detached body may outlive its hold and be dequeued after the same item has acquired a new hold at a later fan-out,
-and must not touch it. The wait for `branchHasFreeCapacity` needs no new broadcast: every path that frees a branch
-slot or empties a queue already broadcasts (`runWork`, `finishAsyncPull`, `branchWorker`, the `pump` callers).
+`taskCollection.hold` is a pointer to the hold, and `branchStarted` is a no-op once `hold.done`: a collection of a
+retained body may be dequeued after the same item has acquired a new hold at a later fan-out, and must not touch it.
 
 Consequences worth knowing. An item can appear in two units at once — the previous node (or its queued token) and
-the fan-out — and `DebugUnitOccupants` / `UnitStat` report it that way. Packaging decides pressure: an item that
-enters with one task and schedules the rest later releases upstream sooner than one that enters with everything. The
-hold's life cycle depends only on item state, never on the current policy, which is what makes `SetAdmission` safe on
-a live conveyor (§11). No new wait cycle appears: the two-token holder waits only for branch slots, which running
-tasks (which wait for nothing) or lane children (which drain through their own series) free; a younger item that
-passed it waits at the next node's gate, which the older item opens by passing (§14).
+the fan-out — and `DebugUnitOccupants` / `UnitStat` report it that way; with two retained fan-outs in a row an item
+can hold two upstream tokens. Packaging decides pressure: an item that enters with one task and schedules the rest
+later releases upstream sooner than one that enters with everything. The hold's life cycle depends only on item
+state, never on the current dial, which is what makes `SetBackpressure` safe on a live conveyor (§11). No new wait
+cycle appears: the two-token holder waits only for branch slots, which running tasks (which wait for nothing) or lane
+children (which drain through their own series) free; a younger item that passed it waits at the next node's gate,
+which the older item opens by passing (§14).
 
 ## 7. Fan-out and the branch runtime
 
@@ -317,7 +326,8 @@ user's deferred code.
 ### Bodies and scheduling
 
 `FanOut.MoveTo` / `TryMoveTo` create the body at admission (`run.newBody`): an **unsealed**, idle wave with `atNode`
-set, stored in `item.pending`, body state `open`. Nothing is queued yet.
+set and `hold` attached, stored in `item.pending`, body state `open`. Then `activateDormant` submits the prepared
+work, if any (see "Dormant work" below); otherwise nothing is queued yet.
 
 `FanOut.Schedule` adds to a body. Its steps, in order, and why the order matters:
 
@@ -332,20 +342,34 @@ set, stored in `item.pending`, body state `open`. Nothing is queued yet.
 4. `fanOut.bodyFor` resolves the body and classifies the addition: pool work adds to its own wave, which must be
    this fan-out's (`errInvalidUnit`, wrong target) — a **spawn**; a lane child whose `parentWave.atNode` is this
    fan-out adds to the parent's wave — a spawn, checked before the scope check because the fan-out lives in the
-   parent's scope; otherwise the item acts in its own scope (`validateScope`) and `openBody` requires state `open` —
-   a **root**;
+   parent's scope; otherwise the item acts in its own scope (`validateScope`): state `bodyNone` with the fan-out
+   ahead of `reachedRank` returns a nil wave — the work is **prepared** (`run.prepare`, after the `returned` and
+   cancellation checks; a passed fan-out panics `errWrongEnterOrder`); else `openBody` requires state `open` — a
+   **root**;
 5. cancellation by both contexts (`item.cancelCause`); `Schedule` never blocks, so it makes this check itself. This
    is what stops a caller with a stripped context from queueing work for a poisoned item;
-6. `run.addToBody`: **claim** every source (the resubmission panic fires here, before the body is mutated), **group**
-   into one `taskCollection` per branch in argument order, `insertCollection` each, on the first root addition
-   (`wave.rootSubmitted`) **mark** the collections as the entering submission if the item has an upstream hold
-   (`markEntering`, §6), **publish** the node's rank (idempotent max; the door), `pump` every touched branch,
-   broadcast.
+6. `run.addToBody`: **claim** every source (`claimTasks`; the resubmission panic fires here, before the body is
+   mutated), then `submitClaimed`: **group** into one `taskCollection` per branch in argument order,
+   `insertCollection` each, on the first root addition (`wave.rootSubmitted`) **mark** the collections as the
+   initial batch if the body has a hold (`markEntering`, §6), **publish** the node's rank (idempotent max; the
+   door), `pump` every touched branch, broadcast.
 
 Steps 3 to 6 run under `run.mu` with no user code, so `Schedule` is safe from any goroutine and tasks may call it
 concurrently with the ItemProcessor. The runtime detects an expired *wave*, not an expired individual callback: the
 pool-work context is one per collection (`taskCollection.workCtx`), so a goroutine that outlives its task while
 sibling work keeps the wave busy is not detected — the documented callback lifetime contract.
+
+### Dormant work
+
+`run.prepare` (Schedule before entry) claims the sources and appends the tasks with a source to
+`item.dormant[node]`, creating the entry if needed — an empty call still creates it, which is what makes the initial
+batch known-empty. Nothing is queued, pulled, or published. `activateDormant`, called by `MoveTo` / `TryMoveTo` right
+after `newBody` in the admission's lock hold, removes the entry and runs `submitClaimed(root = true)` on it: one root
+submission, so several pre-entry calls form one initial batch, the hold's branches are marked and the rank published
+before the item behind can pass the gate. A declined `TryMoveTo` never reaches it. `dropDormant(it, beforeRank)`
+discards entries for fan-outs below `beforeRank`, releasing their sources on a goroutine (as `dropCollection` does);
+`releaseBelow` calls it, and `completeItem` calls it with `math.MaxInt` right after setting `returned`. Nothing waits
+for dormant work, and it is not counted in `Stats`.
 
 ### Queue order
 
@@ -407,10 +431,10 @@ tracks three counters, all under `run.mu`:
 | finished    | `Finished` closed: sealed **and** idle, decided in `settle` in the same step that made it so.            |
 
 Every wave is born sealed (`newWave`) except a fan-out body (`newBody` clears `sealed`). A body is sealed by
-`item.sealBody` from the leave's idle check, `tryEnterUnit`, `Detach`, or `completeItem`. `settle` closes nothing
+`item.sealBody` from the leave's idle check, `tryEnterUnit`, `FanOut.Retain`, or `completeItem`. `settle` closes nothing
 while the wave is unsealed — the item may still add work, so neither "all handed out" nor "all done" can be final. Once
 sealed, `Started` closes when `rootUnexhausted == 0` and `Finished` when idle. A leave seals an idle wave, so both
-close at once; `Detach` may seal a busy one, and they close later in that order.
+close at once; `FanOut.Retain` may seal a busy one, and they close later in that order.
 
 A spawn happens while its spawner is running, so a body cannot be idle with work still to come; a sealed wave goes
 busy to busy or busy to idle, and sealed-and-idle is terminal. Adding to a finished wave is refused with
@@ -422,13 +446,15 @@ does not count and does not delay `Started`; the guarantee covers state read onl
 `Schedule` right after entering, every collection is a root and `Started` closes exactly as it did before bodies
 could grow.
 
-`retainUnit` is the unit whose slot the wave holds until its work is done — the stage of a `Retain`, or the node of
-a `Detach`. It is nil while a fan-out's work is still the node's body: then the *item* holds the slot, because it
+`retainUnit` is the unit whose slot the wave holds until its work is done — the stage of a `Stage.Retain`, or the node
+of a `FanOut.Retain`. It is nil while a fan-out's work is still the node's body: then the *item* holds the slot, because it
 cannot leave until the work is done. `releaseRetained` frees the slot only if the item has already moved past that
 node; if the item is still in it, the item's next move does the freeing (`releaseBelow` stops skipping the unit
 once the wave has finished). Those two halves are the "whichever happens last" contract: an item never sits in a
-node holding nothing, and a slot never outlives the work it was kept for. A detached wave's tasks may keep spawning
+node holding nothing, and a slot never outlives the work it was kept for. A retained wave's tasks may keep spawning
 into it; the slot follows the whole tree.
+
+`hold` is the upstream hold the admission that opened this body deferred, nil under `Buffered` (§6).
 
 `atNode` names the fan-out whose body the wave is. It supplies the node name in the error of `FanOut.Wait`, the leave
 and `Wave.Wait` (`joinedErr`, which falls back to `retainUnit` for a `Retain` wave), lets `Schedule` tell a lane child's spawn into its parent's fan-out from a move into
@@ -447,13 +473,13 @@ Two ways an error reaches a wave:
   to decide whether the item's effects are complete.
 
 `acked` records that the outcome was observed — by `FanOut.Wait` on the open body, by the leave's `closeBody`, by
-`Wave.Wait` on a detached or retained wave, or by an `Err()` call after the wave finished. `Finished` alone never
+`Wave.Wait` on a retained wave, or by an `Err()` call after the wave finished. `Finished` alone never
 acknowledges. An unacked error fails the item at completion, so a failure can be delayed but never lost.
 `FanOut.Wait`, `closeBody` and `Wave.Wait` all share one rule for a cancellation wake-up: a finished (for
 `FanOut.Wait`: idle) wave with an error is acknowledged and its error returned, because the poison that woke them is
 that error; a clean or unfinished wave leaves the cancellation cause as the answer.
 
-`Wave.Wait` is the only way to wait on a `Retain` or `Detach` wave inside the runtime; `MoveTo` and `TryMoveTo` take
+`Wave.Wait` is the only way to wait on a `Stage.Retain` or `FanOut.Retain` wave inside the runtime; `MoveTo` and `TryMoveTo` take
 no waves. The reason is the wake-up order: a wait that first asks for admission and only then looks at the wave lets
 the poison of a finished failed wave land in the admission wait, which returns the cause without acknowledging
 anything. A wait that owns the wave has no such gap. `Wave.Wait` resolves its caller before taking the lock: a
@@ -498,7 +524,8 @@ and `Wave.Wait` (`waitUntil`), the `TryMoveTo` preamble (`actingItem` with `chec
 `Retain`'s decision to run its callback. A context with cancellation stripped (`context.WithoutCancel`) therefore
 cannot move, schedule, wait or retain for a canceled item, which is what keeps a canceled item from committing past
 a failed older one; a derived context with a shorter deadline still works, since it inherits the item's cancellation
-and adds its own. `Detach` is the exception: it hands back the item's own wave whatever the cancellation state.
+and adds its own. `FanOut.Retain` is the exception: it hands back the item's own wave whatever the cancellation
+state.
 
 **`completeItem`** runs after any item's processor returns — an ItemProcessor for a root item, a `TaskFunc` for a
 child. It poisons the item on a real (non-shutdown) processor error, **seals the open body** if any (state `closed`;
@@ -537,12 +564,12 @@ mutex, a negative `sync.WaitGroup`): **misuse panics; genuine runtime conditions
 static wiring or a dynamic per-item contract violation is irrelevant.
 
 - **Panic**, with unexported sentinels (`errInvalidUnit`, `errWrongScope`, `errCannotMove`, `errConveyorRunning`,
-  `errConveyorFinalized`, `errStageNotEntered`, `errNothingToDetach`, `errBodyClosed`, `errWorkDetached`,
+  `errConveyorFinalized`, `errStageNotEntered`, `errNothingToRetain`, `errBodyClosed`, `errWorkRetained`,
   `errWrongEnterOrder`, `errNodeAlreadyEntered`, `errNilTaskFunc`, `errTaskReused`, `errForeignWave`): builder calls
   on a running or finalized conveyor; a handle from another conveyor, or one used with a context from another
-  conveyor; a node outside the item's series; moving backward or re-entering a node; `Retain` / `Detach` /
-  `Schedule` / `Wait` on a node the item does not occupy; `Schedule` / `Wait` through the item's own path at a body
-  that is closed or detached; a task calling `Schedule` for a fan-out it does not run under; a resubmitted `Task`; a
+  conveyor; a node outside the item's series; moving backward or re-entering a node; `Retain` / `Wait` on a node
+  the item does not occupy, or `Schedule` for a fan-out the item has passed; `Schedule` / `Wait` through the item's
+  own path at a body that is closed or retained; a task calling `Schedule` for a fan-out it does not run under; a resubmitted `Task`; a
   foreign wave; a move or a `Wait` attempted from a pool's non-movable work, or a lane child's `Wait` on its parent's
   fan-out (`errWrongScope`). They are unexported because a caller must not branch on them — they exist so the
   package's own tests can assert via `errors.Is`. The checks that run under `run.mu` are safe: the deferred `Unlock`
@@ -572,16 +599,14 @@ from any goroutine at any time, and both are **admission-only, never preemptive*
 `unitHasFreeSlot` is the single place occupancy is compared against a limit, so a live change is observed uniformly
 by `canEnter`, `pump` and the branch worker's pull-next. A limit is clamped to `>= 1`, a queue size to `>= 0`.
 
-`SetAdmission` is the third dial, on a fan-out's node unit (`unit.admission`), and follows the same shape
-(`setAdmission` → `storeDial`: store under the live run's `mu`, broadcast). All three dials are stored under `mu` while
-a run is live, because admission is a multi-step decision (predicate, node-or-room choice, the policy read in
+`SetBackpressure` is the third dial, on a fan-out's node unit (`unit.backpressure`), and follows the same shape
+(`setBackpressure` → `storeDial`: store under the live run's `mu`, broadcast). All three dials are stored under `mu`
+while a run is live, because admission is a multi-step decision (predicate, node-or-room choice, the mode read in
 `takeUnit`) that must see one value of each; the atomics remain for the lock-free getters and for stores before a run
-exists. It is admission-only too: a switch to `AdmitByPools` or `AdmitByPoolsStrict` makes items at the door
-also need free branch capacity (and, for the strict policy, gives the items admitted from then on an upstream hold),
-while items already inside were admitted as they were and are left alone; a switch back relaxes the predicate at once and leaves
-existing holds to end on their own (§6). `takeUnit` reads the policy in the same lock hold as `canEnter`, and a
-hold's life depends only on item state, so no admission straddles two policies. An unknown value is stored as
-`AdmitByLimit`.
+exists. It is admission-only too, and never widens or narrows the entry predicate: it decides only whether the items
+admitted from then on open an upstream hold, while items already inside were admitted under the mode of their time
+and existing holds end on their own (§6). Prepared work does not snapshot the mode: the hold is created at
+admission. An unknown value is stored as `BackpressureBalanced`.
 
 ## 12. Observability
 
@@ -596,9 +621,9 @@ fan-out.
 
 A branch's backlog reuses `run.queued`, the same counter a stage's waiting room uses, counting **collections** not
 fully handed out — one per `Schedule` call that touched the branch, so an item may count several times (§7). The
-fan-out's occupancy counts items inside, including empty-body visits and items whose leave failed. Under
-`AdmitByPoolsStrict` a node's occupancy (or its `Queued` gauge) also counts the token an item already admitted to the next
-fan-out still holds (§6); held tokens are not reported as a separate figure. Nothing else is
+fan-out's occupancy counts items inside, including empty-body visits and items whose leave failed. Under `Balanced`
+or `Strict` a node's occupancy (or its `Queued` gauge) also counts the token an item already admitted to the next
+fan-out still holds (§6); held tokens are not reported as a separate figure, and dormant work is not reported at all. Nothing else is
 shared: the admission side (`canEnterQueue` / `takeQueue` / `item.queuedAt`) is never reached for a branch's start
 gate, because work is born there rather than moving to it.
 
@@ -614,22 +639,23 @@ Break any of these and the model stops holding:
    admission publishes the waiting room's rank; the waiting room behind it published the same rank. Equal is allowed.
 3. **Admission is atomic.** Hold `mu` continuously from the `canEnter` check through the `occupy` mutation.
 4. **One slot per piece of work, released on completion.** A running task holds one slot and waits for nothing; a
-   queued task holds nothing. This is what makes the design deadlock-free (see §14). The item is the only two-token
-   holder: under `AdmitByPoolsStrict` it keeps the previous node's token while queued work of its own waits for a branch
-   slot, and what it waits for is freed by running tasks or lane children, never by another waiter.
+   queued task holds nothing. This is what makes the design deadlock-free (see §14). The item is the only multi-token
+   holder: under `Balanced` / `Strict` it keeps the previous node's token while queued work of its own waits for a
+   branch slot, and what it waits for is freed by running tasks or lane children, never by another waiter.
 5. **Per-branch order by item age.** A collection is inserted at its item's place — behind the queued work of the
    same item and of older ones, ahead of younger ones — and work is pulled from the head collection only. A fan-out
-   publishes its rank at the item's first `Schedule` (or leave, or `Detach`), never at admission, so a younger item
-   cannot queue before the older one has. Each collection leaves its queue exactly once, by identity, with one
+   publishes its rank at the item's initial batch (prepared work at admission, else the first `Schedule`, or leave,
+   or `Retain`), never at a bare admission, so a younger item cannot queue before the older one has. Each collection leaves its queue exactly once, by identity, with one
    `Queued` decrement and one exhaustion notification.
 6. **User code never runs under `run.mu`.** Task callbacks, generator pulls, channel receives, `Retain` bgOps and
    source releases all run outside the lock. `dropCollection` therefore hands abandoned sources to their own
    goroutine.
 7. **An error is never lost.** A wave whose error nobody acknowledged fails its item at completion; a root item's
    real error becomes `runErr`.
-8. **No slot outlives its item, and no item sits somewhere holding nothing.** The two halves of the retain/detach
-   handover, and of the upstream hold: a held token is freed by a discharge (first assignment per touched branch,
-   sealed body) or by `finishItem`, whichever comes first, and every discharge goes through `dischargeHold` once.
+8. **No slot outlives its item, and no item sits somewhere holding nothing.** The two halves of the retain
+   handover, and of the upstream hold: a held token is freed by a discharge (the mode's start milestone, or a body
+   sealed with no root submission) or by `finishItem`, whichever comes first, and every discharge goes through
+   `dischargeHold` once. Dormant work holds nothing and is dropped when the item passes, returns, or finishes.
 9. **A body is idle whenever it is observed idle.** A spawn is only accepted from running work of the same wave, so
    an idle wave cannot have work still to come; `Wait` and the leave may therefore decide on `idle()` alone. A sealed
    idle wave is finished and refuses additions.
@@ -650,7 +676,7 @@ Growth adds no new kind of wait. A spawn is a non-blocking enqueue from a runnin
 result of spawned work must express the join as a continuation (the last sibling schedules the merge), because `Wait`
 with a task's context panics. The item, which holds a fan-out slot and no branch slot, is the only thing that waits
 for a body, and the body drains through the holders above. A younger item at the door waits for the older item's
-first `Schedule`, leave or `Detach`; the older item never waits on the younger one. Ordered insertion moves queue
+initial batch, leave or `Retain`; the older item never waits on the younger one. Ordered insertion moves queue
 positions only and creates no waits. Streaming pulls hold one reserved slot while user code runs; the assumption,
 unchanged, is that the producer terminates or respects the item's context.
 
@@ -689,8 +715,9 @@ downstream exclusive stage re-serializes the results.
   into per-item parking. Before attempting it, benchmark whether the single `run.mu` — which targeted wakes do not
   fix — is the actual bottleneck.
 - **The door.** An item that enters a fan-out and schedules nothing for a long time holds the item behind it at the
-  door (or in the waiting room) until it schedules, leaves or detaches, whatever the fan-out's limit. User code runs
-  between admission and the first `Schedule` with the door closed; the documented advice is to keep it short.
+  door (or in the waiting room) until it schedules, leaves or retains, whatever the fan-out's limit. User code runs
+  between admission and the first `Schedule` with the door closed; the documented advice is to keep it short, or to
+  prepare the work with `Schedule` before entering, which opens the door at admission.
 - **`Started` covers roots only.** A spawned streaming source is not covered by `Started`; the task that created it
   owns the decision. The runtime cannot tell one collection's callbacks apart either (one context per collection), so a
   goroutine that outlives its task is detected only once the whole wave has finished.

@@ -119,8 +119,8 @@ func (p *conveyorPipeline) Run(ctx context.Context, n int) error {
 				if err := nd.fanout.Schedule(ic, tasks...); err != nil {
 					return err
 				}
-				// Detached, so the work overlaps with the nodes that follow — the shape this benchmark measures.
-				pending = append(pending[:0], nd.fanout.Detach(ic))
+				// Retained, so the work overlaps with the nodes that follow — the shape this benchmark measures.
+				pending = append(pending[:0], nd.fanout.Retain(ic))
 			}
 		}
 		// A trailing fan-out has no later node to wait in.
@@ -139,7 +139,7 @@ func (p *conveyorPipeline) Run(ctx context.Context, n int) error {
 	return err
 }
 
-// waitAll waits for the detached waves in order and returns the first error.
+// waitAll waits for the retained waves in order and returns the first error.
 func waitAll(ctx context.Context, waves []conveyor.Wave) error {
 	for _, w := range waves {
 		if err := w.Wait(ctx); err != nil {

@@ -126,8 +126,9 @@ You still have a **single function** that processes a single batch, but the Conv
    - with channels, it's complicated to send data from "stage1" to "stage3" if "stage2" is a fan-out stage 
 4. Supports deadlock-free [scatter-gather](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Conveyor.AddFanOut) 
    stages whose work may grow while it runs: schedule in rounds, or let a task schedule its own follow-ups
-   - optional backpressure that follows the pools with [SetAdmission](https://pkg.go.dev/github.com/cardinalby/go-conveyor#FanOut.SetAdmission):
-     items enter only while a pool has capacity, or, stricter, also stay in the previous stage until their work has started
+   - [SetBackpressure](https://pkg.go.dev/github.com/cardinalby/go-conveyor#FanOut.SetBackpressure) chooses when
+     an item entering a fan-out releases the previous stage: on entry, at the first task start, or once every branch
+     of its initial work has started a task (or ran out of tasks)
 5. Dynamic concurrency limits and queue sizes for stages (gracefully adjusted in runtime)
 6. Goroutines pool is dynamically adjusted (goroutines are reused for new items)
 7. Graceful **shutdown** happens naturally, just respect the context:
@@ -149,6 +150,18 @@ You still have a **single function** that processes a single batch, but the Conv
   - [Any significant difference](docs/8_benchmarks.md) is only observable if your stages take less than
     **100 microseconds** to process an item / batch.
 
+# Vocabulary
+
+| Operation     | Meaning                                                                           |
+|---------------|-----------------------------------------------------------------------------------|
+| `MoveTo`      | Advance the item into a node; leaving a fan-out joins its work.                   |
+| `Schedule`    | Register parallel work for a fan-out, before or after entering it.                |
+| `FanOut.Wait` | Join the work scheduled so far without leaving the fan-out (rounds).              |
+| `Retain`      | Let unfinished work keep the current node occupied while the item moves on.       |
+| `Wave.Wait`   | Wait for retained work later in the item's path.                                  |
+
+Most processors need only `MoveTo` and `Schedule`.
+
 # Features
 
 See the [docs](docs/README.md) for guides on these features:
@@ -156,7 +169,7 @@ See the [docs](docs/README.md) for guides on these features:
 - [Retain previous stage longer](docs/1_retain-previous-stage.md)
 - [Queues](docs/2_queues.md)
 - [Shared Stages](docs/3_shared-stages.md)
-- [Fan-out (scatter/gather)](docs/4_fan-out.md): pools, `Schedule` / `Wait` rounds, tasks that spawn follow-ups, `Detach` and `Wave.Wait`
+- [Fan-out (scatter/gather)](docs/4_fan-out.md): pools, `Schedule` / `Wait` rounds, tasks that spawn follow-ups, `Retain` and `Wave.Wait`
 - [Lanes: when a branch is a pipeline](docs/5_lanes.md)
 - [Conditional MoveTo](docs/6_conditional-move-to.md)
 - [Observability](docs/7_observability.md)

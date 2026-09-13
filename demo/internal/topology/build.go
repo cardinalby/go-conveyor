@@ -60,30 +60,30 @@ func Build(spec Spec, options ...conveyor.Option) (*Built, error) {
 	return built, nil
 }
 
-// AdmissionPolicy maps a Spec's Admission to the library's policy. An empty value is AdmissionByLimit (the default
-// for a Spec that predates the field); anything else unknown is an error, like an unknown Kind.
-func AdmissionPolicy(a Admission) (conveyor.FanOutAdmission, error) {
-	switch a {
-	case "", AdmissionByLimit:
-		return conveyor.AdmitByLimit, nil
-	case AdmissionByPools:
-		return conveyor.AdmitByPools, nil
-	case AdmissionByPoolsStrict:
-		return conveyor.AdmitByPoolsStrict, nil
+// BackpressureMode maps a Spec's Backpressure to the library's mode. An empty value is BackpressureBalanced (the
+// library's default); anything else unknown is an error, like an unknown Kind.
+func BackpressureMode(b Backpressure) (conveyor.FanOutBackpressure, error) {
+	switch b {
+	case "", BackpressureBalanced:
+		return conveyor.BackpressureBalanced, nil
+	case BackpressureBuffered:
+		return conveyor.BackpressureBuffered, nil
+	case BackpressureStrict:
+		return conveyor.BackpressureStrict, nil
 	default:
-		return conveyor.AdmitByLimit, fmt.Errorf("unknown admission %q", a)
+		return conveyor.BackpressureBalanced, fmt.Errorf("unknown backpressure %q", b)
 	}
 }
 
-// AdmissionName is the inverse of AdmissionPolicy, for reporting a live fan-out's policy in a State snapshot.
-func AdmissionName(a conveyor.FanOutAdmission) Admission {
-	switch a {
-	case conveyor.AdmitByPools:
-		return AdmissionByPools
-	case conveyor.AdmitByPoolsStrict:
-		return AdmissionByPoolsStrict
+// BackpressureName is the inverse of BackpressureMode, for reporting a live fan-out's mode in a State snapshot.
+func BackpressureName(m conveyor.FanOutBackpressure) Backpressure {
+	switch m {
+	case conveyor.BackpressureBuffered:
+		return BackpressureBuffered
+	case conveyor.BackpressureStrict:
+		return BackpressureStrict
 	default:
-		return AdmissionByLimit
+		return BackpressureBalanced
 	}
 }
 
@@ -99,11 +99,11 @@ func buildNodes(nodes []NodeSpec, host nodeHost, depth int, built *Built, claim 
 			built.Handles[n.ID] = host.AddStage(conveyor.OptName(n.Name)).SetLimit(n.Limit).SetQueueSize(n.QueueSize)
 			built.Depth[n.ID] = depth
 		case KindFanOut:
-			admission, err := AdmissionPolicy(n.Admission)
+			mode, err := BackpressureMode(n.Backpressure)
 			if err != nil {
 				return fmt.Errorf("node %q: %w", n.ID, err)
 			}
-			f := host.AddFanOut(conveyor.OptName(n.Name)).SetLimit(n.Limit).SetQueueSize(n.QueueSize).SetAdmission(admission)
+			f := host.AddFanOut(conveyor.OptName(n.Name)).SetLimit(n.Limit).SetQueueSize(n.QueueSize).SetBackpressure(mode)
 			built.Handles[n.ID] = f
 			built.Depth[n.ID] = depth
 			for _, br := range n.Branches {

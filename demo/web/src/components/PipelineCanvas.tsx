@@ -9,7 +9,7 @@ import { START_ID } from "../types/topology";
 import type { ItemPositions } from "../pipeline/itemPositions";
 import type { ResolvedNode, ResolvedStart } from "../pipeline/resolve";
 import type { MenuTarget } from "../types/menu";
-import type { FanOutAdmission } from "../types/pipeline";
+import type { FanOutBackpressure } from "../types/pipeline";
 import type { BranchEditField, EditField, FanOutNodeData, Mode, StageNodeData, StartNodeData, TreeCallbacks } from "./nodes/types";
 
 const nodeTypes = {
@@ -30,7 +30,7 @@ interface Props {
   mode: Mode;
   onContextMenu: (target: MenuTarget, evt: React.MouseEvent) => void;
   onEditNode: (id: string, field: EditField, value: number) => void;
-  onEditAdmission: (id: string, value: FanOutAdmission) => void;
+  onEditBackpressure: (id: string, value: FanOutBackpressure) => void;
   onEditBranch: (branchId: string, field: BranchEditField, value: number) => void;
   onEditStartDelay: (value: number) => void;
   onRenameNode: (id: string, name: string) => void;
@@ -109,7 +109,7 @@ export function PipelineCanvas({
   mode,
   onContextMenu,
   onEditNode,
-  onEditAdmission,
+  onEditBackpressure,
   onEditBranch,
   onEditStartDelay,
   onRenameNode,
@@ -185,8 +185,8 @@ export function PipelineCanvas({
   // node's occupancy) doesn't hand out a new reference here, which would defeat memoNode's shallowEqual check on
   // `data` for every node.
   const callbacks: TreeCallbacks = useMemo(
-    () => ({ mode, onContextMenu, onEditNode, onEditAdmission, onEditBranch, onRenameNode, onRenameBranch, onRenameEntrance, onFailTask, onFailItem }),
-    [mode, onContextMenu, onEditNode, onEditAdmission, onEditBranch, onRenameNode, onRenameBranch, onRenameEntrance, onFailTask, onFailItem],
+    () => ({ mode, onContextMenu, onEditNode, onEditBackpressure, onEditBranch, onRenameNode, onRenameBranch, onRenameEntrance, onFailTask, onFailItem }),
+    [mode, onContextMenu, onEditNode, onEditBackpressure, onEditBranch, onRenameNode, onRenameBranch, onRenameEntrance, onFailTask, onFailItem],
   );
 
   const startData: StartNodeData = {

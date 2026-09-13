@@ -180,7 +180,7 @@ func TestPositionalNamesInStats(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		got = c.Stats()
 		<-w.Finished()
 		return w.Err()

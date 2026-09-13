@@ -133,7 +133,7 @@ func TestSetLimitRaisePoolStartsQueuedWork(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		waitFor(t, "one task to run on the sequential pool", func() bool { return occupancyOf(c, pool) == 1 })
 		pool.SetLimit(4)
 		waitFor(t, "the raise to start the queued work at once", func() bool {
@@ -185,7 +185,7 @@ func TestSetLimitLowerPoolDrainsOversubscribed(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		waitFor(t, "the pool to fill to its limit", func() bool { return occupancyOf(c, pool) == 4 })
 		pool.SetLimit(1)
 		if got := occupancyOf(c, pool); got != 4 {
@@ -440,7 +440,7 @@ func TestSetLimitConcurrentWhileRunning(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		return w.Err()
 	})
@@ -492,7 +492,7 @@ func TestLimitsAreAlwaysAtLeastOne(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		pool.SetLimit(0) // clamped to 1 while the pool's work is still queued
 		<-w.Finished()
 		return w.Err()

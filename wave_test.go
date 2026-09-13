@@ -25,7 +25,7 @@ func TestWaveStartedThenFinished(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Started()
 		select {
 		case <-w.Finished():
@@ -67,7 +67,7 @@ func TestWaveStartedWaitsForStreamingSource(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Started()
 		pullsAtStarted.Store(pulls.Load())
 		<-w.Finished()
@@ -97,7 +97,7 @@ func TestWaveErrIsFinalAfterFinished(t *testing.T) {
 		if ferr != nil {
 			return ferr
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		got = w.Err()
 		return nil // the error was observed, so it must not fail the run again
@@ -165,8 +165,8 @@ func TestWaveJoinedAtLaterNodeSurfacesThere(t *testing.T) {
 		if ferr != nil {
 			return ferr
 		}
-		// Detached: passing `mid` must not wait for the work, so the wave is the item's to carry to `commit`.
-		w := fo.Detach(ctx)
+		// Retained: passing `mid` must not wait for the work, so the wave is the item's to carry to `commit`.
+		w := fo.Retain(ctx)
 		if err := mid.MoveTo(ctx); err != nil { // not joined here
 			return err
 		}
@@ -200,7 +200,7 @@ func TestWaveJoinedAtLaterNodeSurfacesThere(t *testing.T) {
 	}
 }
 
-// TestWaitSeveralWavesEachReportsItsOwnFailure: every wave answers for its own work. Two detached waves fail; the
+// TestWaitSeveralWavesEachReportsItsOwnFailure: every wave answers for its own work. Two retained waves fail; the
 // item is poisoned by whichever failed first, but each Wait reports its own wave's error, named after its fan-out,
 // and acknowledges only that wave. Once both were waited for, the processor may end the item clean.
 func TestWaitSeveralWavesEachReportsItsOwnFailure(t *testing.T) {
@@ -222,7 +222,7 @@ func TestWaitSeveralWavesEachReportsItsOwnFailure(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		wa := foA.Detach(ctx)
+		wa := foA.Retain(ctx)
 		err = foB.MoveTo(ctx)
 		if err == nil {
 			err = foB.Schedule(ctx, poolB.NewTask(func(context.Context) error { <-release; return second }))
@@ -230,7 +230,7 @@ func TestWaitSeveralWavesEachReportsItsOwnFailure(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		wb := foB.Detach(ctx)
+		wb := foB.Retain(ctx)
 		if err := commit.MoveTo(ctx); err != nil {
 			return err
 		}
@@ -289,7 +289,7 @@ func TestWaitForeignWavePanics(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			w := fo.Detach(ic)
+			w := fo.Retain(ic)
 			waves <- w
 			return commit.MoveTo(ic)
 		case 2:
@@ -332,7 +332,7 @@ func TestWaveResolvesOnShutdown(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			w := fo.Detach(ic)
+			w := fo.Retain(ic)
 			if once.CompareAndSwap(false, true) {
 				cancel()
 				<-w.Finished() // must resolve thanks to the cancellation
@@ -463,7 +463,7 @@ func TestWaveNeverReportsCleanFinishForSkippedWork(t *testing.T) {
 					if err != nil {
 						return err
 					}
-					w := fo.Detach(ic)
+					w := fo.Retain(ic)
 					<-w.Finished()
 					firstDone <- w.Err()
 					return nil
@@ -528,7 +528,7 @@ func TestWaitOnFailedWaveAcknowledgesIt(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		if err := mid.MoveTo(ctx); err != nil {
 			return err
 		}

@@ -1,6 +1,6 @@
 // Package runtime owns the demo's single conveyor instance across its whole lifetime and exposes the handful of
 // operations the WASM/JS boundary needs: start it from a topology.Spec, cancel or force-stop it, poll its live
-// state, and adjust a node's limit, queue size, admission policy or delay while it runs.
+// state, and adjust a node's limit, queue size, backpressure mode or delay while it runs.
 package runtime
 
 import (
@@ -25,18 +25,18 @@ type NodeState struct {
 	ID        string `json:"id"`
 	Limit     int    `json:"limit"`
 	QueueSize int    `json:"queueSize"`
-	// Admission is a fan-out's live admission policy ("limit", "pools" or "poolsStrict", see topology.Admission).
-	// Empty for every other kind of node.
-	Admission topology.Admission `json:"admission,omitempty"`
-	DelayMs   int                `json:"delayMs"`
+	// Backpressure is a fan-out's live backpressure mode ("buffered", "balanced" or "strict", see
+	// topology.Backpressure). Empty for every other kind of node.
+	Backpressure topology.Backpressure `json:"backpressure,omitempty"`
+	DelayMs      int                   `json:"delayMs"`
 	// TasksPerItem is how many tasks/children (see conveyor.Branch.NewTasks) one item schedules on this branch.
 	// Always 0 for anything but a pool or a lane — see topology.TaskCounts.
 	TasksPerItem int     `json:"tasksPerItem"`
 	InBody       []int64 `json:"inBody"`
 	InQueue      []int64 `json:"inQueue"`
-	// PendingEntry lists the items of a fan-out node that are entering it (MoveTo, possibly still waiting for
-	// admission) or have been admitted but whose Schedule call has not returned yet (tasks not dispatched). Always
-	// empty for a stage, a pool or the start stage — see topology.FanOutEntry.
+	// PendingEntry lists the items of a fan-out node that have prepared their branches' work (Schedule, before
+	// entry) but have not yet been admitted with that work activated (MoveTo, possibly still waiting for room).
+	// Always empty for a stage, a pool or the start stage — see topology.FanOutEntry.
 	PendingEntry []int64 `json:"pendingEntry"`
 	// BlockedLeaving lists the InBody items of a start/stage node — or a lane's own entrance, which behaves exactly
 	// like one — that have finished this node's own work and are now trying to advance into the next one. Always
@@ -250,7 +250,7 @@ func (m *Manager) State() State {
 		ns.BlockedLeaving = stillBlocked(blocked, id, ns.InBody, ns.LanePaths, reachableThroughBranch)
 		if f, ok := u.(conveyor.FanOut); ok {
 			ns.PendingEntry = entries.Pending(id)
-			ns.Admission = topology.AdmissionName(f.Admission())
+			ns.Backpressure = topology.BackpressureName(f.Backpressure())
 		}
 		if _, ok := u.(conveyor.Branch); ok {
 			ns.TasksPerItem = taskCounts.Get(id)
@@ -327,10 +327,10 @@ func (m *Manager) SetQueueSize(id string, value int) error {
 	return nil
 }
 
-// SetAdmission switches a running fan-out's admission policy immediately (see conveyor.FanOut.SetAdmission — safe on
-// a live conveyor by design; it applies to admissions after the call). value is a topology.Admission name. It errors
-// if nothing is running, id names something other than a fan-out, or value is not a known policy.
-func (m *Manager) SetAdmission(id string, value string) error {
+// SetBackpressure switches a running fan-out's backpressure mode immediately (see conveyor.FanOut.SetBackpressure —
+// safe on a live conveyor by design; it applies to entries after the call). value is a topology.Backpressure name.
+// It errors if nothing is running, id names something other than a fan-out, or value is not a known mode.
+func (m *Manager) SetBackpressure(id string, value string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	u, err := m.handleLocked(id)
@@ -341,11 +341,11 @@ func (m *Manager) SetAdmission(id string, value string) error {
 	if !ok {
 		return fmt.Errorf("node %q is not a fan-out", id)
 	}
-	policy, err := topology.AdmissionPolicy(topology.Admission(value))
+	mode, err := topology.BackpressureMode(topology.Backpressure(value))
 	if err != nil {
 		return fmt.Errorf("node %q: %w", id, err)
 	}
-	f.SetAdmission(policy)
+	f.SetBackpressure(mode)
 	return nil
 }
 

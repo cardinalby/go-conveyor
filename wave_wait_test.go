@@ -48,7 +48,7 @@ func TestWaitAfterMoveBlockedByBusySlotAcknowledges(t *testing.T) {
 			})); err != nil {
 				return err
 			}
-			w := fo.Detach(ctx)
+			w := fo.Retain(ctx)
 			if err := commit.MoveTo(ctx); !errors.Is(err, boom) {
 				t.Errorf("MoveTo = %v, want the poison %v", err, boom)
 			}
@@ -127,7 +127,7 @@ func TestWaitOnUnfinishedFailedWaveReturnsCause(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		waitFor(t, "the item to be poisoned", func() bool { return ctx.Err() != nil })
 		if err := commit.MoveTo(ctx); !errors.Is(err, boom) {
 			t.Errorf("MoveTo = %v, want the poison %v", err, boom)
@@ -204,7 +204,7 @@ func TestWaitBeforeMoveHoldsPreviousSlot(t *testing.T) {
 	var secondInMid atomic.Bool
 	go func() {
 		<-waiting
-		// Item 1's detached work holds one fan-out slot; item 2 inside the fan-out is the second. From there its only
+		// Item 1's retained work holds one fan-out slot; item 2 inside the fan-out is the second. From there its only
 		// way on is mid, which item 1 holds.
 		waitFor(t, "item 2 to be inside the fan-out", func() bool { return occupancyOf(c, fo) == 2 })
 		if occ := occupancyOf(c, mid); occ != 1 {
@@ -233,12 +233,12 @@ func TestWaitBeforeMoveHoldsPreviousSlot(t *testing.T) {
 		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { <-release; return nil })); err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		if err := mid.MoveTo(ctx); err != nil {
 			return err
 		}
 		close(waiting)
-		if err := w.Wait(ctx); err != nil { // holds mid while the detached work runs
+		if err := w.Wait(ctx); err != nil { // holds mid while the retained work runs
 			return err
 		}
 		return commit.MoveTo(ctx)
@@ -548,7 +548,7 @@ func TestWaitConcurrentWaiters(t *testing.T) {
 		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { <-fail; return boom })); err != nil {
 			return err
 		}
-		failed := fo.Detach(ctx)
+		failed := fo.Retain(ctx)
 		park2 := make(chan struct{})
 		go func() {
 			close(park2)

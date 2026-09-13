@@ -29,8 +29,7 @@ import (
 // Branch is what a FanOut's work is scheduled on: a Pool or a Lane. It is the task-construction surface the two
 // share, for code that builds work without caring which kind it got.
 //
-// FanOut.Branches returns them in creation order; type-assert to reach a kind's own methods (Pool.SetLimit,
-// Lane.AddStage).
+// FanOut.Branches returns them in creation order. Type-assert to Pool or Lane for the kind's own methods.
 type Branch interface {
 	Unit
 
@@ -51,12 +50,12 @@ type Branch interface {
 // Pool is a single-step branch of a FanOut's work: a task runs on the slot it was given and is done. SetLimit(n)
 // bounds how many of its tasks run at once.
 //
-// A pool's work has nowhere to travel, so calling MoveTo or Wait with a pool task's context panics — use a Lane for
-// a branch whose work is a multi-step path. The one node method that context may call is Schedule of the pool's own
-// fan-out, to add follow-up work before the task returns.
+// A pool task cannot move or wait: calling MoveTo or Wait with its context panics. Use a Lane for a branch whose
+// work is a multi-step path. The one node method a pool task may call is Schedule of the pool's own fan-out, to add
+// follow-up work before the task returns.
 //
-// Work is queued per branch by item age: a free slot is never given to a younger item's work while an older item has
-// work queued there. Work that has started, or a slot already reserved for a streaming pull, is never taken back.
+// Work is queued per branch by item age: a free slot never goes to a younger item's work while an older item has
+// work queued there. Work that has started is never taken back.
 type Pool interface {
 	Branch
 
@@ -79,7 +78,7 @@ type Pool interface {
 
 	// NewTasksGen creates a task whose callbacks are produced by gen, pulled one by one as pool slots free up. Use
 	// it to stream work without materializing it upfront; gen should respect the ItemProcessor's ctx. State it
-	// reads must not be mutated until Wait returns or, after Detach, until the wave's Started channel closes. A nil
+	// reads must not be mutated until Wait returns or, after Retain, until the wave's Started channel closes. A nil
 	// gen is a no-op.
 	NewTasksGen(gen iter.Seq[TaskFunc]) Task
 
@@ -90,15 +89,15 @@ type Pool interface {
 }
 
 // Lane is a branch of a FanOut's work that is a pipeline in its own right: it has interior nodes (AddStage,
-// AddFanOut), and each piece of scheduled work runs as a child item travelling them, using the same MoveTo an
+// AddFanOut), and each piece of scheduled work runs as a child item travelling them with the same MoveTo an
 // ItemProcessor uses on the conveyor.
 //
-// A lane's entrance always admits one child at a time — there is no SetLimit — so its parallelism comes from the
-// interior stages' own limits. Children are created in the lane's queue order (item age, then Schedule order) and
-// are admitted to the interior nodes in creation order. A child may Schedule more work at the fan-out its lane
-// belongs to, before its callback returns.
+// A lane's entrance admits one child at a time (there is no SetLimit), so its parallelism comes from the interior
+// stages' own limits. Children are created in queue order (item age, then Schedule order) and enter the interior
+// nodes in that order. A child may Schedule more work at the fan-out its lane belongs to, before its callback
+// returns.
 //
-// A lane with no interior nodes is legal but behaves as a Pool pinned at concurrency 1.
+// A lane with no interior nodes behaves as a Pool with limit 1.
 type Lane interface {
 	Branch
 

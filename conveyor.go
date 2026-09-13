@@ -1,3 +1,15 @@
+// Package conveyor moves items through an ordered series of nodes, keeping their relative order while managing
+// capacity, backpressure, and completion. The path of one item is written as a single function, the ItemProcessor.
+//
+// Everyday vocabulary:
+//   - MoveTo advances the item into a node.
+//   - Schedule registers parallel work for a fan-out, before or after entering it.
+//   - FanOut.Wait joins the work scheduled so far without leaving the fan-out.
+//   - Retain (on a Stage or a FanOut) lets unfinished work keep the node while the item moves on.
+//   - Wave.Wait waits for retained work later in the item's path.
+//
+// Most processors need only MoveTo and Schedule. Adaptive rounds add FanOut.Wait; overlapping work across stages
+// adds Retain.
 package conveyor
 
 import (
@@ -8,15 +20,15 @@ import (
 )
 
 // Conveyor moves items through an ordered series of nodes, preserving their relative order. Create one with
-// NewConveyor, build the nodes, then call Run with an ItemProcessor: the conveyor runs one ItemProcessor per item,
-// each on its own goroutine, and handles ordering, capacity and backpressure between nodes.
+// NewConveyor, build the nodes, then call Run with an ItemProcessor. The conveyor runs one ItemProcessor per item,
+// each on its own goroutine, and handles ordering, capacity, and backpressure between nodes.
 //
 // A node is either a Stage (AddStage), whose code runs inline in the ItemProcessor, or a FanOut (AddFanOut), where
 // the item schedules work onto branches (Pool or Lane) that run it in parallel. An item advances between nodes with
 // MoveTo.
 //
-// Background work started with Stage.Retain or FanOut.Detach is represented by a Wave, waited for with Wave.Wait or
-// read through its Finished and Err.
+// Background work started with Stage.Retain or FanOut.Retain is represented by a Wave: wait for it with Wave.Wait,
+// or read its Finished and Err.
 type Conveyor interface {
 	// AddStage adds a Stage to the end of the conveyor, admitting one item at a time by default. Chain SetLimit and
 	// SetQueueSize to adjust its capacity, and pass OptName to name it.
@@ -39,16 +51,14 @@ type Conveyor interface {
 	// after it returns, but a concurrent second call returns ErrConveyorAlreadyRunning.
 	Run(ctx context.Context, itemProcessor ItemProcessor) error
 
-	// SetItemsLimit caps how many items may be in flight across the whole conveyor at once, which in effect bounds
-	// how many workers run concurrently: one worker drives one root item for its whole journey, from creation to
-	// completion (see Run). A limit <= 0 means unlimited, the default. It returns the conveyor for chaining.
+	// SetItemsLimit caps how many items may be in flight across the whole conveyor at once. One item is one
+	// ItemProcessor call, from creation to completion, so this also bounds the number of worker goroutines. A limit <= 0
+	// means unlimited, the default. It returns the conveyor for chaining.
 	//
-	// Unlike a node's SetLimit, this bounds the conveyor globally, on top of whatever capacity the nodes themselves
-	// admit — it does not replace per-node limits, and setting it does not change any of them.
+	// It is a global bound on top of the nodes' own limits and does not change any of them.
 	//
-	// Safe to call at any time, from any goroutine, including on a running conveyor: raising it wakes the standby
-	// worker so waiting to create the next item is picked up at once; lowering it never evicts an item already in
-	// flight — it only stops new items from being created until the in-flight count has fallen below the new limit.
+	// Safe to call at any time, from any goroutine, including on a running conveyor. Lowering it never evicts an item in
+	// flight; it only stops new items from being created until the count has fallen below the new limit.
 	SetItemsLimit(n int) Conveyor
 
 	// ItemsLimit returns the current cap on items in flight across the whole conveyor, or 0 if unlimited (the

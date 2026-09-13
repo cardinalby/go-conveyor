@@ -107,7 +107,7 @@ func TestChildReleasesLaneEntranceOnFirstMove(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		return w.Err()
 	})
@@ -359,7 +359,7 @@ func TestChildSeesParentCancellation(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ic)
+		w := fo.Retain(ic)
 		<-w.Finished()
 		return w.Err()
 	})
@@ -461,7 +461,7 @@ func TestChildCannotMoveOutsideItsLane(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		return w.Err()
 	})
@@ -525,7 +525,7 @@ func TestNonTravellingWorkCannotMove(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Detach(ctx)
+		w := fo.Retain(ctx)
 		<-w.Finished()
 		return w.Err()
 	})

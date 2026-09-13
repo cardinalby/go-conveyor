@@ -11,16 +11,16 @@ import type { ResolvedFanOut, ResolvedNode, ResolvedStart } from "./resolve";
  *    out a stage's delay, or (in a fan-out's entry slot) with none of its work still queued on a branch and some of
  *    it running.
  *  - "pending"  — (fan-out entry slot only) took the slot but some of its work has not started yet: either its
- *    Schedule call hasn't returned (dispatch not confirmed — runtime.NodeState.PendingEntry), or it has but a target
- *    branch hasn't pulled the work yet (still in that branch's InQueue, or — for a lane — still somewhere in its own
- *    interior chain).
+ *    entry (MoveTo, which activates its prepared Schedule batch) isn't confirmed yet on the demo side —
+ *    runtime.NodeState.PendingEntry — or it is but a target branch hasn't pulled the work yet (still in that
+ *    branch's InQueue, or — for a lane — still somewhere in its own interior chain).
  *  - "blocked"  — finished this node's own work and is now trying to advance into the next node: a start/stage
  *    item past its own delay (runtime.NodeState.BlockedLeaving), or a fan-out entry with none of its work queued or
  *    running on any branch.
- *  - "held"     — a second, dimmed copy of an item that is already inside a fan-out admitted "by pools (strict)" (see
- *    conveyor.AdmitByPoolsStrict): the slot it still keeps in the node before the fan-out — or in the fan-out's own
- *    waiting room — until its first Schedule has started on every branch it touched. Drawn under a separate key
- *    (see heldKey) so the item appears in two places at once, which is exactly what the backpressure looks like.
+ *  - "held"     — a second, dimmed copy of an item that is already inside a "balanced" or "strict" fan-out (see
+ *    conveyor.FanOutBackpressure): the slot it still keeps in the node before the fan-out — or in the fan-out's own
+ *    waiting room — until its first Schedule has made progress. Drawn under a separate key (see heldKey) so the item
+ *    appears in two places at once, which is exactly what the backpressure looks like.
  *
  * The three fan-out fills are derived from what is polled (PendingEntry plus each branch's InQueue/InBody), not from
  * the library's Wave channels: an open body's channels are not observable, and Wave.Started counts only the sources
@@ -256,9 +256,9 @@ export function assignBodySlots(
  * lane's interior is "inside" whichever top-level node scheduled it, not a stage of its own. */
 function assignNode(node: ResolvedNode, slotKeys: Map<string, string>, fills: Map<string, ItemFill>): void {
   // Slots the earlier nodes of this walk already gave this node's body occupants, read before this node overwrites
-  // them: an item inside a fan-out admitted "by pools (strict)" still holds its slot in the node before it until its
-  // first tasks have started (see conveyor.AdmitByPoolsStrict), so it is genuinely in two bodies at once. Nodes are walked in
-  // pipeline order, so "already assigned" means "the node before". keyAssigner is deterministic for one
+  // them: an item inside a "balanced" or "strict" fan-out still holds its slot in the node before it until its first
+  // tasks have started (see conveyor.FanOutBackpressure), so it is genuinely in two bodies at once. Nodes are walked
+  // in pipeline order, so "already assigned" means "the node before". keyAssigner is deterministic for one
   // (lanePaths, inBody) pair, so a throwaway one here resolves the same composite keys assignBody is about to.
   const heldBefore = new Map<string, string>();
   if (node.kind === "fanout") {
@@ -281,8 +281,8 @@ function assignNode(node: ResolvedNode, slotKeys: Map<string, string>, fills: Ma
     if (no === null) return;
     let key = keyFor(no);
     const slot = slotKey(node.id, "queue", i);
-    // An item both inside a fan-out and in its waiting room is one admitted "by pools (strict)" from that room: the queued
-    // token is the one it keeps (the previous node was released when it stepped aside). Its rectangle belongs to
+    // An item both inside a fan-out and in its waiting room entered a "balanced" or "strict" fan-out from that room:
+    // the queued token is the one it keeps (the previous node was released when it stepped aside). Its rectangle belongs to
     // the body; the room shows the held copy. For a lane child the path pool has one entry per child, and the body
     // pass consumed it: the queued token then falls back to the bare number, which must not steal the root item's
     // rectangle — it is the held copy of a child already in the body. Several such tokens of one item take distinct

@@ -37,8 +37,8 @@ function declareUnit(hostVar: string, ctor: "AddStage" | "AddFanOut", node: Pipe
   let line = `${varName} := ${hostVar}.${ctor}()`;
   if (node.limit !== 1) line += `.SetLimit(${node.limit})`;
   if (node.queueSize !== 0) line += `.SetQueueSize(${node.queueSize})`;
-  if (node.kind === "fanout" && node.admission === "pools") line += ".SetAdmission(conveyor.AdmitByPools)";
-  if (node.kind === "fanout" && node.admission === "poolsStrict") line += ".SetAdmission(conveyor.AdmitByPoolsStrict)";
+  if (node.kind === "fanout" && node.backpressure === "buffered") line += ".SetBackpressure(conveyor.BackpressureBuffered)";
+  if (node.kind === "fanout" && node.backpressure === "strict") line += ".SetBackpressure(conveyor.BackpressureStrict)";
   return line;
 }
 
@@ -106,12 +106,13 @@ function declareNodes(
   });
 }
 
-/** Emits the MoveTo (and, for a fan-out, Schedule) sequence for nodes at indentLevel, looking up each node/branch's
- * variable in varById. Called
- * once for the top-level Run body, and again — one level of indentation deeper — inside a lane branch's own task
- * closure, for its interior nodes; that recursion is what lets a lane's interior contain a fan-out whose own
- * branches may again be lanes, to any depth. The caller is responsible for the trailing "return nil": once for the
- * Run body as a whole, and once per pool/lane task closure this function opens. */
+/** Emits the MoveTo sequence for nodes at indentLevel (a fan-out first Schedule-ing its branches' tasks, then
+ * MoveTo — the library's own recommended pattern, see conveyor.FanOut.MoveTo — so the tasks become the item's
+ * initial batch and start as part of entry), looking up each node/branch's variable in varById. Called once for the
+ * top-level Run body, and again — one level of indentation deeper — inside a lane branch's own task closure, for its
+ * interior nodes; that recursion is what lets a lane's interior contain a fan-out whose own branches may again be
+ * lanes, to any depth. The caller is responsible for the trailing "return nil": once for the Run body as a whole, and
+ * once per pool/lane task closure this function opens. */
 function emitBody(
   nodes: PipelineNode[],
   varById: Map<string, string>,
@@ -131,9 +132,6 @@ function emitBody(
       bodyLines.push("");
       return;
     }
-    bodyLines.push(indent(indentLevel, `if err := ${varName}.MoveTo(ctx); err != nil {`));
-    bodyLines.push(indent(indentLevel + 1, "return err"));
-    bodyLines.push(indent(indentLevel, "}"));
     bodyLines.push(indent(indentLevel, `if err := ${varName}.Schedule(ctx,`));
     node.branches.forEach((br) => {
       const brVar = varById.get(br.id) ?? br.id;
@@ -163,6 +161,9 @@ function emitBody(
       bodyLines.push(indent(indentLevel + 1, "}),"));
     });
     bodyLines.push(indent(indentLevel, "); err != nil {"));
+    bodyLines.push(indent(indentLevel + 1, "return err"));
+    bodyLines.push(indent(indentLevel, "}"));
+    bodyLines.push(indent(indentLevel, `if err := ${varName}.MoveTo(ctx); err != nil {`));
     bodyLines.push(indent(indentLevel + 1, "return err"));
     bodyLines.push(indent(indentLevel, "}"));
     bodyLines.push("");

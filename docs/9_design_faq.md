@@ -72,10 +72,45 @@ Why does `FanOut.MoveTo` take no tasks? Why the extra `Schedule` call?
   item stays inside the fan-out.
 
 None of that fits one call that both enters and hands over a fixed set of tasks. The cost is the **door**: the item
-behind cannot enter the fan-out until the item ahead has scheduled once (or left, or detached), so branch work stays
-in item order. Keep the code between `MoveTo` and the first `Schedule` short.
+behind cannot enter the fan-out until the item ahead has its initial batch on the branches (or has left, or retained),
+so branch work stays in item order. When the work is known up front, `Schedule` before `MoveTo`: the tasks are
+prepared, start on entry, and the door opens at once.
 
-## Q5. Waiting inside a task
+## Q5. Fan-out entry and pools
+
+Why does a fan-out let an item in while its pools are full? Isn't that where the backpressure should be?
+
+---
+
+Entry is by item slot and by turn only, in every backpressure mode. So the fan-out's `SetLimit` always means the same
+thing — how many items may have work outstanding here — and an item is never kept out by a pool it does not use.
+Pressure on the pools is expressed by **when the previous stage is released** instead:
+[SetBackpressure](4_fan-out.md#setbackpressure-when-the-previous-stage-is-released) chooses on entry (`Buffered`), at
+the first task start (`Balanced`), or at one start per branch of the initial batch (`Strict`). An item whose tasks
+wait for a full pool keeps the stage before it busy, which is where the reader feels it.
+
+## Q6. Why Balanced by default
+
+---
+
+`Balanced` asks for some progress before more items are read, but does not hold an item back for a pool it will reach
+later. It behaves like a plain stage when the pools keep up, and holds upstream only when an item's whole initial
+batch is waiting. `Buffered` is for maximum lookahead inside the fan-out; `Strict` for keeping the fewest items in
+flight. Set it explicitly when you know which one you want.
+
+## Q7. Retain and backpressure
+
+Why does `FanOut.Retain` not release the previous stage?
+
+---
+
+Retaining changes where the item waits for its work, not what its work is. If retaining released upstream, an item
+could escape `Balanced` or `Strict` by calling `Retain` and moving on, and the stage before the fan-out would stop
+feeling a saturated pool as soon as processors did that. So the previous stage is released when the initial batch
+starts, whether the item is inside the fan-out, has retained, or has moved on; an initial batch with no tasks releases
+at once.
+
+## Q8. Waiting inside a task
 
 Why can a task not wait for the work it spawned?
 
@@ -90,7 +125,7 @@ What a task may do is `Schedule` — a non-blocking enqueue. If a step needs all
 task of its own and let the last sibling schedule it (see [Join as a continuation](4_fan-out.md#join-as-a-continuation)).
 The ItemProcessor, which holds no branch slot, is the one that waits: with `Wait`, or by leaving the fan-out.
 
-## Q6. Stripped contexts
+## Q9. Stripped contexts
 
 Why does a context with cancellation stripped (`context.WithoutCancel`) not bypass cancellation?
 

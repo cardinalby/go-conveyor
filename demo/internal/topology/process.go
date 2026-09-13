@@ -110,12 +110,12 @@ func (t *TaskCounts) Set(branchID string, count int) {
 	}
 }
 
-// FanOutEntry tracks, per fan-out node, which items are currently admitted into it but have not yet had their
-// tasks dispatched — the narrow window between entering the node's waiting room/body and the item's Schedule call
-// returning (admission inside MoveTo, then the one Schedule that queues every branch's tasks). DebugUnitOccupants
-// cannot see this distinction on its own: an item counts as occupying the fan-out's body from the moment it is
-// admitted, which happens *inside* MoveTo, before our own code gets control back. The UI uses this to show an
-// item's circle with a striped fill while pending, solid once confirmed — see runtime.NodeState.PendingEntry.
+// FanOutEntry tracks, per fan-out node, which items have prepared their branches' work but have not yet been
+// admitted with that work activated — the window from Schedule, called before entry to prepare the item's initial
+// batch, through MoveTo admitting the item and activating it in the same lock hold. DebugUnitOccupants cannot see
+// this distinction on its own: an item counts as occupying the fan-out's body from the moment it is admitted, which
+// happens *inside* MoveTo, before our own code gets control back. The UI uses this to show an item's circle with a
+// striped fill while pending, solid once confirmed — see runtime.NodeState.PendingEntry.
 //
 // Entries are never explicitly removed mid-run: once an item leaves the fan-out (its next move releases the slot),
 // DebugUnitOccupants simply stops reporting it there, so a stale "confirmed" entry left behind is inert — nothing
@@ -129,8 +129,8 @@ func NewFanOutEntry() *FanOutEntry {
 	return &FanOutEntry{pending: make(map[string]map[int64]bool)}
 }
 
-// MarkPending records that itemNo is entering nodeID's fan-out (MoveTo may still be waiting for admission) and
-// its Schedule call has not returned yet.
+// MarkPending records that itemNo has prepared its work for nodeID's fan-out (Schedule, before entry) and has not
+// yet been admitted — MoveTo may still be waiting for room.
 func (e *FanOutEntry) MarkPending(nodeID string, itemNo int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -140,7 +140,8 @@ func (e *FanOutEntry) MarkPending(nodeID string, itemNo int64) {
 	e.pending[nodeID][itemNo] = true
 }
 
-// MarkConfirmed records that itemNo's tasks have been dispatched — Schedule returned successfully.
+// MarkConfirmed records that itemNo's tasks have been dispatched — MoveTo returned successfully, admitting the item
+// and activating its prepared work in the same lock hold.
 func (e *FanOutEntry) MarkConfirmed(nodeID string, itemNo int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -482,12 +483,13 @@ func ItemProcessor(
 // noRelease is the "nothing precedes this walk" releasePrev for the root item's own walk — see runNodes.
 func noRelease() {}
 
-// runNodes walks nodes in order, calling MoveTo on each stage in turn, or calling MoveTo on the fan-out and then
-// one Schedule with taskCounts.Get(branch) tasks per branch, and sleeps for the target's configured delay — read
-// from delays on every pass, so a live slider change takes effect for the next item/child to reach that node (a
-// pool's task reads it once, when the task actually starts running, for the same reason). Every sleep is followed by a
-// BlockedEntries.Mark for the node just finished, before the loop goes on to attempt the next node's MoveTo — see
-// BlockedEntries.
+// runNodes walks nodes in order, calling MoveTo on each stage in turn, or preparing taskCounts.Get(branch) tasks
+// per branch with one Schedule before calling MoveTo on the fan-out — the library's own recommended pattern: the
+// prepared work becomes the item's initial batch and is activated as part of admission, inside the same lock hold —
+// and sleeps for the target's configured delay — read from delays on every pass, so a live slider change takes
+// effect for the next item/child to reach that node (a pool's task reads it once, when the task actually starts
+// running, for the same reason). Every sleep is followed by a BlockedEntries.Mark for the node just finished, before
+// the loop goes on to attempt the next node's MoveTo — see BlockedEntries.
 //
 // It is called once for a root item, walking spec.Nodes with path == nil, and once per child a KindLane branch
 // spawns, walking that lane's own interior nodes with path set to the child's ordinal chain (see LanePathEntry) —
@@ -617,17 +619,19 @@ func runNodes(
 					}))
 				}
 			}
-			// The tasks are built above, before MoveTo, so the window between admission and Schedule stays as
-			// short as possible: the fan-out's door is closed to the next item until Schedule returns, and that
-			// window is exactly the "pending" state the UI draws.
+			// Schedule before MoveTo: the tasks built above become the item's initial batch and are activated as
+			// part of admission, inside the same lock hold — the library's own recommended pattern (see
+			// conveyor.FanOut.MoveTo) — so nothing separates "admitted" from "dispatched" the way a Schedule call
+			// after MoveTo would. entries.MarkPending/MarkConfirmed still bracket the same "no task has started yet"
+			// window the UI draws as "pending"; now nothing but MoveTo's own wait for admission stands between them.
 			entries.MarkPending(n.ID, no)
-			if err := fo.MoveTo(ctx); err != nil {
+			if err := fo.Schedule(ctx, tasks...); err != nil {
 				release()
 				releaseThis()
 				return err
 			}
-			// A Schedule error is the item's cancellation cause, the same thing a failed MoveTo would have reported.
-			if err := fo.Schedule(ctx, tasks...); err != nil {
+			// A MoveTo error is the item's cancellation cause, the same thing a failed Schedule would have reported.
+			if err := fo.MoveTo(ctx); err != nil {
 				release()
 				releaseThis()
 				return err
