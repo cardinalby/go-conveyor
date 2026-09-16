@@ -110,13 +110,13 @@ func (p *conveyorPipeline) Run(ctx context.Context, n int) error {
 						return nil
 					}))
 				}
+				if err := nd.fanout.Schedule(ic, tasks...); err != nil {
+					return err
+				}
 				if err := nd.fanout.MoveTo(ic); err != nil {
 					return err
 				}
 				if err := waitAll(ic, pending); err != nil {
-					return err
-				}
-				if err := nd.fanout.Schedule(ic, tasks...); err != nil {
 					return err
 				}
 				// Retained, so the work overlaps with the nodes that follow — the shape this benchmark measures.
