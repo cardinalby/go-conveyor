@@ -67,7 +67,7 @@ the backlog as soon as its last callback has been handed out.
 
 Some slots belong to an item that is already in a later node:
 
-- a `Stage.Retain` or `FanOut.Retain` in flight keeps its node's slot until the work is done;
+- a `Retain` in flight (on a stage, the starting stage, a lane or a fan-out) keeps its node's slot until the work is done;
 - under `BackpressureBalanced` or `BackpressureStrict` an item inside a fan-out keeps the previous stage's slot (or
   its waiting-room slot, counted in that node's `Queued`) until its initial batch has started
   (see [SetBackpressure](4_fan-out.md#setbackpressure-when-the-previous-stage-is-released)).

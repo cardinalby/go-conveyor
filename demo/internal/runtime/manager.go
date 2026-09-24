@@ -439,7 +439,7 @@ func (m *Manager) handleLocked(id string) (conveyor.Unit, error) {
 }
 
 // unitLimit reads a handle's Limit() generically; the implicit start stage exposes none (it is always 1 — see
-// Conveyor.StartUnit).
+// Conveyor.StartingStage).
 func unitLimit(u conveyor.Unit) int {
 	switch h := u.(type) {
 	case conveyor.Stage:

@@ -5,10 +5,26 @@ import (
 	"fmt"
 )
 
+// RetainableStage is a stage whose slot the item can hand to background work: a Stage, or the conveyor's starting
+// stage (Conveyor.StartingStage).
+type RetainableStage interface {
+	Unit
+
+	// Retain runs bgOp in the background while keeping this stage's slot held, letting the item move on without
+	// releasing the stage. The slot is freed once bgOp returns and the item has moved on. Wait for bgOp with the
+	// returned Wave (before or after a later MoveTo); an error from bgOp cancels the item.
+	//
+	// On a canceled item — canceled on ctx or on its own context — bgOp does not run and the returned wave is
+	// already finished, carrying the cancellation cause.
+	//
+	// It panics on misuse: a handle from another conveyor, or a stage the item does not currently occupy.
+	Retain(ctx context.Context, bgOp func() error) Wave
+}
+
 // Stage is a node whose work runs inline: the item enters it with MoveTo, runs the stage's code in the
 // ItemProcessor body while holding the slot, then moves on. A stage is entered at most once per item.
 type Stage interface {
-	Unit
+	RetainableStage
 
 	// MoveTo advances the item into this stage, releasing the previous node. It blocks until the stage (or its
 	// waiting room) has room and it is the item's turn.
@@ -29,16 +45,6 @@ type Stage interface {
 	// A canceled item returns (false, its cancellation cause), whether the cancellation is visible on ctx or only on
 	// the item's own context. It panics on the same misuse as MoveTo.
 	TryMoveTo(ctx context.Context) (entered bool, err error)
-
-	// Retain runs bgOp in the background while keeping this stage's slot held, letting the item move on without
-	// releasing the stage. The slot is freed once bgOp returns and the item has moved on. Wait for bgOp with the
-	// returned Wave (before or after a later MoveTo); an error from bgOp cancels the item.
-	//
-	// On a canceled item — canceled on ctx or on its own context — bgOp does not run and the returned wave is
-	// already finished, carrying the cancellation cause.
-	//
-	// It panics on misuse: a handle from another conveyor, or a stage the item does not currently occupy.
-	Retain(ctx context.Context, bgOp func() error) Wave
 
 	// SetLimit sets how many items may run this stage's code at once (default 1; a limit <= 0 means 1), and
 	// returns the stage for chaining. Item order through the stage is only guaranteed at limit 1.
@@ -128,24 +134,29 @@ func (s *stage) Limit() int { return int(s.work.limit.Load()) }
 
 func (s *stage) QueueSize() int { return int(s.work.queueSize.Load()) }
 
-// Retain hands this stage's slot to a background operation (see the Stage interface).
+// Retain hands this stage's slot to a background operation (see the RetainableStage interface).
 func (s *stage) Retain(ctx context.Context, bgOp func() error) Wave {
+	return s.series.conveyor.retain(ctx, s.work, bgOp)
+}
+
+// retain hands the slot of stage unit u to bgOp: the body of Stage.Retain and of the starting stage's Retain.
+func (c *conveyor) retain(ctx context.Context, u *unit, bgOp func() error) Wave {
 	// checkCancel is false: a canceled item is answered with a wave of this item's own (below), not an error, which
 	// needs the lock this call takes.
-	it, r, err := s.series.conveyor.actingItem(ctx, "retain", s.work, false)
+	it, r, err := c.actingItem(ctx, "retain", u, false)
 	if err != nil {
 		// No item to charge: hand back a standalone finished wave carrying the reason.
-		return standaloneWave(fmt.Errorf("retain %s: %w", s, err))
+		return standaloneWave(fmt.Errorf("retain %s: %w", u, err))
 	}
 	defer r.mu.Unlock()
 	if err := it.cancelCause(ctx); err != nil {
 		return finishedWave(r, it, err) // the item is canceled (on ctx or on its own context): do not run bgOp
 	}
-	if it.occupied[s.work.index] == 0 {
-		panic(fmt.Errorf("cannot retain %s: %w", s, errStageNotEntered))
+	if it.occupied[u.index] == 0 {
+		panic(fmt.Errorf("cannot retain %s: %w", u, errStageNotEntered))
 	}
 	w := newWave(r, it)
-	w.retainUnit = s.work
+	w.retainUnit = u
 	w.workStarted()
 	go r.runRetain(w, bgOp)
 	return w

@@ -54,6 +54,12 @@ fails the item when it completes. If the callback fails while other work of the 
 returns the item's cancellation cause instead; wait for `Finished` and read `Err`, or call `Wait` again after
 `Finished` is closed, to observe the wave's own error.
 
+## Retain the starting stage
+
+To retain the implicit starting stage of the conveyor, use it's own `conv.StartingStage().Retain()` method.
+
+For FanOut's Lane call `lane.Retain()` directly.
+
 ---
 
 | Prev                  | Next                     |

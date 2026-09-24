@@ -65,9 +65,13 @@ type Conveyor interface {
 	// default).
 	ItemsLimit() int
 
-	// StartUnit returns the handle of the implicit start stage that paces item creation, for matching it in Stats.
-	// It is not a Stage; there is nothing to move to.
-	StartUnit() Unit
+	// StartingStage returns the implicit stage every item starts in. The ItemProcessor code before the item's first
+	// MoveTo runs in it, one item at a time, and the next item is created only when it is free. It has no MoveTo
+	// and its limit is always 1.
+	//
+	// Use it to match the stage in Stats, or call Retain to hand its slot to background work: the item moves on,
+	// but the next item is not created until that work returns.
+	StartingStage() RetainableStage
 
 	// Stats returns a snapshot of the active run's state and resets the gauge windows. Safe to call at any time,
 	// from any goroutine; outside a run it reports the zero Stats.
@@ -181,13 +185,20 @@ type startOwner struct{}
 
 func (startOwner) String() string { return "start" }
 
-// StartUnit hands out the handle of the implicit start stage (see the Conveyor interface).
-func (c *conveyor) StartUnit() Unit { return startHandle{c.units[0]} }
+// StartingStage hands out the handle of the implicit start stage (see the Conveyor interface).
+func (c *conveyor) StartingStage() RetainableStage { return startHandle{c.units[0]} }
 
+// startHandle is the public handle of the implicit start stage. It is a value, so handles of one conveyor compare
+// equal (Stats matching).
 type startHandle struct{ u *unit }
 
 func (h startHandle) String() string { return h.u.String() }
 func (h startHandle) unit() *unit    { return h.u }
+
+// Retain hands the start stage's slot to a background operation (see the RetainableStage interface).
+func (h startHandle) Retain(ctx context.Context, bgOp func() error) Wave {
+	return h.u.conveyor.retain(ctx, h.u, bgOp)
+}
 
 // validateUnit panics if u is not a unit of this conveyor — a handle from another conveyor, or a zero handle.
 func (c *conveyor) validateUnit(u *unit) {

@@ -46,7 +46,7 @@ func (w *windowedInt) snapshot() Gauge {
 }
 
 // UnitStat is the per-node portion of Stats. Unit is the handle (a Stage, a FanOut, a Pool, a Lane, or
-// Conveyor.StartUnit) that produced it.
+// Conveyor.StartingStage) that produced it.
 //
 // Occupied and Limit describe the node itself. A slot counts while an item runs the node's code or has work
 // outstanding there, while Stage.Retain or FanOut.Retain keeps it for work in flight, and while an item admitted to a

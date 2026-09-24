@@ -20,7 +20,7 @@ func TestUnitIndexesFollowCreationOrder(t *testing.T) {
 	s2 := c.AddStage(OptName("s2")).SetQueueSize(2) // a waiting room, which creates no unit of its own
 	in := l1.AddStage(OptName("in"))                // built into a lane, but indexed in the one flat space
 
-	start := c.StartUnit().unit()
+	start := c.StartingStage().unit()
 	if start.index != 0 || start.kind != kindStart {
 		t.Fatalf("start unit: index=%d kind=%d, want index 0 and the start kind", start.index, start.kind)
 	}
@@ -56,7 +56,7 @@ func TestRanksReserveTwoForEveryNode(t *testing.T) {
 		u    *unit
 		rank int
 	}{
-		{c.StartUnit().unit(), 0},
+		{c.StartingStage().unit(), 0},
 		{a.unit(), 2},
 		{b.unit(), 4},
 		{fo.unit(), 6},
@@ -92,13 +92,13 @@ func TestBranchIsItsOwnRankSpace(t *testing.T) {
 	ii := il.AddStage(OptName("ii"))
 	implOf(c).finalize()
 
-	rootScope := c.StartUnit().unit().scope
+	rootScope := c.StartingStage().unit().scope
 	for _, tc := range []struct {
 		u     *unit
 		scope int
 		rank  int
 	}{
-		{c.StartUnit().unit(), rootScope, 0},
+		{c.StartingStage().unit(), rootScope, 0},
 		{pre.unit(), rootScope, 2},
 		{fo.unit(), rootScope, 4},
 		// l1's scope: the lane's unit is rank 0, then its interior nodes.
@@ -139,7 +139,7 @@ func TestPositionalNames(t *testing.T) {
 	implOf(c).finalize()
 
 	for _, tc := range []struct{ got, want string }{
-		{fmt.Sprint(c.StartUnit()), "start"},
+		{fmt.Sprint(c.StartingStage()), "start"},
 		{fmt.Sprint(s1), "stage 1"},
 		{fmt.Sprint(fo), "fo"},
 		{fmt.Sprint(l1), "fo.1"},
@@ -289,15 +289,15 @@ func TestTopologyFrozenFromTheFirstRun(t *testing.T) {
 	}
 }
 
-// TestStartUnitHandle: the implicit start stage is a real unit with limit 1, named "start", and it leads the Stats
+// TestStartingStageHandle: the implicit start stage is a real unit with limit 1, named "start", and it leads the Stats
 // entries so a caller can watch the gate that paces item creation.
-func TestStartUnitHandle(t *testing.T) {
+func TestStartingStageHandle(t *testing.T) {
 	c := NewConveyor()
 	s := c.AddStage(OptName("s"))
 
-	start := c.StartUnit()
+	start := c.StartingStage()
 	if got := fmt.Sprint(start); got != "start" {
-		t.Fatalf("StartUnit name = %q, want %q", got, "start")
+		t.Fatalf("StartingStage name = %q, want %q", got, "start")
 	}
 	if got := int(start.unit().limit.Load()); got != 1 {
 		t.Fatalf("start unit limit = %d, want 1", got)
@@ -314,7 +314,7 @@ func TestStartUnitHandle(t *testing.T) {
 	if len(got.Units) == 0 {
 		t.Fatalf("Stats reported no units")
 	}
-	if got.Units[0].Unit != c.StartUnit() {
+	if got.Units[0].Unit != c.StartingStage() {
 		t.Fatalf("first Stats entry = %s, want the start unit", got.Units[0].Unit)
 	}
 	if got.Units[0].Limit != 1 {

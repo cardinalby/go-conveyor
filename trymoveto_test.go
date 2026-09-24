@@ -114,7 +114,7 @@ func TestTryMoveToFanOutDeclinedLeavesItemInPlace(t *testing.T) {
 		if ok {
 			t.Error("expected to be declined by a full fan-out")
 		}
-		if occ := occupancyOf(c, c.StartUnit()); occ != 1 {
+		if occ := occupancyOf(c, c.StartingStage()); occ != 1 {
 			t.Errorf("start occupancy = %d, want 1 — the declined item stays in the previous node", occ)
 		}
 		close(tried)

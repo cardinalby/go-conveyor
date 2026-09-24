@@ -75,7 +75,7 @@ func TestDebugUnitOccupantsOneEntryPerNodeAndBranch(t *testing.T) {
 		t.Fatalf("run failed: %v", err)
 	}
 
-	want := []Unit{c.StartUnit(), s1, fo, l1, l2, in, commit}
+	want := []Unit{c.StartingStage(), s1, fo, l1, l2, in, commit}
 	if len(got) != len(want) {
 		t.Fatalf("DebugUnitOccupants has %d entries (%v), want %d", len(got), occupantNames(got), len(want))
 	}
@@ -86,9 +86,9 @@ func TestDebugUnitOccupantsOneEntryPerNodeAndBranch(t *testing.T) {
 	}
 }
 
-// TestDebugUnitOccupantsStartUnit: an item occupies the implicit start stage's body from creation until its first
+// TestDebugUnitOccupantsStartingStage: an item occupies the implicit start stage's body from creation until its first
 // move, and DebugUnitOccupants reports it there.
-func TestDebugUnitOccupantsStartUnit(t *testing.T) {
+func TestDebugUnitOccupantsStartingStage(t *testing.T) {
 	c := NewConveyor()
 	s := c.AddStage(OptName("s"))
 
@@ -111,7 +111,7 @@ func TestDebugUnitOccupantsStartUnit(t *testing.T) {
 	})
 	<-sampled
 
-	e := occupantsOf(t, got, c.StartUnit())
+	e := occupantsOf(t, got, c.StartingStage())
 	if len(e.InBody) != 1 || e.InBody[0] != 1 {
 		t.Fatalf("start InBody = %v, want [1]", e.InBody)
 	}

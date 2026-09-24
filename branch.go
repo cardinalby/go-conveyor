@@ -98,8 +98,14 @@ type Pool interface {
 // returns.
 //
 // A lane with no interior nodes behaves as a Pool with limit 1.
+//
+// The lane's entrance is the starting stage of each child: the callback code before the child's first MoveTo runs
+// in it. Retain hands the entrance slot to background work, so the child moves on but the lane creates no next
+// child until that work returns. Only a child of this lane may call it; a lane with no interior nodes creates no
+// children, so its tasks cannot.
 type Lane interface {
 	Branch
+	RetainableStage
 
 	// AddStage adds an interior Stage to this lane. Chain SetLimit to let several children run its code at once.
 	AddStage(opts ...AnyUnitOption) Stage
@@ -150,6 +156,11 @@ func (b *branch) String() string {
 }
 
 func (b *branch) unit() *unit { return b.start }
+
+// Retain hands the lane's entrance slot to a background operation (see the Lane and RetainableStage interfaces).
+func (b *branch) Retain(ctx context.Context, bgOp func() error) Wave {
+	return b.fanout.series.conveyor.retain(ctx, b.start, bgOp)
+}
 
 // travels reports whether this branch's work runs as child items that may move — i.e. whether it has anywhere to go.
 // It is a property of the topology, which is frozen from the first Run on, so it is stable for the lifetime of a run.

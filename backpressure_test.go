@@ -404,7 +404,7 @@ func TestBackpressureStrict_WalkThrough(t *testing.T) {
 		// 4. Item 4 needs db2: it enters, queues behind item 2, keeps read. read is full now.
 		waitFor(t, "item 4 admitted", func() bool { return slices.Contains(inBodyOf(c, f), 4) })
 		// 5. Item 5 blocks in read.MoveTo, on the start stage.
-		waitFor(t, "item 5 waits for read", func() bool { return slices.Contains(inBodyOf(c, c.StartUnit()), 5) })
+		waitFor(t, "item 5 waits for read", func() bool { return slices.Contains(inBodyOf(c, c.StartingStage()), 5) })
 		if got := inBodyOf(c, read); !slices.Equal(got, []int64{2, 4}) {
 			t.Errorf("read should hold the two stuck items; read = %v", got)
 		}
@@ -977,7 +977,7 @@ func TestBackpressure_StartStageTokenThrottlesItemCreation(t *testing.T) {
 			for _, k := range []string{"1/p1", "2/p1", "3/p1"} {
 				bt.gate(k)
 			}
-			start := c.StartUnit()
+			start := c.StartingStage()
 
 			done := make(chan struct{})
 			go func() {
@@ -1090,7 +1090,7 @@ func TestBackpressureStrict_ProcessorReturnWithNoSubmissionDischarges(t *testing
 	go func() {
 		defer close(done)
 		waitFor(t, "item 2 admitted with a hold", func() bool { return slices.Equal(heldItems(c), []int64{2}) })
-		waitFor(t, "item 3 to wait for read", func() bool { return slices.Contains(inBodyOf(c, c.StartUnit()), 3) })
+		waitFor(t, "item 3 to wait for read", func() bool { return slices.Contains(inBodyOf(c, c.StartingStage()), 3) })
 		waitFor(t, "item 1's leave and item 3's move to park", func() bool { return parkedOf(c) == 2 })
 		// From here the only broadcast left in the run is the one item 2's completion must make.
 		close(x.processorGates[2])
@@ -1135,7 +1135,7 @@ func TestBackpressureStrict_ProcessorReturnKeepsPendingBatchHold(t *testing.T) {
 		defer close(done)
 		waitFor(t, "item 2 admitted with a hold", func() bool { return slices.Equal(heldItems(c), []int64{2}) })
 		waitFor(t, "item 2's collection queued", func() bool { return queueOccupancy(c, x.p1) == 1 })
-		waitFor(t, "item 3 to wait for read", func() bool { return slices.Contains(inBodyOf(c, c.StartUnit()), 3) })
+		waitFor(t, "item 3 to wait for read", func() bool { return slices.Contains(inBodyOf(c, c.StartingStage()), 3) })
 		close(x.processorGates[2]) // item 2 returns; its body is sealed with the batch still queued
 		waitFor(t, "item 2 to return", func() bool { return itemReturned(c, 2) })
 		waitFor(t, "item 1's leave and item 3's move to park", func() bool { return parkedOf(c) == 2 })

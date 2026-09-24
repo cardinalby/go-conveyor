@@ -37,7 +37,7 @@ func Build(spec Spec, options ...conveyor.Option) (*Built, error) {
 	c := conveyor.NewConveyor(options...).SetItemsLimit(spec.ItemsLimit)
 	built := &Built{
 		Conveyor: c,
-		Handles:  map[string]conveyor.Unit{StartID: c.StartUnit()},
+		Handles:  map[string]conveyor.Unit{StartID: c.StartingStage()},
 		Depth:    map[string]int{StartID: 0},
 	}
 

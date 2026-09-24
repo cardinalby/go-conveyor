@@ -83,7 +83,7 @@ func TestStatsOneEntryPerNodeAndBranch(t *testing.T) {
 		t.Fatalf("run failed: %v", err)
 	}
 
-	want := []Unit{c.StartUnit(), s1, fo, l1, l2, in, commit}
+	want := []Unit{c.StartingStage(), s1, fo, l1, l2, in, commit}
 	if len(got.Units) != len(want) {
 		t.Fatalf("Stats has %d entries (%v), want %d", len(got.Units), statNames(got), len(want))
 	}

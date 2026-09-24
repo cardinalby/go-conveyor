@@ -308,7 +308,7 @@ function App() {
 
   // The implicit start stage is not one of Pipeline.nodes, so renaming it is a plain field write. It is the one name
   // that stays purely cosmetic even at Build time: go-conveyor's start unit is always "start" and takes no OptName
-  // (see conveyor.Conveyor.StartUnit), so nothing carries this into the Spec or the generated code.
+  // (see conveyor.Conveyor.StartingStage), so nothing carries this into the Spec or the generated code.
   const handleRenameStart = useCallback((name: string) => {
     setPipeline((p) => ({ ...p, startName: name }));
   }, []);

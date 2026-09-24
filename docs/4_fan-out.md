@@ -233,7 +233,7 @@ and there are two kinds of them:
 
 If you don't need to wait for the fan-out's tasks when leaving it, retain the body and wait for the returned
 [Wave](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Wave) later. It is the fan-out counterpart of
-[Stage.Retain](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Stage.Retain): a stage takes a callback because
+[Stage.Retain](https://pkg.go.dev/github.com/cardinalby/go-conveyor#RetainableStage.Retain): a stage takes a callback because
 its work runs inline; a fan-out already has its work scheduled. Where the item stands while it waits is your choice:
 `Wave.Wait` after `commit.MoveTo` holds the **commit** slot, before it holds the **report** slot.
 

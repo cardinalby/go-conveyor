@@ -117,7 +117,7 @@ func (u *unit) queueName() string { return u.owner.String() + ".queue" }
 // whether or not a queue exists, and no other unit of the scope ever holds it.
 func (u *unit) queueRank() int { return u.rank - 1 }
 
-// Unit is a handle to something with capacity: a Stage, a FanOut, a Branch (Pool or Lane), or Conveyor.StartUnit.
+// Unit is a handle to something with capacity: a Stage, a FanOut, a Branch (Pool or Lane), or Conveyor.StartingStage.
 // It names the node in Stats and in error messages.
 type Unit interface {
 	fmt.Stringer
