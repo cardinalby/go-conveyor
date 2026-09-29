@@ -320,6 +320,7 @@ func (r *run) takeQueue(it *item, u *unit) {
 		if q > it.maxRank {
 			it.maxRank = q
 		}
+		r.markNoAbortLocked(it)
 	}
 	r.releaseBelow(it, u.queueRank())
 	r.cond.Broadcast()
@@ -456,6 +457,7 @@ func (r *run) occupy(it *item, u *unit, publish bool) {
 	if u.rank > it.reachedRank {
 		it.reachedRank = u.rank
 	}
+	r.markNoAbortLocked(it)
 	published := u.queueRank()
 	if publish {
 		published = u.rank

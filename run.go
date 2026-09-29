@@ -130,7 +130,7 @@ func (r *run) watchShutdown(ctx context.Context, stopWatch <-chan struct{}, done
 	case <-stopWatch:
 		return // run finished without a shutdown; nothing to do
 	case <-ctx.Done():
-		r.beginShutdown()
+		r.beginShutdown(context.Cause(ctx))
 	case <-r.shutdownCh:
 		// shutdown already begun by an item error
 	}
@@ -156,19 +156,61 @@ func (r *run) watchShutdown(ctx context.Context, stopWatch <-chan struct{}, done
 }
 
 // beginShutdown stops new items from being created and wakes all waiters so idle workers exit and blocked node
-// calls re-evaluate. In-flight items are otherwise left running.
-func (r *run) beginShutdown() {
+// calls re-evaluate. In-flight items are otherwise left running, except those before the no-abort point.
+func (r *run) beginShutdown(cause error) {
 	r.mu.Lock()
-	r.markShutdownLocked()
+	r.markShutdownLocked(cause)
 	r.cond.Broadcast()
 	r.mu.Unlock()
 }
 
-// markShutdownLocked records that shutdown has begun: it stops new items from being created and signals the
-// watcher (which applies shutdownTimeout). Idempotent. The caller holds r.mu and must broadcast.
-func (r *run) markShutdownLocked() {
+// markShutdownLocked records that shutdown has begun: it stops new items from being created, aborts the items
+// before the no-abort point with cause, and signals the watcher (which applies the shutdown context). The first
+// cause is kept. Idempotent. The caller holds r.mu and must broadcast.
+func (r *run) markShutdownLocked(cause error) {
 	r.stopCreating = true
+	r.abortUnprotectedLocked(cause)
 	r.shutdownOnce.Do(func() { close(r.shutdownCh) })
+}
+
+// abortUnprotectedLocked cancels with a ShutdownError every root item that is not marked noAbort (see
+// SetNoAbortPoint). The marked items are always the oldest ones (see protectReachedLocked), so the walk from the tail
+// stops at the first marked item, costing O(aborted items). Lane children go with their parents' contexts. Caller
+// holds mu and must broadcast.
+func (r *run) abortUnprotectedLocked(cause error) {
+	for it := r.scopes[0].tail; it != nil && !it.noAbort; it = it.prev {
+		it.cancel(&shutdownError{cause: cause})
+	}
+}
+
+// noAbortRankLocked is the rank of the no-abort point: 0, the starting stage, by default. Caller holds mu.
+func (r *run) noAbortRankLocked() int {
+	if p := r.conveyor.noAbortPoint.Load(); p != nil {
+		return p.rank
+	}
+	return 0
+}
+
+// markNoAbortLocked marks a root item noAbort once its reachedRank reaches the no-abort point: it has entered the
+// point or a later node, or the waiting room of a later node (younger items may then enter the point, so it must
+// count as past it to keep the marked items a prefix). Called wherever reachedRank grows. Caller holds mu.
+func (r *run) markNoAbortLocked(it *item) {
+	if it.scope == 0 && !it.noAbort && it.reachedRank >= r.noAbortRankLocked() {
+		it.noAbort = true
+	}
+}
+
+// protectReachedLocked marks noAbort every live root item that has entered the no-abort point or a later node, after
+// the point was moved. By invariant 2 reachedRank is non-increasing with item age, and marks are never cleared, so
+// the marked items stay a prefix of the root list: the walk from the tail stops at the first marked item. An aborted
+// item is not marked: its abort can't be undone. Caller holds mu.
+func (r *run) protectReachedLocked() {
+	rank := r.noAbortRankLocked()
+	for it := r.scopes[0].tail; it != nil && !it.noAbort; it = it.prev {
+		if it.reachedRank >= rank && it.ctx.Err() == nil {
+			it.noAbort = true
+		}
+	}
 }
 
 // cancelInFlight cancels every in-flight item's context with a ShutdownError by canceling their common parent, so
@@ -315,7 +357,7 @@ func (r *run) completeItem(it *item, procErr error) {
 		for later := it.next; later != nil; later = later.next {
 			later.cancel(&shutdownError{cause: effErr})
 		}
-		r.markShutdownLocked()
+		r.markShutdownLocked(effErr)
 	}
 	r.finishItem(it)
 	if it.cancel != nil {

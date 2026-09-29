@@ -84,9 +84,14 @@ export type PipelineNode = StageNode | FanOutNode;
 /** itemsLimit caps how many items may be in flight across the whole conveyor at once (see Go's
  * conveyor.Conveyor.SetItemsLimit) — global, unlike every other dial here, which belongs to one node. 0 means
  * unlimited, the default. */
+/** noAbortPoint is the id of a top-level node (never a node inside a lane), or null for the start, the default —
+ * see Go's conveyor.Conveyor.SetNoAbortPoint: when shutdown begins, items that have not entered it yet are aborted
+ * at once, so with the start no item is aborted. The mutations in ../pipeline/mutations keep it pointing at an
+ * existing top-level node. */
 export interface Pipeline {
   nodes: PipelineNode[];
   startDelayMs: number;
   startName: string;
   itemsLimit: number;
+  noAbortPoint: string | null;
 }

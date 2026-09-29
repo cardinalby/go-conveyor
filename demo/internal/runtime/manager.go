@@ -1,6 +1,6 @@
 // Package runtime owns the demo's single conveyor instance across its whole lifetime and exposes the handful of
 // operations the WASM/JS boundary needs: start it from a topology.Spec, cancel or force-stop it, poll its live
-// state, and adjust a node's limit, queue size, backpressure mode or delay while it runs.
+// state, and adjust a node's limit, queue size, backpressure mode or delay, or the no-abort point, while it runs.
 package runtime
 
 import (
@@ -393,6 +393,23 @@ func (m *Manager) SetItemsLimit(value int) error {
 		return errors.New("not running")
 	}
 	m.built.Conveyor.SetItemsLimit(value)
+	return nil
+}
+
+// SetNoAbortPoint moves the active run's no-abort point immediately (see conveyor.Conveyor.SetNoAbortPoint — safe
+// on a live conveyor by design). id is resolved like topology.Spec.NoAbortPoint: empty or StartID is the starting
+// stage, any other id must be a top-level node. It errors if nothing is running or id is not a valid point.
+func (m *Manager) SetNoAbortPoint(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.running || m.built == nil {
+		return errors.New("not running")
+	}
+	u, err := m.built.NoAbortUnit(id)
+	if err != nil {
+		return err
+	}
+	m.built.Conveyor.SetNoAbortPoint(u)
 	return nil
 }
 

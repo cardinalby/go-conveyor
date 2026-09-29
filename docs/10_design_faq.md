@@ -144,6 +144,6 @@ cancellation and adds its own.
 
 ---
 
-| Prev                             |
-|----------------------------------|
-| [⬅ Benchmarks](8_benchmarks.md) |
+| Prev                         |
+|------------------------------|
+| [⬅ Shutdown](9_shutdown.md) |

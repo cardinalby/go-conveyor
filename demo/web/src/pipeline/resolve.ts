@@ -58,6 +58,8 @@ export interface ResolvedStage {
   /** Non-empty only when this stage is reachable through some lane's interior — see ../types/state's
    * LanePathEntry. */
   lanePaths: LanePathEntry[];
+  /** See NoAbortRole. */
+  noAbort: NoAbortRole;
 }
 
 export interface ResolvedFanOut {
@@ -71,6 +73,8 @@ export interface ResolvedFanOut {
   inQueue: number[];
   pendingEntry: number[];
   lanePaths: LanePathEntry[];
+  /** Same as ResolvedStage's. */
+  noAbort: NoAbortRole;
   branches: ResolvedBranch[];
 }
 
@@ -81,6 +85,17 @@ export interface ResolvedStart {
   delayMs: number;
   inBody: number[];
   blockedLeaving: number[];
+  /** True when Pipeline.noAbortPoint is null: the start is the no-abort point (the default). */
+  noAbortPoint: boolean;
+}
+
+/** A node's part in the no-abort point (see Pipeline.noAbortPoint): "point" for the current one, "slot" for a
+ * top-level node that can become it, "none" inside a lane. */
+export type NoAbortRole = "point" | "slot" | "none";
+
+function noAbortRole(id: string, pointId: string | null | undefined): NoAbortRole {
+  if (pointId === undefined) return "none";
+  return id === pointId ? "point" : "slot";
 }
 
 function indexById(runState: RunState | null): Map<string, NodeState> {
@@ -133,7 +148,8 @@ function sameStage(a: ResolvedStage, b: ResolvedStage): boolean {
     sameNums(a.inBody, b.inBody) &&
     sameNums(a.inQueue, b.inQueue) &&
     sameNums(a.blockedLeaving, b.blockedLeaving) &&
-    sameLanePaths(a.lanePaths, b.lanePaths)
+    sameLanePaths(a.lanePaths, b.lanePaths) &&
+    a.noAbort === b.noAbort
   );
 }
 
@@ -174,6 +190,7 @@ function sameFanOut(a: ResolvedFanOut, b: ResolvedFanOut): boolean {
     sameNums(a.inQueue, b.inQueue) &&
     sameNums(a.pendingEntry, b.pendingEntry) &&
     sameLanePaths(a.lanePaths, b.lanePaths) &&
+    a.noAbort === b.noAbort &&
     a.branches.length === b.branches.length &&
     a.branches.every((branch, i) => branch === b.branches[i])
   );
@@ -182,8 +199,13 @@ function sameFanOut(a: ResolvedFanOut, b: ResolvedFanOut): boolean {
 /** Resolves one node list — pipeline.nodes, or a lane's own interior nodes — against live, keeping every id's own
  * cache entry regardless of which list it's found in (see the caches' own doc). Shared by resolvePipeline and, for
  * a lane branch, called again on its interior — the recursion is what lets a lane's interior contain a fan-out
- * whose own branches may again be lanes, to any depth. */
-function resolveNodes(nodes: PipelineNode[], live: Map<string, NodeState>): ResolvedNode[] {
+ * whose own branches may again be lanes, to any depth. pointId is Pipeline.noAbortPoint at the top level and
+ * undefined inside a lane, where no node can be the point. */
+function resolveNodes(
+  nodes: PipelineNode[],
+  live: Map<string, NodeState>,
+  pointId: string | null | undefined,
+): ResolvedNode[] {
   return nodes.map((n, i): ResolvedNode => {
     if (n.kind === "stage") {
       const s = live.get(n.id);
@@ -198,6 +220,7 @@ function resolveNodes(nodes: PipelineNode[], live: Map<string, NodeState>): Reso
         inQueue: s?.inQueue ?? [],
         blockedLeaving: s?.blockedLeaving ?? [],
         lanePaths: s?.lanePaths ?? [],
+        noAbort: noAbortRole(n.id, pointId),
       };
       return memoized(stageCache, n.id, next, sameStage);
     }
@@ -233,7 +256,7 @@ function resolveNodes(nodes: PipelineNode[], live: Map<string, NodeState>): Reso
         inQueue: bs?.inQueue ?? [],
         blockedLeaving: bs?.blockedLeaving ?? [],
         lanePaths: bs?.lanePaths ?? [],
-        nodes: resolveNodes(b.nodes, live),
+        nodes: resolveNodes(b.nodes, live, undefined),
       };
       return memoized(laneCache, b.id, next, sameLane);
     });
@@ -248,6 +271,7 @@ function resolveNodes(nodes: PipelineNode[], live: Map<string, NodeState>): Reso
       inQueue: fo?.inQueue ?? [],
       pendingEntry: fo?.pendingEntry ?? [],
       lanePaths: fo?.lanePaths ?? [],
+      noAbort: noAbortRole(n.id, pointId),
       branches,
     };
     return memoized(fanOutCache, n.id, next, sameFanOut);
@@ -260,7 +284,7 @@ function resolveNodes(nodes: PipelineNode[], live: Map<string, NodeState>): Reso
  * resolves to the same positional name go-conveyor itself would assign (see ./names). Each returned node/branch is
  * the same object reference as last time when nothing about it changed — see the memoized() caches above. */
 export function resolvePipeline(pipeline: Pipeline, runState: RunState | null): ResolvedNode[] {
-  return resolveNodes(pipeline.nodes, indexById(runState));
+  return resolveNodes(pipeline.nodes, indexById(runState), pipeline.noAbortPoint);
 }
 
 /** The implicit start ("Read") stage is not part of Pipeline — every conveyor has exactly one automatically — so
@@ -273,5 +297,6 @@ export function resolveStart(pipeline: Pipeline, runState: RunState | null): Res
     delayMs: s?.delayMs ?? pipeline.startDelayMs,
     inBody: s?.inBody ?? [],
     blockedLeaving: s?.blockedLeaving ?? [],
+    noAbortPoint: pipeline.noAbortPoint === null,
   };
 }

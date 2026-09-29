@@ -2,6 +2,7 @@ import { EditableTitle } from "../shared/EditableTitle";
 import { BackpressureSelect } from "../shared/BackpressureSelect";
 import { LabeledSlider } from "../shared/LabeledSlider";
 import { SlotStrip } from "../shared/SlotStrip";
+import { NoAbortMarker } from "../shared/NoAbortMarker";
 import { BranchBox } from "./BranchBox";
 import { bodySlotCount, queueSlotCount } from "../../pipeline/slots";
 import { assignBodySlots, keyAssigner } from "../../pipeline/itemPositions";
@@ -43,13 +44,19 @@ export function FanOutBox({ fanout, callbacks, handles, shellRef }: Props) {
         </div>
       )}
       <div
-        className="node-box node-fanout nodrag nopan"
+        className={`node-box node-fanout nodrag nopan${fanout.noAbort === "point" ? " node-no-abort" : ""}`}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation(); // this box may now be nested inside a lane's interior — never bubble to its own menu
           callbacks.onContextMenu({ kind: "fanout", id: fanout.id }, e);
         }}
       >
+        {fanout.noAbort !== "none" && (
+          <NoAbortMarker
+            slot={fanout.noAbort === "slot"}
+            onClick={() => callbacks.onSetNoAbortPoint(fanout.noAbort === "slot" ? fanout.id : null)}
+          />
+        )}
         {handles}
         <EditableTitle value={fanout.name} onCommit={(name) => callbacks.onRenameNode(fanout.id, name)} />
         <LabeledSlider

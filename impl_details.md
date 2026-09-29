@@ -78,10 +78,10 @@ first `Run`, and idempotently from `newRun`.
 ## 3. Per-run state
 
 `conveyor` (the unexported implementation behind the `Conveyor` interface) is immutable topology shared across
-`Run` invocations — except the two atomic capacities and a fan-out node's atomic backpressure mode. All mutable
-state lives on `run`, allocated fresh per `Run`, so nothing leaks between invocations. `conveyor.currentRun` is an
-atomic pointer to the active run (nil outside a run); it backs `Stats` and lets `SetLimit` / `SetQueueSize` /
-`SetBackpressure` reach a live run.
+`Run` invocations — except the two atomic capacities, a fan-out node's atomic backpressure mode and the atomic
+`noAbortPoint` unit. All mutable state lives on `run`, allocated fresh per `Run`, so nothing leaks between
+invocations. `conveyor.currentRun` is an atomic pointer to the active run (nil outside a run); it backs `Stats` and
+lets `SetLimit` / `SetQueueSize` / `SetBackpressure` / `SetNoAbortPoint` reach a live run.
 
 Everything below `run.mu` is guarded by it:
 
@@ -551,6 +551,22 @@ promptly. Cancellation goes through the common
 parent `itemsCtx`, so items blocked in a node method return promptly; code inside an ItemProcessor that ignores its
 context is not forcibly interrupted. Items already canceled individually keep their more specific cause, since the
 first cancellation of a context wins.
+
+**No-abort point.** A root item gets `item.noAbort` (`markNoAbortLocked`, wherever `reachedRank` grows: `occupy`
+and `takeQueue`) once `reachedRank >= point.rank`: it entered the point or a later node, or a later node's waiting
+room. The waiting room must count: younger items may enter the point while an older one waits there. The default,
+the starting stage, is rank 0, so every item gets it at birth. The mark is never
+cleared. `SetNoAbortPoint` stores the point under `mu` of a live run and calls `protectReachedLocked`, which marks
+the live items that have already reached the new point. When shutdown begins (both triggers, from
+`markShutdownLocked`), `abortUnprotectedLocked` walks the root scope from the tail while `!noAbort` and cancels each
+item with a `ShutdownError`.
+
+The marked items are always a prefix of the list (the oldest items): `reachedRank` is non-increasing with item age,
+because a younger item enters `u` only if `prev.maxRank >= u.rank`, and `reachedRank >= maxRank` (invariant 2); the
+setter's walk marks a prefix, and a union of prefixes is a prefix. So both walks stop at the first marked item,
+costing O(changed items), and older items finish while younger ones are aborted, as in error-shutdown: no aborted
+item can be passed by a younger one that commits. After shutdown begins every live item is marked or aborted, so a
+later `SetNoAbortPoint` aborts nothing. Lane children go with their parent's context.
 
 **`ShutdownError`** is a sealed interface, so an ItemProcessor cannot fabricate a value that `completeItem` would
 mistake for a shutdown abort — `isShutdown` can therefore trust `errors.As`.

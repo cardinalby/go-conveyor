@@ -18,4 +18,5 @@ Guides on go-conveyor's pipeline features, split out from the [README](../README
 - [6. Conditional MoveTo](6_conditional-move-to.md) — enter a stage only if it's immediately free, with `TryMoveTo`
 - [7. Observability](7_observability.md) — pull-based `Stats()`, what the gauges mean, and what to alert on
 - [8. Benchmarks](8_benchmarks.md) — throughput vs. a classical channel pipeline across topologies
-- [9. Design FAQ](9_design_faq.md) — why the API looks the way it does
+- [9. Shutdown](9_shutdown.md) — what happens to in-flight items, `SetNoAbortPoint`, `OptShutdownContext`
+- [10. Design FAQ](10_design_faq.md) — why the API looks the way it does

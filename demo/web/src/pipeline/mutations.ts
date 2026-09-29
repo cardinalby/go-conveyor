@@ -76,6 +76,16 @@ export function findBranchAndOwner(pipeline: Pipeline, branchId: string): { bran
   return search(pipeline.nodes);
 }
 
+/** Sets the no-abort point — see Pipeline.noAbortPoint. null resets it to the start (the default). Only a top-level
+ * node id is accepted; anything else is a no-op. */
+export function setNoAbortPoint(pipeline: Pipeline, id: string | null): Pipeline {
+  if (id !== null && !isTopLevelNode(pipeline, id)) return pipeline;
+  if (pipeline.noAbortPoint === id) return pipeline;
+  return { ...pipeline, noAbortPoint: id };
+}
+
+/** Resets the no-abort point to the start when the removed node was it. Only a top-level id can be the point, so a
+ * lane removed together with its interior nodes never affects it. */
 export function removeNode(pipeline: Pipeline, id: string): Pipeline {
   return {
     ...pipeline,
@@ -83,6 +93,7 @@ export function removeNode(pipeline: Pipeline, id: string): Pipeline {
       if (!list.some((n) => n.id === id)) return list;
       return list.filter((n) => n.id !== id);
     }),
+    noAbortPoint: pipeline.noAbortPoint === id ? null : pipeline.noAbortPoint,
   };
 }
 
@@ -213,29 +224,28 @@ export function convertBranchKind(pipeline: Pipeline, branchId: string, toKind: 
 /** "Add parallel Lane"/"Add parallel Pool" on a plain stage: replace it with a fan-out of two branches — the
  * original stage's settings always carry over into a Pool (the closest match to what a plain stage already was: a
  * concurrency limit, nothing else), and the second, freshly-created branch is newBranchKind, matching whichever
- * menu item fired this. */
+ * menu item fired this. The new fan-out gets a new id, so a no-abort point on the stage moves to it. */
 export function addParallelToStage(pipeline: Pipeline, stageId: string, newBranchKind: BranchKind): Pipeline {
-  return {
-    ...pipeline,
-    nodes: rewriteNodeLists(pipeline.nodes, (list) => {
-      const i = list.findIndex((n) => n.id === stageId);
-      if (i < 0) return list;
-      const stage = list[i];
-      if (stage.kind !== "stage") return list;
+  const nodes = rewriteNodeLists(pipeline.nodes, (list) => {
+    const i = list.findIndex((n) => n.id === stageId);
+    if (i < 0) return list;
+    const stage = list[i];
+    if (stage.kind !== "stage") return list;
 
-      const originalPool: PoolBranch = {
-        id: newId("p"),
-        kind: "pool",
-        name: stage.name,
-        limit: stage.limit,
-        delayMs: stage.delayMs,
-        tasksPerItem: 1,
-      };
-      const fanOut = newFanOut([originalPool, newBranch(newBranchKind, 2)]);
+    const originalPool: PoolBranch = {
+      id: newId("p"),
+      kind: "pool",
+      name: stage.name,
+      limit: stage.limit,
+      delayMs: stage.delayMs,
+      tasksPerItem: 1,
+    };
+    const fanOut = newFanOut([originalPool, newBranch(newBranchKind, 2)]);
 
-      const next = [...list];
-      next[i] = fanOut;
-      return next;
-    }),
-  };
+    const next = [...list];
+    next[i] = fanOut;
+    return next;
+  });
+  const top = pipeline.noAbortPoint === stageId ? pipeline.nodes.findIndex((n) => n.id === stageId) : -1;
+  return { ...pipeline, nodes, noAbortPoint: top >= 0 ? nodes[top].id : pipeline.noAbortPoint };
 }

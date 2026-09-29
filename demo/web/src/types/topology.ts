@@ -45,9 +45,11 @@ export interface NodeSpec {
  * Nodes, but StartDelayMs configures the simulated time an item spends there before its first move. itemsLimit is
  * global rather than keyed to one node (see Go's conveyor.Conveyor.SetItemsLimit): it caps how many items may be in
  * flight across the whole conveyor at once, on top of whatever capacity the nodes themselves admit. 0 means
- * unlimited. */
+ * unlimited. noAbortPoint is the id of a top-level node (see Go's conveyor.Conveyor.SetNoAbortPoint); omitted
+ * means the start, the default. */
 export interface Spec {
   nodes: NodeSpec[];
   startDelayMs: number;
   itemsLimit: number;
+  noAbortPoint?: string;
 }

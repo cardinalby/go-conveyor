@@ -552,3 +552,96 @@ func TestSetBackpressureSwitchesALiveFanOut(t *testing.T) {
 		t.Errorf("stage after's Backpressure = %q, want empty", s.Backpressure)
 	}
 }
+
+func TestNoAbortPointOnATopLevelNodeRuns(t *testing.T) {
+	for _, id := range []string{"b", topology.StartID} {
+		t.Run(id, func(t *testing.T) {
+			spec := twoStageSpec()
+			spec.NoAbortPoint = id
+			m := runManager(t, spec)
+			waitFor(t, "item 1 to reach stage b", func() bool { return occupies(m, "b", 1) })
+		})
+	}
+}
+
+func TestNoAbortPointRejectsBadIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		spec topology.Spec
+		id   string
+	}{
+		{"unknown id", twoStageSpec(), "nope"},
+		{"branch", laneSpec(), "l1"},
+		{"node inside a lane", laneSpec(), "l1s1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.spec.NoAbortPoint = tc.id
+			m := New()
+			if err := m.Run(tc.spec); err == nil {
+				m.Stop()
+				t.Fatalf("Run with no-abort point %q: got nil error", tc.id)
+			}
+			if m.State().Running {
+				t.Fatal("Running after a failed Run")
+			}
+		})
+	}
+}
+
+func TestCancelCtxAbortsAnItemBeforeTheNoAbortPoint(t *testing.T) {
+	// A whole minute in the start stage: the run can only end this quickly if the shutdown canceled the item.
+	spec := twoStageSpec()
+	spec.StartDelayMs = 60_000
+	spec.NoAbortPoint = "a"
+	m := runManager(t, spec)
+
+	waitFor(t, "item 1 to enter the start stage", func() bool { return occupies(m, topology.StartID, 1) })
+	m.CancelCtx()
+	waitFor(t, "the run to end", func() bool { return !m.State().Running })
+	if s := m.State(); s.Forced {
+		t.Error("run was force-stopped, want a graceful shutdown")
+	}
+}
+
+func TestSetNoAbortPointMovesTheLivePoint(t *testing.T) {
+	// Live like the other setters: the point moves on the running conveyor. Empty and StartID both mean the start;
+	// a branch, a node inside a lane or an unknown id is an error and leaves the point where it was.
+	if err := New().SetNoAbortPoint("a"); err == nil {
+		t.Error(`SetNoAbortPoint("a") on an idle Manager = nil, want an error`)
+	}
+	m := runManager(t, laneSpec())
+	point := func() any { return m.built.Conveyor.NoAbortPoint() }
+	start := m.built.Conveyor.StartingStage()
+
+	if err := m.SetNoAbortPoint("after"); err != nil {
+		t.Fatalf(`SetNoAbortPoint("after"): %v`, err)
+	}
+	if point() != m.built.Handles["after"] {
+		t.Error(`the point is not stage "after" after SetNoAbortPoint("after")`)
+	}
+	for _, id := range []string{"nope", "l1", "l1s1"} {
+		if err := m.SetNoAbortPoint(id); err == nil {
+			t.Errorf("SetNoAbortPoint(%q) = nil, want an error", id)
+		}
+	}
+	if point() != m.built.Handles["after"] {
+		t.Error("a rejected SetNoAbortPoint moved the point")
+	}
+	if err := m.SetNoAbortPoint("f"); err != nil {
+		t.Fatalf(`SetNoAbortPoint("f"): %v`, err)
+	}
+	if point() != m.built.Handles["f"] {
+		t.Error(`the point is not fan-out "f" after SetNoAbortPoint("f")`)
+	}
+	for _, id := range []string{topology.StartID, ""} {
+		if err := m.SetNoAbortPoint("after"); err != nil {
+			t.Fatalf(`SetNoAbortPoint("after"): %v`, err)
+		}
+		if err := m.SetNoAbortPoint(id); err != nil {
+			t.Fatalf("SetNoAbortPoint(%q): %v", id, err)
+		}
+		if point() != start {
+			t.Errorf("the point is not the starting stage after SetNoAbortPoint(%q)", id)
+		}
+	}
+}

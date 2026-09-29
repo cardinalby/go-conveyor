@@ -65,6 +65,30 @@ type Conveyor interface {
 	// default).
 	ItemsLimit() int
 
+	// SetNoAbortPoint marks node as the place where side effects start. When shutdown begins (the Run context is
+	// canceled, or an item fails), every item that has not entered node or a later node yet is aborted: canceled at
+	// once with a ShutdownError. Items that have entered it are not aborted, even if the point is moved later: they
+	// finish as usual, bounded by OptShutdownContext. An item waiting in node's waiting room, or blocked in
+	// MoveTo(node), has not entered it; an item that skipped node and entered a later node, or its waiting room, has
+	// passed it. It returns the conveyor for chaining.
+	//
+	//	write := c.AddStage() // side effects start here
+	//	commit := c.AddStage()
+	//	c.SetNoAbortPoint(write)
+	//
+	// The default is the starting stage: every item enters it first, so no item is aborted. Pass c.StartingStage()
+	// to restore it. Otherwise node must be a Stage or a FanOut added with c.AddStage or c.AddFanOut. It panics for
+	// nil, a pool, a lane, a node inside a lane, or a node of another conveyor.
+	//
+	// Safe to call at any time, from any goroutine, including on a running conveyor. Items that have already entered
+	// node or a later node are protected at once. Items created while the point was the starting stage have entered
+	// it, so they are never aborted. Once shutdown has begun, a call changes nothing for items in flight. Code that
+	// ignores its ctx is not interrupted.
+	SetNoAbortPoint(node Unit) Conveyor
+
+	// NoAbortPoint returns the node set with SetNoAbortPoint; the starting stage by default.
+	NoAbortPoint() Unit
+
 	// StartingStage returns the implicit stage every item starts in. The ItemProcessor code before the item's first
 	// MoveTo runs in it, one item at a time, and the next item is created only when it is free. It has no MoveTo
 	// and its limit is always 1.
@@ -119,10 +143,20 @@ type conveyor struct {
 	// active; every read otherwise happens under run.mu (see run.hasItemsRoom).
 	itemsLimit atomic.Int64
 
+	// noAbortPoint is the unit of the node set with SetNoAbortPoint, or nil for the starting stage (the default). A
+	// root item that enters it or a later node is marked noAbort; when shutdown begins, the unmarked items are
+	// aborted (see run.abortUnprotectedLocked). Atomic for the lock-free getter and the store before any run exists;
+	// while a run is active it is stored and read under run.mu.
+	noAbortPoint atomic.Pointer[unit]
+
 	// assignHook, when set by an in-package test before Run, observes every hand-out of a branch slot (see
 	// run.grabNext). Nil in production; read without a lock, so it must be set before Run and never changed during
 	// one.
 	assignHook func(branchIdx int, col *taskCollection, queue []*taskCollection)
+
+	// noAbortStoreHook, when set by an in-package test before SetNoAbortPoint, runs in it between the load of
+	// currentRun and the store when no run was loaded: a test can start a run there. Nil in production.
+	noAbortStoreHook func()
 }
 
 // Option configures a Conveyor at creation. See NewConveyor and OptShutdownContext.
@@ -141,6 +175,9 @@ type ShutdownContextFactory func(cause error) (context.Context, context.CancelFu
 //	return nil, nil                                                  // no limit: leave them to finish
 //
 // Without this option, items are left to finish on their own.
+//
+// Items before the no-abort point (SetNoAbortPoint) are aborted when shutdown begins, without waiting for this
+// context.
 func OptShutdownContext(factory ShutdownContextFactory) Option {
 	return func(c *conveyor) {
 		c.shutdownCtxFactory = factory
@@ -179,6 +216,68 @@ func (c *conveyor) SetItemsLimit(n int) Conveyor {
 }
 
 func (c *conveyor) ItemsLimit() int { return int(c.itemsLimit.Load()) }
+
+// SetNoAbortPoint sets the node before which items are aborted at shutdown (see the Conveyor interface).
+func (c *conveyor) SetNoAbortPoint(node Unit) Conveyor {
+	u := c.noAbortPointUnit(node)
+	// As in unit.storeDial: under the run's mu, so the store and the marking are one step for the run's items. A run
+	// that starts between the load and the store is updated too. Nothing is aborted here: once shutdown has begun,
+	// every live item is either marked or already aborted, and a move never clears a mark.
+	apply := func(r *run) {
+		r.mu.Lock()
+		c.noAbortPoint.Store(u)
+		r.protectReachedLocked()
+		r.mu.Unlock()
+	}
+	r := c.currentRun.Load()
+	if r == nil {
+		if c.noAbortStoreHook != nil {
+			c.noAbortStoreHook()
+		}
+		c.noAbortPoint.Store(u)
+	} else {
+		apply(r)
+	}
+	if r2 := c.currentRun.Load(); r2 != nil && r2 != r {
+		apply(r2)
+	}
+	return c
+}
+
+// noAbortPointUnit returns the unit to store for n: nil for the starting stage, else the unit of a Stage or FanOut
+// of the root series. It panics for anything else. The series is read from the owner, not from unit.scope, which is
+// set only at finalize.
+func (c *conveyor) noAbortPointUnit(n Unit) *unit {
+	if n == nil {
+		panic(fmt.Errorf("nil no-abort point: pass the starting stage to restore the default: %w", errInvalidUnit))
+	}
+	u := n.unit()
+	c.validateUnit(u)
+	var s *series
+	switch o := u.owner.(type) {
+	case startOwner:
+		return nil
+	case *stage:
+		s = o.series
+	case *fanOut:
+		s = o.series
+	default:
+		panic(fmt.Errorf("%s cannot be the no-abort point: only a stage or a fan-out can: %w", u, errInvalidUnit))
+	}
+	if s != c.series {
+		panic(fmt.Errorf("%s cannot be the no-abort point: it belongs to %s, not to the conveyor: %w",
+			u, s.start, errWrongScope))
+	}
+	return u
+}
+
+func (c *conveyor) NoAbortPoint() Unit {
+	u := c.noAbortPoint.Load()
+	if u == nil {
+		return c.StartingStage()
+	}
+	return u.owner.(Unit)
+}
 
 // startOwner names the implicit start stage in Stats and error messages.
 type startOwner struct{}

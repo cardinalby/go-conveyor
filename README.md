@@ -140,6 +140,7 @@ You still have a **single function** that processes a single batch, but the Conv
      - all items that are already in the pipeline are allowed to finish
      - new items are not spawned
    - [Force shutdown support](https://pkg.go.dev/github.com/cardinalby/go-conveyor#OptShutdownContext)
+   - [No-abort point](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Conveyor.SetNoAbortPoint): items that did not reach it yet are aborted at once
 8. Pull-based [observability](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Conveyor.Stats)
 
 ## Cons
@@ -173,7 +174,8 @@ See the [docs](docs/README.md) for guides on these features:
 - [Lanes: when a branch is a pipeline](docs/5_lanes.md)
 - [Conditional MoveTo](docs/6_conditional-move-to.md)
 - [Observability](docs/7_observability.md)
-- [Design FAQ](docs/9_design_faq.md)
+- [Shutdown](docs/9_shutdown.md)
+- [Design FAQ](docs/10_design_faq.md)
 
 ## [★ Interactive demo](https://cardinalby.github.io/go-conveyor/)
 

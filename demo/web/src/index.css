@@ -374,6 +374,12 @@ body,
   flex: 1;
 }
 
+/* The no-abort tag in plain flow, as a legend swatch (the absolute placement applies only inside a .node-box). */
+.legend-no-abort {
+  flex-shrink: 0;
+  cursor: default;
+}
+
 .legend-preview {
   flex-shrink: 0;
   width: 18px;
@@ -412,6 +418,50 @@ body,
 
 .node-fanout {
   min-width: 220px;
+}
+
+/* No-abort point (see Pipeline.noAbortPoint): a dashed red left edge on the box, where items enter, plus a small
+   tag. Same red as the Stop button. */
+.node-no-abort {
+  border-left: 1.5px dashed #dc2626;
+}
+
+.no-abort-marker {
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 16px;
+  color: #dc2626;
+  background: #fff;
+  border: 1px solid #dc2626;
+  border-radius: 4px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* An empty place for the tag on a node that can become the point: same box, only a faint dashed border until hover. */
+/* The tag on the start (default): a click does nothing there. */
+.no-abort-default {
+  cursor: default;
+}
+
+.no-abort-slot {
+  color: transparent;
+  background: transparent;
+  border: 1px dashed rgba(0, 0, 0, 0.18);
+}
+
+.no-abort-slot:hover {
+  color: rgba(220, 38, 38, 0.55);
+  background: #fff;
+  border-color: rgba(220, 38, 38, 0.55);
+}
+
+/* On a node the tag is absolute, so it adds nothing to the size useReportSize measures. No top/left: it keeps its
+   static place (the box's content corner) and the margins lift it onto the top edge. This way the box needs no
+   position of its own, which would move the xyflow handles off the node wrapper's edges. */
+.node-box > .no-abort-marker {
+  position: absolute;
+  margin: -20px 0 0 -4px;
 }
 
 .node-name {

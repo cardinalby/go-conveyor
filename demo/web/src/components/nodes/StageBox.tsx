@@ -1,6 +1,7 @@
 import { EditableTitle } from "../shared/EditableTitle";
 import { LabeledSlider } from "../shared/LabeledSlider";
 import { SlotStrip } from "../shared/SlotStrip";
+import { NoAbortMarker } from "../shared/NoAbortMarker";
 import { bodySlotCount, queueSlotCount } from "../../pipeline/slots";
 import { MAX_DELAY_MS, MAX_LIMIT, MAX_QUEUE_SIZE, MIN_DELAY_MS, MIN_LIMIT, MIN_QUEUE_SIZE } from "../../pipeline/defaults";
 import type { ResolvedStage } from "../../pipeline/resolve";
@@ -41,13 +42,19 @@ export function StageBox({ stage, callbacks, handles, shellRef }: Props) {
         </div>
       )}
       <div
-        className="node-box nodrag nopan"
+        className={`node-box nodrag nopan${stage.noAbort === "point" ? " node-no-abort" : ""}`}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation(); // this box may now be nested inside a lane's interior — never bubble to its own menu
           callbacks.onContextMenu({ kind: "stage", id: stage.id }, e);
         }}
       >
+        {stage.noAbort !== "none" && (
+          <NoAbortMarker
+            slot={stage.noAbort === "slot"}
+            onClick={() => callbacks.onSetNoAbortPoint(stage.noAbort === "slot" ? stage.id : null)}
+          />
+        )}
         {handles}
         <EditableTitle value={stage.name} onCommit={(name) => callbacks.onRenameNode(stage.id, name)} />
         <LabeledSlider

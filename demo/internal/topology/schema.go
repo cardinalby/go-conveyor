@@ -82,8 +82,13 @@ type NodeSpec struct {
 // ItemsLimit is global rather than keyed to one node (see conveyor.Conveyor.SetItemsLimit): it caps how many items
 // may be in flight across the whole conveyor at once, on top of whatever capacity the nodes themselves admit. A
 // value <= 0 means unlimited.
+//
+// NoAbortPoint is the id of the node passed to conveyor.Conveyor.SetNoAbortPoint: on shutdown, items that have not
+// entered it yet are aborted at once. Empty or StartID means the starting stage (the default: no item is aborted).
+// Any other id must be a top-level node, not a branch or a node inside a lane.
 type Spec struct {
 	Nodes        []NodeSpec `json:"nodes"`
 	StartDelayMs int        `json:"startDelayMs"`
 	ItemsLimit   int        `json:"itemsLimit"`
+	NoAbortPoint string     `json:"noAbortPoint,omitempty"`
 }

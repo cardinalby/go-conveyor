@@ -65,6 +65,9 @@ type item struct {
 	// all its slots are released. Between the two the item is over for its own code but its background work may live.
 	returned bool
 	finished bool
+	// noAbort is set on a root item once it enters the no-abort point or a later node, and never cleared: the item
+	// is not aborted when shutdown begins (see SetNoAbortPoint).
+	noAbort bool
 
 	// prev/next link the in-flight items of this scope in creation order (see run.scopeList). prev is the item's
 	// binding predecessor for the ordering gate; both are nil once the item is finished (unlinked).

@@ -31,8 +31,9 @@ type nodeHost interface {
 // OptShutdownContext so its own force-stop button can cancel in-flight items on demand instead of leaving them to
 // finish on their own.
 //
-// It returns an error for a malformed spec (a blank, reserved or duplicate id, an unknown Kind) rather than letting
-// the conveyor package panic on a handle mix-up later, in ItemProcessor.
+// It returns an error for a malformed spec (a blank, reserved or duplicate id, an unknown Kind, a NoAbortPoint that
+// is not the start or a top-level node) rather than letting the conveyor package panic on a handle mix-up later, in
+// ItemProcessor.
 func Build(spec Spec, options ...conveyor.Option) (*Built, error) {
 	c := conveyor.NewConveyor(options...).SetItemsLimit(spec.ItemsLimit)
 	built := &Built{
@@ -57,7 +58,28 @@ func Build(spec Spec, options ...conveyor.Option) (*Built, error) {
 	if err := buildNodes(spec.Nodes, c, 0, built, claim); err != nil {
 		return nil, err
 	}
+	point, err := built.NoAbortUnit(spec.NoAbortPoint)
+	if err != nil {
+		return nil, err
+	}
+	c.SetNoAbortPoint(point)
 	return built, nil
+}
+
+// NoAbortUnit resolves a no-abort point id (see Spec.NoAbortPoint) to the handle to pass to
+// conveyor.Conveyor.SetNoAbortPoint. Empty or StartID is the starting stage; any other id must be a top-level node.
+func (b *Built) NoAbortUnit(id string) (conveyor.Unit, error) {
+	if id == "" || id == StartID {
+		return b.Conveyor.StartingStage(), nil
+	}
+	handle, ok := b.Handles[id]
+	switch {
+	case !ok:
+		return nil, fmt.Errorf("no-abort point: unknown node id %q", id)
+	case b.Depth[id] != 0:
+		return nil, fmt.Errorf("no-abort point: %q is not a top-level node", id)
+	}
+	return handle, nil
 }
 
 // BackpressureMode maps a Spec's Backpressure to the library's mode. An empty value is BackpressureBalanced (the

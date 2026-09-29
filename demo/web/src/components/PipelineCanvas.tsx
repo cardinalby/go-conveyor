@@ -39,6 +39,8 @@ interface Props {
   onRenameStart: (name: string) => void;
   onRenameBranch: (branchId: string, name: string) => void;
   onRenameEntrance: (laneId: string, name: string) => void;
+  /** See TreeCallbacks.onSetNoAbortPoint. */
+  onSetNoAbortPoint: (id: string | null) => void;
   /** Computed by App rather than here, because the toolbar's item list needs the same walk — see
    * pipeline/itemPositions. NO_ITEM_POSITIONS outside run mode. */
   itemPositions: ItemPositions;
@@ -116,6 +118,7 @@ export function PipelineCanvas({
   onRenameStart,
   onRenameBranch,
   onRenameEntrance,
+  onSetNoAbortPoint,
   itemPositions,
   onFailItem,
   onFailTask,
@@ -185,9 +188,35 @@ export function PipelineCanvas({
   // node's occupancy) doesn't hand out a new reference here, which would defeat memoNode's shallowEqual check on
   // `data` for every node.
   const callbacks: TreeCallbacks = useMemo(
-    () => ({ mode, onContextMenu, onEditNode, onEditBackpressure, onEditBranch, onRenameNode, onRenameBranch, onRenameEntrance, onFailTask, onFailItem }),
-    [mode, onContextMenu, onEditNode, onEditBackpressure, onEditBranch, onRenameNode, onRenameBranch, onRenameEntrance, onFailTask, onFailItem],
+    () => ({
+      mode,
+      onContextMenu,
+      onEditNode,
+      onEditBackpressure,
+      onEditBranch,
+      onRenameNode,
+      onSetNoAbortPoint,
+      onRenameBranch,
+      onRenameEntrance,
+      onFailTask,
+      onFailItem,
+    }),
+    [
+      mode,
+      onContextMenu,
+      onEditNode,
+      onEditBackpressure,
+      onEditBranch,
+      onRenameNode,
+      onSetNoAbortPoint,
+      onRenameBranch,
+      onRenameEntrance,
+      onFailTask,
+      onFailItem,
+    ],
   );
+  // Stable for the same reason as callbacks: it is part of the start node's data.
+  const onResetNoAbortPoint = useCallback(() => onSetNoAbortPoint(null), [onSetNoAbortPoint]);
 
   const startData: StartNodeData = {
     mode,
@@ -197,6 +226,8 @@ export function PipelineCanvas({
     delayMs: start.delayMs,
     onEditDelay: onEditStartDelay,
     onRename: onRenameStart,
+    noAbortPoint: start.noAbortPoint,
+    onResetNoAbortPoint,
   };
   const nodes: Node[] = [
     memoNode(START_ID, "start", positions[START_ID], sizes[START_ID], startData),
