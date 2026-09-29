@@ -370,7 +370,7 @@ func TestScheduleFromCanceledItemQueuesNothing(t *testing.T) {
 		if err := s.MoveTo(ctx); err != nil {
 			return err
 		}
-		poison := s.Retain(ctx, func() error {
+		poison := s.RetainFor(ctx, func() error {
 			<-trigger
 			return boom
 		})
@@ -583,7 +583,7 @@ func TestScheduleFromRetainCallbackAfterProcessorReturnedPanics(t *testing.T) {
 		if err := s.MoveTo(ctx); err != nil {
 			return err
 		}
-		_ = s.Retain(ctx, func() error {
+		_ = s.RetainFor(ctx, func() error {
 			waitFor(t, "completion to close the body", func() bool { return bodyStateOf(ctx, fo) == bodyClosed })
 			got <- recoveredErr(func() {
 				_ = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
@@ -1029,7 +1029,7 @@ func TestDisplacedPullCanceledMidPullRecordsAbandonment(t *testing.T) {
 			if err := s.MoveTo(ctx); err != nil {
 				return err
 			}
-			poison := s.Retain(ctx, func() error {
+			poison := s.RetainFor(ctx, func() error {
 				<-spawnQueued // poison the item while its pull is in flight and the older spawn heads the queue
 				return boom
 			})

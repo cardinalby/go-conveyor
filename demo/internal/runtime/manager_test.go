@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -642,6 +643,78 @@ func TestSetNoAbortPointMovesTheLivePoint(t *testing.T) {
 		}
 		if point() != start {
 			t.Errorf("the point is not the starting stage after SetNoAbortPoint(%q)", id)
+		}
+	}
+}
+
+// retaining reports whether node id reports itemNo in its Retaining list right now.
+func retaining(m *Manager, id string, itemNo int64) bool {
+	n, ok := nodeByID(m.State(), id)
+	return ok && slices.Contains(n.Retaining, itemNo)
+}
+
+func TestRetainItemKeepsTheStageUntilReleased(t *testing.T) {
+	// A long stay at b keeps item 1 there, so the only thing that can keep item 2 out of a is item 1's hold.
+	spec := twoStageSpec()
+	spec.Nodes[0].DelayMs = 300
+	spec.Nodes[1].DelayMs = 60_000
+	m := runManager(t, spec)
+
+	waitFor(t, "item 1 to reach stage a", func() bool { return occupies(m, "a", 1) })
+	if err := m.RetainItem("a", 1); err != nil {
+		t.Fatalf("RetainItem: %v", err)
+	}
+	waitFor(t, "item 1 to retain a", func() bool { return retaining(m, "a", 1) })
+	waitFor(t, "item 1 to move on to b", func() bool { return occupies(m, "b", 1) })
+	if !occupies(m, "a", 1) || !retaining(m, "a", 1) {
+		t.Fatalf("item 1 in b does not keep a: state %+v", m.State())
+	}
+	time.Sleep(50 * time.Millisecond) // item 2 has finished its start delay by now
+	if occupies(m, "a", 2) {
+		t.Fatalf("item 2 entered a while item 1 retained it")
+	}
+
+	if err := m.ReleaseItem("a", 1); err != nil {
+		t.Fatalf("ReleaseItem: %v", err)
+	}
+	waitFor(t, "item 2 to enter a once released", func() bool { return occupies(m, "a", 2) })
+	if retaining(m, "a", 1) {
+		t.Errorf("a still reports item 1 retaining it after release")
+	}
+}
+
+func TestRetainItemOnTheStartStage(t *testing.T) {
+	spec := twoStageSpec()
+	spec.StartDelayMs = 300
+	spec.Nodes[0].DelayMs = 60_000
+	m := runManager(t, spec)
+
+	waitFor(t, "item 1 to be read", func() bool { return occupies(m, topology.StartID, 1) })
+	if err := m.RetainItem(topology.StartID, 1); err != nil {
+		t.Fatalf("RetainItem: %v", err)
+	}
+	waitFor(t, "item 1 to move on to a", func() bool { return occupies(m, "a", 1) })
+	if !retaining(m, topology.StartID, 1) {
+		t.Fatalf("start does not report item 1 retaining it")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if occupies(m, topology.StartID, 2) {
+		t.Fatalf("item 2 was created while item 1 retained the start stage")
+	}
+	if err := m.ReleaseItem(topology.StartID, 1); err != nil {
+		t.Fatalf("ReleaseItem: %v", err)
+	}
+	waitFor(t, "item 2 to be created once released", func() bool { return occupies(m, topology.StartID, 2) })
+}
+
+func TestRetainItemRejectsBadRequests(t *testing.T) {
+	if err := New().RetainItem("a", 1); err == nil {
+		t.Errorf("RetainItem with nothing running: want an error")
+	}
+	m := runManager(t, laneSpec())
+	for _, id := range []string{"f", "l1", "l1s1", "nope"} {
+		if err := m.RetainItem(id, 1); err == nil {
+			t.Errorf("RetainItem(%q): want an error", id)
 		}
 	}
 }

@@ -32,6 +32,12 @@ interface FailureRequest {
   laneId?: string;
 }
 
+// Shared body shape of retainItem / releaseItem (see wasmapi.retainRequest).
+interface RetainRequest {
+  itemNo: number;
+  nodeId: string;
+}
+
 export const api = {
   ready,
   run(spec: Spec): RunState {
@@ -80,5 +86,14 @@ export const api = {
    * down, so failItem already reaches it. */
   failTask(poolId: string, itemNo: number): RunState {
     return callWasmMethod<RunState>("failTask", { laneId: poolId, itemNo } satisfies FailureRequest);
+  },
+  /** Asks the item to keep the stage (the start or a top-level stage) it is working in after it moves on — see
+   * runtime.Manager.RetainItem. */
+  retainItem(nodeId: string, itemNo: number): RunState {
+    return callWasmMethod<RunState>("retainItem", { nodeId, itemNo } satisfies RetainRequest);
+  },
+  /** Releases that hold — see runtime.Manager.ReleaseItem. */
+  releaseItem(nodeId: string, itemNo: number): RunState {
+    return callWasmMethod<RunState>("releaseItem", { nodeId, itemNo } satisfies RetainRequest);
   },
 };

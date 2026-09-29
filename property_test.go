@@ -367,7 +367,7 @@ func (top *propTopology) process(ctx context.Context, no int64, inj *propInjecti
 			injectRetain := failing && inj.kind == injRetain && inj.node == i
 			if injectRetain || rnd.Intn(4) == 0 {
 				top.scheduled.Add(1)
-				pending = append(pending, nd.stage.st.Retain(ctx, func() error {
+				pending = append(pending, nd.stage.st.RetainFor(ctx, func() error {
 					top.ran.Add(1)
 					if injectRetain {
 						return errPropBoom

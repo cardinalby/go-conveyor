@@ -360,7 +360,7 @@ func TestRetainWaveJoined(t *testing.T) {
 		if err := write.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := write.Retain(ctx, func() error {
+		w := write.RetainFor(ctx, func() error {
 			order.add("bg-%d", no)
 			return nil
 		})

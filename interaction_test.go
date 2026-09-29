@@ -121,7 +121,7 @@ func TestRetainReleasesWhileItemSitsInFanOut(t *testing.T) {
 			return nil
 		}
 		// Item 1: hand write's slot to a background op, then move into the fan-out and wait for that op *there*.
-		w := write.Retain(ic, func() error {
+		w := write.RetainFor(ic, func() error {
 			<-releaseBg // released once the test has seen this item inside the fan-out
 			bgDone.Store(true)
 			return nil
@@ -229,8 +229,8 @@ func TestSeveralRetainsOnOneStageKeepItHeld(t *testing.T) {
 		if no > 1 {
 			return nil // a follower: it may only get in once the last retain has finished
 		}
-		fast := a.Retain(ic, func() error { return nil })
-		slow := a.Retain(ic, func() error {
+		fast := a.RetainFor(ic, func() error { return nil })
+		slow := a.RetainFor(ic, func() error {
 			<-release
 			return nil
 		})
@@ -333,7 +333,7 @@ func TestRetainedStageFillsItsWaitingRoom(t *testing.T) {
 		}
 		entered.Add(1)
 		if retainer.CompareAndSwap(false, true) {
-			w := s.Retain(ic, func() error {
+			w := s.RetainFor(ic, func() error {
 				select {
 				case <-release:
 				case <-ic.Done():

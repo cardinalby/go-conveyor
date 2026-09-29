@@ -23,7 +23,7 @@ import {
 } from "./pipeline/mutations";
 import { clamp, MAX_ITEMS_LIMIT, MIN_ITEMS_LIMIT } from "./pipeline/defaults";
 import { useFailModifierClass } from "./hooks/useFailModifierClass";
-import { computeItemPositions, NO_ITEM_POSITIONS } from "./pipeline/itemPositions";
+import { computeItemPositions, NO_ITEM_POSITIONS, type RetainTarget } from "./pipeline/itemPositions";
 import { resolvePipeline, resolveStart } from "./pipeline/resolve";
 import { toSpec } from "./pipeline/toSpec";
 import { api } from "./services/api";
@@ -369,6 +369,18 @@ function App() {
     [mode],
   );
 
+  // A plain click on an item working in a stage retains that stage (see Stage.Retain); a click on an item that keeps
+  // one, or on its held copy, releases it.
+  const handleToggleRetain = useCallback(
+    (target: RetainTarget) => {
+      if (mode !== "run") return;
+      setRunState(
+        target.retaining ? api.releaseItem(target.nodeId, target.itemNo) : api.retainItem(target.nodeId, target.itemNo),
+      );
+    },
+    [mode],
+  );
+
   const handleFailTask = useCallback(
     (poolId: string, itemNo: number) => {
       if (mode !== "run") return;
@@ -482,6 +494,7 @@ function App() {
           itemPositions={itemPositions}
           onFailItem={handleFailItem}
           onFailTask={handleFailTask}
+          onToggleRetain={handleToggleRetain}
         />
       </div>
       {menu && (

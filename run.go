@@ -54,9 +54,9 @@ type run struct {
 // the context it receives. It need not enter every node and may return early.
 //
 // Returning an error shuts the conveyor down: no new items are created, later items are canceled, and earlier ones
-// are allowed to finish.
+// are allowed to finish, except those before the no-abort point (see Conveyor.SetNoAbortPoint).
 //
-// Cancellation is judged by the item's own context. Once it is canceled (a failed task or Retain, a shutdown), every
+// Cancellation is judged by the item's own context. Once it is canceled (a failed task or RetainFor, a shutdown), every
 // node method returns the cause, even when called with a context that hides the cancellation
 // (context.WithoutCancel). A derived context with its own deadline still works. Code that must run after
 // cancellation can still run in plain Go once the node method has returned; it just cannot run inside a node.
@@ -64,18 +64,12 @@ type ItemProcessor func(ctx context.Context) error
 
 // Run drives items through the conveyor until ctx is canceled or an item fails (see the Conveyor interface).
 func (c *conveyor) Run(ctx context.Context, itemProcessor ItemProcessor) error {
-	if err := c.tryRun(); err != nil {
+	r, err := c.tryRun(itemProcessor)
+	if err != nil {
 		return err
 	}
 	defer c.stopRun()
-
-	r := c.newRun()
-	r.proc = itemProcessor
-	r.itemsCtx, r.cancelItems = context.WithCancelCause(context.Background())
 	defer r.cancelItems(nil) // release any item contexts still lingering when Run returns
-
-	c.currentRun.Store(r)
-	defer c.currentRun.Store(nil)
 
 	// Watch the caller's context; its cancellation begins a graceful shutdown.
 	stopWatch := make(chan struct{})
@@ -99,19 +93,26 @@ func (c *conveyor) Run(ctx context.Context, itemProcessor ItemProcessor) error {
 	return context.Cause(ctx)
 }
 
-func (c *conveyor) tryRun() error {
+// tryRun creates the run and publishes it as currentRun, under runMu: SetNoAbortPoint relies on no run starting
+// while it holds runMu.
+func (c *conveyor) tryRun(itemProcessor ItemProcessor) (*run, error) {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
 	if c.isRunning {
-		return ErrConveyorAlreadyRunning
+		return nil, ErrConveyorAlreadyRunning
 	}
 	c.finalize() // assign scopes and ranks once, under runMu; the topology is frozen from here on
 	c.isRunning = true
-	return nil
+	r := c.newRun()
+	r.proc = itemProcessor
+	r.itemsCtx, r.cancelItems = context.WithCancelCause(context.Background())
+	c.currentRun.Store(r)
+	return r, nil
 }
 
 func (c *conveyor) stopRun() {
 	c.runMu.Lock()
+	c.currentRun.Store(nil)
 	c.isRunning = false
 	c.runMu.Unlock()
 }
@@ -314,7 +315,8 @@ func (r *run) acquireItem(arrived bool) *item {
 // (see Wave). Where it goes depends on the kind of item:
 //   - a child reports it to the wave that created it, which cancels its parent (fail-fast) and surfaces there;
 //   - a root item's real (non-shutdown) error triggers error-shutdown: record the first error, stop creating, and
-//     cancel every later item so they abort while earlier items keep finishing.
+//     cancel every later item so they abort while earlier items keep finishing (those before the no-abort point are
+//     aborted too, see markShutdownLocked).
 func (r *run) completeItem(it *item, procErr error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -353,7 +355,8 @@ func (r *run) completeItem(it *item, procErr error) {
 			r.runErr = effErr
 		}
 		// Cancel every later item immediately (error semantics), with this error as the shutdown cause; earlier
-		// items are left to finish, bounded by shutdownTimeout via the watcher that markShutdownLocked wakes.
+		// items are left to finish, bounded by the shutdown context via the watcher that markShutdownLocked wakes,
+		// except those before the no-abort point, which markShutdownLocked aborts.
 		for later := it.next; later != nil; later = later.next {
 			later.cancel(&shutdownError{cause: effErr})
 		}

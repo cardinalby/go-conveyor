@@ -227,8 +227,8 @@ invariant, and with it the correctness of checking only `it.prev`.
 ## 6. Release
 
 `releaseBelow(it, beforeRank)` frees every slot the item holds in units **of its own scope** with rank strictly
-below `beforeRank`, skipping a unit whose slot a live wave is holding (`item.isRetaining`) or a live hold protects
-(`item.holdsUnit`). It first drops the dormant work prepared for fan-outs below `beforeRank` (`dropDormant`): the
+below `beforeRank`, skipping a unit whose slot a live wave or an unreleased `Retain` is holding (`item.isRetaining`) or a live hold
+protects (`item.holdsUnit`). It first drops the dormant work prepared for fan-outs below `beforeRank` (`dropDormant`): the
 item has passed them without entering. A queued slot is
 released by the same rank rule, which is what makes the waiting room disappear the moment the item is admitted: the
 node's rank is one above its waiting room's, so the ordinary `releaseBelow` inside `takeUnit` performs the swap.
@@ -249,7 +249,7 @@ unit is one of the slots the sweep frees.
 
 ### A token that follows the work: the upstream hold
 
-`Stage.Retain` and `FanOut.Retain` keep a slot for work that runs *after* the item has moved on. `Balanced` and
+`Retain`, `RetainFor` and `FanOut.Retain` keep a slot for work that runs *after* the item has moved on. `Balanced` and
 `Strict` backpressure (`FanOut.SetBackpressure`) need the mirror image: a slot kept for work that has not *started*
 yet. An item admitted under either mode keeps the token it would have released on entering the fan-out until its
 initial batch has made the mode's progress, so an item whose work waits for a saturated pool keeps pushing back on
@@ -414,7 +414,7 @@ own completions; the **limit re-check on reuse** is what makes a `SetLimit` decr
 
 ## 8. Waves
 
-A `wave` is the handle for background work charged to one item: a `Stage.Retain` bgOp, or the body of a fan-out. It
+A `wave` is the handle for background work charged to one item: a `RetainFor` bgOp, or the body of a fan-out. It
 tracks three counters, all under `run.mu`:
 
 - `unexhausted` — collections that may still produce work;
@@ -446,7 +446,7 @@ does not count and does not delay `Started`; the guarantee covers state read onl
 `Schedule` right after entering, every collection is a root and `Started` closes exactly as it did before bodies
 could grow.
 
-`retainUnit` is the unit whose slot the wave holds until its work is done — the stage of a `Stage.Retain`, or the node
+`retainUnit` is the unit whose slot the wave holds until its work is done — the stage of a `RetainFor`, or the node
 of a `FanOut.Retain`. It is nil while a fan-out's work is still the node's body: then the *item* holds the slot, because it
 cannot leave until the work is done. `releaseRetained` frees the slot only if the item has already moved past that
 node; if the item is still in it, the item's next move does the freeing (`releaseBelow` stops skipping the unit
@@ -454,10 +454,19 @@ once the wave has finished). Those two halves are the "whichever happens last" c
 node holding nothing, and a slot never outlives the work it was kept for. A retained wave's tasks may keep spawning
 into it; the slot follows the whole tree.
 
+`Retain` (the stage variant without a callback) is not a wave. It adds a `stageHold` to `item.stageHolds`, which
+`isRetaining` checks next to the waves, and its `release` removes it and runs the same sweep as `releaseRetained`
+(`run.releaseStageHold`). Holds are not joined by `completeItem`: a hold never released would otherwise block the item,
+and with it every later item, forever. `finishItem` drops what is left, after the waves were joined, so a release from
+a task can never come after its slot was freed; only a goroutine the user started can outlive it. Both `Retain` and
+`RetainFor` require the item to be in the stage now (`occupied > 0` and `reachedRank == u.rank`): occupancy alone is
+not enough, as an earlier retain keeps the slot occupied after the item moved on, and whether that one has ended yet
+is a race.
+
 `hold` is the upstream hold the admission that opened this body deferred, nil under `Buffered` (§6).
 
 `atNode` names the fan-out whose body the wave is. It supplies the node name in the error of `FanOut.Wait`, the leave
-and `Wave.Wait` (`joinedErr`, which falls back to `retainUnit` for a `Retain` wave), lets `Schedule` tell a lane child's spawn into its parent's fan-out from a move into
+and `Wave.Wait` (`joinedErr`, which falls back to `retainUnit` for a `RetainFor` wave), lets `Schedule` tell a lane child's spawn into its parent's fan-out from a move into
 another node, and is what `sealBody` indexes the body state by.
 
 Two ways an error reaches a wave:
@@ -479,7 +488,7 @@ acknowledges. An unacked error fails the item at completion, so a failure can be
 `FanOut.Wait`: idle) wave with an error is acknowledged and its error returned, because the poison that woke them is
 that error; a clean or unfinished wave leaves the cancellation cause as the answer.
 
-`Wave.Wait` is the only way to wait on a `Stage.Retain` or `FanOut.Retain` wave inside the runtime; `MoveTo` and `TryMoveTo` take
+`Wave.Wait` is the only way to wait on a `RetainFor` or `FanOut.Retain` wave inside the runtime; `MoveTo` and `TryMoveTo` take
 no waves. The reason is the wake-up order: a wait that first asks for admission and only then looks at the wave lets
 the poison of a finished failed wave land in the admission wait, which returns the cause without acknowledging
 anything. A wait that owns the wave has no such gap. `Wave.Wait` resolves its caller before taking the lock: a
@@ -521,7 +530,7 @@ is dropped at the head, a failing tree terminates: running tasks finish, nothing
 **Cancellation is judged by the item, not by the context passed.** `item.cancelCause` reads the cancellation cause
 of the item's own context first, then the call context's, and every node method decides with it: the admission waits
 and `Wave.Wait` (`waitUntil`), the `TryMoveTo` preamble (`actingItem` with `checkCancel`), `Schedule`, `Wait`, and
-`Retain`'s decision to run its callback. A context with cancellation stripped (`context.WithoutCancel`) therefore
+`RetainFor`'s decision to run its callback (`Retain` keeps its hold regardless: a canceled call context does not stop the item from moving on with its own). A context with cancellation stripped (`context.WithoutCancel`) therefore
 cannot move, schedule, wait or retain for a canceled item, which is what keeps a canceled item from committing past
 a failed older one; a derived context with a shorter deadline still works, since it inherits the item's cancellation
 and adds its own. `FanOut.Retain` is the exception: it hands back the item's own wave whatever the cancellation
@@ -530,7 +539,7 @@ state.
 **`completeItem`** runs after any item's processor returns — an ItemProcessor for a root item, a `TaskFunc` for a
 child. It poisons the item on a real (non-shutdown) processor error, **seals the open body** if any (state `closed`;
 without this an idle body would never finish and the item would wait forever, and from here the item's own path is
-refused — which covers a `Retain` callback that holds the item's context and schedules after the processor
+refused — which covers a `RetainFor` callback that holds the item's context and schedules after the processor
 returned), waits for every outstanding wave (a sealed body still grows from its running tasks until the tree is
 exhausted), then computes the effective error: the processor's own, else the first error from a wave nobody
 observed. Then:
@@ -583,8 +592,8 @@ static wiring or a dynamic per-item contract violation is irrelevant.
   `errConveyorFinalized`, `errStageNotEntered`, `errNothingToRetain`, `errBodyClosed`, `errWorkRetained`,
   `errWrongEnterOrder`, `errNodeAlreadyEntered`, `errNilTaskFunc`, `errTaskReused`, `errForeignWave`): builder calls
   on a running or finalized conveyor; a handle from another conveyor, or one used with a context from another
-  conveyor; a node outside the item's series; moving backward or re-entering a node; `Retain` / `Wait` on a node
-  the item does not occupy, or `Schedule` for a fan-out the item has passed; `Schedule` / `Wait` through the item's
+  conveyor; a node outside the item's series; moving backward or re-entering a node; `Retain` / `RetainFor` / `Wait` on a node
+  the item is not in, `Retain` with a context that carries no item, or `Schedule` for a fan-out the item has passed; `Schedule` / `Wait` through the item's
   own path at a body that is closed or retained; a task calling `Schedule` for a fan-out it does not run under; a resubmitted `Task`; a
   foreign wave; a move or a `Wait` attempted from a pool's non-movable work, or a lane child's `Wait` on its parent's
   fan-out (`errWrongScope`). They are unexported because a caller must not branch on them — they exist so the
@@ -663,7 +672,7 @@ Break any of these and the model stops holding:
    publishes its rank at the item's initial batch (prepared work at admission, else the first `Schedule`, or leave,
    or `Retain`), never at a bare admission, so a younger item cannot queue before the older one has. Each collection leaves its queue exactly once, by identity, with one
    `Queued` decrement and one exhaustion notification.
-6. **User code never runs under `run.mu`.** Task callbacks, generator pulls, channel receives, `Retain` bgOps and
+6. **User code never runs under `run.mu`.** Task callbacks, generator pulls, channel receives, `RetainFor` bgOps and
    source releases all run outside the lock. `dropCollection` therefore hands abandoned sources to their own
    goroutine.
 7. **An error is never lost.** A wave whose error nobody acknowledged fails its item at completion; a root item's

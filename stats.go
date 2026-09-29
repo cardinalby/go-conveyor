@@ -49,7 +49,7 @@ func (w *windowedInt) snapshot() Gauge {
 // Conveyor.StartingStage) that produced it.
 //
 // Occupied and Limit describe the node itself. A slot counts while an item runs the node's code or has work
-// outstanding there, while Stage.Retain or FanOut.Retain keeps it for work in flight, and while an item admitted to a
+// outstanding there, while Retain, RetainFor or FanOut.Retain keeps it after the item moved on, and while an item admitted to a
 // Balanced or Strict fan-out still keeps the previous node's slot (see FanOutBackpressure). So a node's occupancy
 // may include items that are already in the next node. Work prepared with Schedule before entering a fan-out is
 // not counted anywhere.

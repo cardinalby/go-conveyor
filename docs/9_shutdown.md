@@ -27,7 +27,8 @@ The point can be a stage or a fan-out of the main pipeline (not a node inside a 
 stage: every item enters it first, so no item is aborted. `c.SetNoAbortPoint(c.StartingStage())` restores it.
 
 `SetNoAbortPoint` can be called at any time, also on a running conveyor. An item that has entered the point is
-never aborted, even if the point is moved to a later node. Moving the point to an earlier node protects the items
+not aborted, even if the point is moved to a later node. It can still be canceled for other reasons: an earlier
+item failed (all later items are canceled), or the `OptShutdownContext` context is done. Moving the point to an earlier node protects the items
 that have already entered it.
 
 ## Grace period

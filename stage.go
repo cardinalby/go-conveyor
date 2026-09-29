@@ -2,23 +2,41 @@ package conveyor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
-// RetainableStage is a stage whose slot the item can hand to background work: a Stage, or the conveyor's starting
+// RetainableStage is a stage whose slot the item can keep after moving on: a Stage, or the conveyor's starting
 // stage (Conveyor.StartingStage).
 type RetainableStage interface {
 	Unit
 
-	// Retain runs bgOp in the background while keeping this stage's slot held, letting the item move on without
+	// Retain keeps this stage's slot held until the returned release is called, letting the item move on without
+	// releasing the stage. The slot is freed once release is called and the item has moved on, so a release called
+	// while the item is still in the stage changes nothing. Use it to keep the next item out of the stage while this
+	// item's later work (in the ItemProcessor or in its fan-out tasks) still uses the same resource.
+	//
+	// release may be called from any goroutine, more than once. Each Retain call holds the slot until its own
+	// release is called. A hold not released by then ends when the item completes, after all its tasks finished:
+	// do not call release from a goroutine you started yourself and expect it to keep the stage after the item
+	// returns — use RetainFor for background work.
+	//
+	// On a finished item the returned release does nothing.
+	//
+	// It panics on misuse: a context that does not belong to an item, a handle from another conveyor, or a stage the
+	// item is not in now.
+	Retain(ctx context.Context) (release func())
+
+	// RetainFor runs bgOp in the background while keeping this stage's slot held, letting the item move on without
 	// releasing the stage. The slot is freed once bgOp returns and the item has moved on. Wait for bgOp with the
-	// returned Wave (before or after a later MoveTo); an error from bgOp cancels the item.
+	// returned Wave (before or after a later MoveTo); an error from bgOp cancels the item. Several calls run their
+	// bgOps in parallel and the slot is held until all of them return.
 	//
 	// On a canceled item — canceled on ctx or on its own context — bgOp does not run and the returned wave is
 	// already finished, carrying the cancellation cause.
 	//
-	// It panics on misuse: a handle from another conveyor, or a stage the item does not currently occupy.
-	Retain(ctx context.Context, bgOp func() error) Wave
+	// It panics on misuse: a handle from another conveyor, or a stage the item is not in now.
+	RetainFor(ctx context.Context, bgOp func() error) Wave
 }
 
 // Stage is a node whose work runs inline: the item enters it with MoveTo, runs the stage's code in the
@@ -134,13 +152,38 @@ func (s *stage) Limit() int { return int(s.work.limit.Load()) }
 
 func (s *stage) QueueSize() int { return int(s.work.queueSize.Load()) }
 
-// Retain hands this stage's slot to a background operation (see the RetainableStage interface).
-func (s *stage) Retain(ctx context.Context, bgOp func() error) Wave {
-	return s.series.conveyor.retain(ctx, s.work, bgOp)
+// Retain keeps this stage's slot until the returned release is called (see the RetainableStage interface).
+func (s *stage) Retain(ctx context.Context) func() {
+	return s.series.conveyor.retain(ctx, s.work)
 }
 
-// retain hands the slot of stage unit u to bgOp: the body of Stage.Retain and of the starting stage's Retain.
-func (c *conveyor) retain(ctx context.Context, u *unit, bgOp func() error) Wave {
+// RetainFor hands this stage's slot to a background operation (see the RetainableStage interface).
+func (s *stage) RetainFor(ctx context.Context, bgOp func() error) Wave {
+	return s.series.conveyor.retainFor(ctx, s.work, bgOp)
+}
+
+// retain keeps the slot of stage unit u for the acting item until the returned release is called: the body of
+// Retain on a stage, the starting stage and a lane.
+func (c *conveyor) retain(ctx context.Context, u *unit) func() {
+	it, r, err := c.actingItem(ctx, "retain", u, false)
+	if err != nil {
+		if errors.Is(err, ErrStaleContext) {
+			return func() {} // the item is over and holds nothing
+		}
+		// No item to hold the slot for, and no error to return: a silent no-op would lose the exclusivity asked for.
+		panic(fmt.Errorf("retain %s: %w", u, err))
+	}
+	defer r.mu.Unlock()
+	// No cancellation check: a canceled call ctx does not stop the item from moving on with its own context, so the
+	// hold is kept in any case. On a canceled item it is harmless: finishItem drops it.
+	checkInStage(it, u)
+	h := &stageHold{unit: u.index}
+	it.stageHolds = append(it.stageHolds, h)
+	return func() { r.releaseStageHold(it, h) }
+}
+
+// retainFor hands the slot of stage unit u to bgOp: the body of RetainFor on a stage, the starting stage and a lane.
+func (c *conveyor) retainFor(ctx context.Context, u *unit, bgOp func() error) Wave {
 	// checkCancel is false: a canceled item is answered with a wave of this item's own (below), not an error, which
 	// needs the lock this call takes.
 	it, r, err := c.actingItem(ctx, "retain", u, false)
@@ -152,12 +195,18 @@ func (c *conveyor) retain(ctx context.Context, u *unit, bgOp func() error) Wave 
 	if err := it.cancelCause(ctx); err != nil {
 		return finishedWave(r, it, err) // the item is canceled (on ctx or on its own context): do not run bgOp
 	}
-	if it.occupied[u.index] == 0 {
-		panic(fmt.Errorf("cannot retain %s: %w", u, errStageNotEntered))
-	}
+	checkInStage(it, u)
 	w := newWave(r, it)
 	w.retainUnit = u
 	w.workStarted()
 	go r.runRetain(w, bgOp)
 	return w
+}
+
+// checkInStage panics unless the item is in stage unit u now. Occupancy alone is not enough: a slot kept by an
+// earlier Retain stays occupied after the item has moved on. Caller holds run.mu.
+func checkInStage(it *item, u *unit) {
+	if it.occupied[u.index] == 0 || it.reachedRank != u.rank {
+		panic(fmt.Errorf("cannot retain %s: %w", u, errStageNotEntered))
+	}
 }

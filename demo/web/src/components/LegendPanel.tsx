@@ -12,13 +12,14 @@ const PREVIEW_ITEM_NO = 42;
 /** One item-badge preview, reusing the exact ItemBadge component ItemsOverlay/TaskStrip render with — see
  * index.css's .item-badge and its .pending/.blocked modifiers. No positioning class: a legend swatch sits in plain
  * flow, unlike the live, moving/fading versions. */
-function Preview({ fill }: { fill?: "pending" | "blocked" | "held" }) {
+function Preview({ fill, note }: { fill?: "pending" | "blocked" | "held"; note?: string }) {
   return (
     <ItemBadge
       label={PREVIEW_ITEM_NO}
       color={colorForItem(PREVIEW_ITEM_NO)}
       textColor={textColorForItem(PREVIEW_ITEM_NO)}
       fill={fill}
+      note={note}
       className="legend-preview"
     />
   );
@@ -68,6 +69,24 @@ export function LegendPanel({ open }: Props) {
                     room) until its tasks start — the item is shown inside the fan-out too
                   </span>
                   <Preview fill="held" />
+                </li>
+                <li className="legend-item">
+                  <span className="legend-label">
+                    Slot an item keeps in a stage it retained (Stage.Retain) until released — the item is shown in the
+                    later nodes too
+                  </span>
+                  <Preview fill="held" note="retaining" />
+                </li>
+              </ul>
+            </li>
+            <li className="legend-item-heading">
+              <span className="legend-label">Click an item:</span>
+              <ul className="legend-sublist">
+                <li className="legend-item">
+                  <span className="legend-label">
+                    While it works in the start or a top-level stage: retains that stage — it keeps the slot after
+                    moving on, so no next item can enter. Click it again (or its copy left in the stage) to release.
+                  </span>
                 </li>
               </ul>
             </li>

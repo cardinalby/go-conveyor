@@ -420,9 +420,9 @@ func (r *run) closeBody(it *item, w *wave) error {
 	return nil
 }
 
-// joinedErr names the node whose work failed — the fan-out of a body, or the stage of a Retain — so the error reads
+// joinedErr names the node whose work failed — the fan-out of a body, or the stage of a RetainFor — so the error reads
 // for the node the work belongs to rather than for the node the item stood at when it heard about it. A wave with
-// neither (the finished wave a canceled Retain hands back) reports its error as is.
+// neither (the finished wave a canceled RetainFor hands back) reports its error as is.
 func joinedErr(w *wave) error {
 	u := w.atNode
 	if u == nil {
@@ -486,8 +486,9 @@ func (r *run) releaseSlot(it *item, j int) {
 // --- release ---
 
 // releaseBelow frees every slot the item holds in units of its own scope with rank strictly below beforeRank,
-// except a unit whose slot a live Retain wave is holding (that slot is freed when the bgOp returns, or when the
-// item moves on — whichever is later, so the item never sits somewhere holding nothing). It reports whether any
+// except a unit kept by a live RetainFor wave or an unreleased Retain (that slot is freed when the bgOp returns or
+// the hold is released, or when the item moves on — whichever is later, so the item never sits somewhere holding
+// nothing). It reports whether any
 // slot was actually freed. Caller holds mu and must broadcast.
 //
 // A queued slot is released by the same rank rule as everything else, which is what makes the waiting room
@@ -577,7 +578,7 @@ func (r *run) dropDormantIfCanceled(it *item) {
 // entering the fan-out — the previous node's slot, or the queued token when it was admitted from the fan-out's
 // waiting room (takeQueue released the previous node already) — kept until the item's first Schedule has made
 // progress. It is a kind of ownership separate from wave.retainUnit: releaseBelow skips a held unit the way it skips
-// a retained one, so the sweep an unrelated Retain completion triggers cannot free it, and a unit both hold is freed
+// a retained one, so the sweep an unrelated RetainFor completion or Retain release triggers cannot free it, and a unit both hold is freed
 // only when both have ended. A held queued token is owned by the hold outright: newHold takes it off item.queuedAt,
 // so a later takeQueue cannot give it back, and dischargeHold returns the count.
 //
@@ -609,7 +610,7 @@ type upstreamHold struct {
 
 // newHold records the token the admission to u would have released and adds it to the item's holds: the queued slot
 // if the item is waiting anywhere (taken over from item.queuedAt), else the highest-rank unit below u the item
-// occupies — whether or not a Retain wave or an earlier hold has it too, so a unit under several is freed only when
+// occupies — whether or not a RetainFor wave, a Retain or an earlier hold has it too, so a unit under several is freed only when
 // all have ended. Caller holds mu.
 func (r *run) newHold(it *item, u *unit) *upstreamHold {
 	h := &upstreamHold{at: u, mode: u.backpressureMode(), unit: -1}
@@ -707,6 +708,8 @@ func (r *run) freeUnit(it *item, u *unit) bool {
 // for all of its waves, so those slots are gone — the wider sweep is a backstop that keeps the "no slot outlives its
 // item" invariant true of this function alone, rather than of the order its callers run in.
 func (r *run) finishItem(it *item) {
+	// A Retain hold never released ends here; its slot is freed below.
+	it.stageHolds = nil
 	for _, h := range it.holds { // held units are swept below; held queued tokens are given back here
 		h.done = true
 		if h.queued {
@@ -1011,7 +1014,23 @@ func (r *run) runWork(branchIdx int, g grabbed) {
 	r.mu.Unlock()
 }
 
-// runRetain runs a Retain bgOp and settles its wave, which is also what gives back the stage slot the wave was holding
+// releaseStageHold ends the Retain hold h of it, if it is still live, and frees the slot if the item has moved on
+// and nothing else keeps it (the same sweep as wave.releaseRetained). Safe from any goroutine, more than once, and
+// after the item finished.
+func (r *run) releaseStageHold(it *item, h *stageHold) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	i := slices.Index(it.stageHolds, h)
+	if i < 0 {
+		return // already released, or dropped when the item finished
+	}
+	it.stageHolds = slices.Delete(it.stageHolds, i, i+1)
+	if r.releaseBelow(it, it.reachedRank) {
+		r.cond.Broadcast()
+	}
+}
+
+// runRetain runs a RetainFor bgOp and settles its wave, which is also what gives back the stage slot the wave was holding
 // (see wave.releaseRetained — the same path a retained fan-out's slot takes). Not holding mu while bgOp runs.
 func (r *run) runRetain(w *wave, bgOp func() error) {
 	err := bgOp()

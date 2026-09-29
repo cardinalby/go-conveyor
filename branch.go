@@ -157,9 +157,15 @@ func (b *branch) String() string {
 
 func (b *branch) unit() *unit { return b.start }
 
-// Retain hands the lane's entrance slot to a background operation (see the Lane and RetainableStage interfaces).
-func (b *branch) Retain(ctx context.Context, bgOp func() error) Wave {
-	return b.fanout.series.conveyor.retain(ctx, b.start, bgOp)
+// Retain keeps the lane's entrance slot until the returned release is called (see the Lane and RetainableStage
+// interfaces).
+func (b *branch) Retain(ctx context.Context) func() {
+	return b.fanout.series.conveyor.retain(ctx, b.start)
+}
+
+// RetainFor hands the lane's entrance slot to a background operation (see the Lane and RetainableStage interfaces).
+func (b *branch) RetainFor(ctx context.Context, bgOp func() error) Wave {
+	return b.fanout.series.conveyor.retainFor(ctx, b.start, bgOp)
 }
 
 // travels reports whether this branch's work runs as child items that may move — i.e. whether it has anywhere to go.

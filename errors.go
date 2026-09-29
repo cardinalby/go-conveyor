@@ -92,7 +92,7 @@ var (
 	// from the first Run on).
 	errConveyorFinalized = errors.New("cannot change the topology after the conveyor has run")
 
-	// errStageNotEntered is panicked with by Stage.Retain and FanOut.Retain when the current item does not occupy the
+	// errStageNotEntered is panicked with by Retain, RetainFor and FanOut.Retain when the current item is not in the
 	// node it is trying to hand its slot to, and by FanOut.Schedule / FanOut.Wait at a fan-out the item never entered.
 	// Its message reads as a trailing clause of the wrapped panic.
 	errStageNotEntered = errors.New("the item does not currently occupy it")

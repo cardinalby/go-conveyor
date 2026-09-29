@@ -73,13 +73,17 @@ type item struct {
 	// binding predecessor for the ordering gate; both are nil once the item is finished (unlinked).
 	prev, next *item
 
-	// waves are the background-work handles this item created (a fan-out body, Stage.Retain). They are joined when
+	// waves are the background-work handles this item created (a fan-out body, RetainFor). They are joined when
 	// the item completes, and an error none of them had observed fails the item.
 	waves []*wave
 	// pending is the item's open body: the work scheduled at the fan-out it currently occupies and has not retained,
 	// which the item must see finish before it may leave (see run.joinPending). nil when the item is not in a
 	// fan-out, or has handed its work over with FanOut.Retain — that is, whenever no entry of body is bodyOpen.
 	pending *wave
+
+	// stageHolds are the slots kept by Retain (on a stage, the starting stage or a lane) whose release has not been
+	// called yet. Unlike waves they are not joined: finishItem drops whatever is left.
+	stageHolds []*stageHold
 
 	// holds are the releases deferred by this item's admissions to Balanced/Strict fan-outs, one per such admission
 	// still pending (see upstreamHold). Several can be live at once: a retained body keeps its hold while the item
@@ -198,10 +202,20 @@ func (it *item) holdsUnit(j int) bool {
 	return false
 }
 
-// isRetaining reports whether a live wave of this item holds unit j — a Stage.Retain's stage or a FanOut.Retain's
-// node. Such a slot must not be taken away when the item moves on; it is freed when the work returns. Caller holds
-// run.mu.
+// stageHold is one Retain of a stage slot, alive until its release is called or the item finishes.
+type stageHold struct {
+	unit int // the index of the held unit
+}
+
+// isRetaining reports whether unit j is kept for this item after it moves on: by a live wave (a RetainFor's stage or
+// a FanOut.Retain's node) or by a Retain not yet released. Such a slot must not be taken away when the item moves on;
+// it is freed when the work returns or the hold is released. Caller holds run.mu.
 func (it *item) isRetaining(j int) bool {
+	for _, h := range it.stageHolds {
+		if h.unit == j {
+			return true
+		}
+	}
 	for _, w := range it.waves {
 		if !w.finishedSet && w.retainUnit != nil && w.retainUnit.index == j {
 			return true

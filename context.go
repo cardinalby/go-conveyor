@@ -124,7 +124,7 @@ func (c *conveyor) resolveCaller(ctx context.Context) (*taskCollection, *item, e
 // checkCancel additionally declines a canceled item — canceled on the call context or on its own context, see
 // item.cancelCause. The blocking paths leave it false: they get the cancellation check from waitUntil, which tests it
 // before admissibility. The non-blocking ones (TryMoveTo) set it, having no wait to piggyback on — without it a
-// canceled item would be reported as "no room". Stage.Retain leaves it false too, because it answers cancellation
+// canceled item would be reported as "no room". RetainFor leaves it false too, because it answers cancellation
 // with a wave of its own rather than an error, which needs the item and the lock this call has just obtained.
 //
 // It panics on the same static misuse the individual methods used to check inline: a foreign handle (errInvalidUnit),

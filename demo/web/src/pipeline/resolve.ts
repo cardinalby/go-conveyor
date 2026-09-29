@@ -58,6 +58,8 @@ export interface ResolvedStage {
   /** Non-empty only when this stage is reachable through some lane's interior — see ../types/state's
    * LanePathEntry. */
   lanePaths: LanePathEntry[];
+  /** Items keeping this stage with a live Retain — see ../types/state's NodeState.retaining. */
+  retaining: number[];
   /** See NoAbortRole. */
   noAbort: NoAbortRole;
 }
@@ -85,6 +87,8 @@ export interface ResolvedStart {
   delayMs: number;
   inBody: number[];
   blockedLeaving: number[];
+  /** Same as ResolvedStage's. */
+  retaining: number[];
   /** True when Pipeline.noAbortPoint is null: the start is the no-abort point (the default). */
   noAbortPoint: boolean;
 }
@@ -149,6 +153,7 @@ function sameStage(a: ResolvedStage, b: ResolvedStage): boolean {
     sameNums(a.inQueue, b.inQueue) &&
     sameNums(a.blockedLeaving, b.blockedLeaving) &&
     sameLanePaths(a.lanePaths, b.lanePaths) &&
+    sameNums(a.retaining, b.retaining) &&
     a.noAbort === b.noAbort
   );
 }
@@ -220,6 +225,7 @@ function resolveNodes(
         inQueue: s?.inQueue ?? [],
         blockedLeaving: s?.blockedLeaving ?? [],
         lanePaths: s?.lanePaths ?? [],
+        retaining: s?.retaining ?? [],
         noAbort: noAbortRole(n.id, pointId),
       };
       return memoized(stageCache, n.id, next, sameStage);
@@ -297,6 +303,7 @@ export function resolveStart(pipeline: Pipeline, runState: RunState | null): Res
     delayMs: s?.delayMs ?? pipeline.startDelayMs,
     inBody: s?.inBody ?? [],
     blockedLeaving: s?.blockedLeaving ?? [],
+    retaining: s?.retaining ?? [],
     noAbortPoint: pipeline.noAbortPoint === null,
   };
 }

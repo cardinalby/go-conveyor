@@ -48,7 +48,7 @@ func TestRetainKeepsStageOccupiedAfterMovingOn(t *testing.T) {
 		if no != 1 {
 			return nil
 		}
-		w := a.Retain(ic, func() error {
+		w := a.RetainFor(ic, func() error {
 			select {
 			case <-release:
 			case <-ic.Done():
@@ -93,7 +93,7 @@ func TestRetainSlotHeldUntilItemMovesOn(t *testing.T) {
 			g.leave()
 			return nil
 		}
-		w := a.Retain(ic, func() error { return nil })
+		w := a.RetainFor(ic, func() error { return nil })
 		<-w.Finished() // the bgOp is done, but the item has not moved on yet
 		waitFor(t, "a follower item to be waiting at the retained stage", func() bool { return created.Load() >= 2 })
 		if got := occupancyOf(c, a); got != 1 {
@@ -138,7 +138,7 @@ func TestRetainJoinWaitsForBgOp(t *testing.T) {
 		if err := write.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := write.Retain(ctx, func() error {
+		w := write.RetainFor(ctx, func() error {
 			<-release
 			bgDone.Store(true)
 			return nil
@@ -177,7 +177,7 @@ func TestRetainJoinObservesBackgroundEffect(t *testing.T) {
 		if err := write.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := write.Retain(ctx, func() error {
+		w := write.RetainFor(ctx, func() error {
 			mu.Lock()
 			effects[no] = true
 			mu.Unlock()
@@ -213,7 +213,7 @@ func TestRetainJoinReturnsBgOpError(t *testing.T) {
 		if err := write.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := write.Retain(ctx, func() error { return boom })
+		w := write.RetainFor(ctx, func() error { return boom })
 		<-w.Finished() // the bgOp may fail while the item waits for admission; the wave's error is what we want
 		if err := commit.MoveTo(ctx); err != nil && !errors.Is(err, boom) {
 			return err
@@ -250,7 +250,7 @@ func TestRetainErrorCancelsItemContext(t *testing.T) {
 		if err := write.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := write.Retain(ctx, func() error { return boom })
+		w := write.RetainFor(ctx, func() error { return boom })
 		<-w.Finished()
 		moveErr = mid.MoveTo(ctx) // not joined here: the failure must reach the item through its context
 		if moveErr == nil {
@@ -281,7 +281,7 @@ func TestRetainUnobservedErrorFailsRun(t *testing.T) {
 			return err
 		}
 		if no == 1 {
-			_ = write.Retain(ic, func() error { return boom }) // never joined, never read
+			_ = write.RetainFor(ic, func() error { return boom }) // never joined, never read
 		}
 		return nil
 	})
@@ -302,7 +302,7 @@ func TestRetainObservedErrorDoesNotFailRun(t *testing.T) {
 		if err := write.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := write.Retain(ctx, func() error { return boom })
+		w := write.RetainFor(ctx, func() error { return boom })
 		<-w.Finished()
 		got = w.Err()
 		return nil
@@ -359,7 +359,7 @@ func TestRetainOnSharedStageHoldsOneSlot(t *testing.T) {
 		if no != 1 {
 			return next.MoveTo(ic)
 		}
-		w := shared.Retain(ic, func() error {
+		w := shared.RetainFor(ic, func() error {
 			select {
 			case <-release:
 			case <-ic.Done():
@@ -391,12 +391,12 @@ func TestRetainOnCanceledItemSkipsBgOp(t *testing.T) {
 			return err
 		}
 		// The first retain fails, which cancels the item's context with its error.
-		first := s.Retain(ctx, func() error { return boom })
+		first := s.RetainFor(ctx, func() error { return boom })
 		<-first.Finished()
 		if got := first.Err(); !errors.Is(got, boom) {
 			t.Errorf("first wave error = %v, want %v", got, boom)
 		}
-		second := s.Retain(ctx, func() error {
+		second := s.RetainFor(ctx, func() error {
 			ran.Store(true)
 			return nil
 		})
@@ -447,7 +447,7 @@ func TestRetainSeveralStagesJoinedTogether(t *testing.T) {
 		if err := a.MoveTo(ctx); err != nil {
 			return err
 		}
-		wa := a.Retain(ctx, func() error {
+		wa := a.RetainFor(ctx, func() error {
 			<-releaseA
 			aDone.Store(true)
 			return nil
@@ -455,7 +455,7 @@ func TestRetainSeveralStagesJoinedTogether(t *testing.T) {
 		if err := b.MoveTo(ctx); err != nil {
 			return err
 		}
-		wb := b.Retain(ctx, func() error {
+		wb := b.RetainFor(ctx, func() error {
 			<-releaseB
 			bDone.Store(true)
 			return nil
@@ -505,11 +505,11 @@ func TestRetainTwiceOnSameStageBothJoined(t *testing.T) {
 		if err := a.MoveTo(ctx); err != nil {
 			return err
 		}
-		fast := a.Retain(ctx, func() error {
+		fast := a.RetainFor(ctx, func() error {
 			fastDone.Store(true)
 			return nil
 		})
-		slow := a.Retain(ctx, func() error {
+		slow := a.RetainFor(ctx, func() error {
 			<-release
 			slowDone.Store(true)
 			return nil
@@ -579,7 +579,7 @@ func TestRetainCompletionWaitsForBgOp(t *testing.T) {
 		if no != 1 {
 			return nil
 		}
-		_ = a.Retain(ic, func() error {
+		_ = a.RetainFor(ic, func() error {
 			select {
 			case <-release:
 			case <-ic.Done():
@@ -622,7 +622,7 @@ func TestRetainByChildHoldsLaneInteriorStage(t *testing.T) {
 				if i != 0 {
 					return tail.MoveTo(cctx)
 				}
-				rw := mid.Retain(cctx, func() error {
+				rw := mid.RetainFor(cctx, func() error {
 					// The other child is running and blocked at mid's door; the retained slot is what holds it there.
 					waitFor(t, "the sibling child to be running", func() bool { return started.Load() == 2 })
 					if occ := occupancyOf(c, mid); occ != 1 {
@@ -684,7 +684,7 @@ func TestRetainByChildUnobservedErrorFailsRun(t *testing.T) {
 				if err := mid.MoveTo(cctx); err != nil {
 					return err
 				}
-				_ = mid.Retain(cctx, func() error { return boom }) // the wave is never joined and never read
+				_ = mid.RetainFor(cctx, func() error { return boom }) // the wave is never joined and never read
 				return nil
 			}))
 		}

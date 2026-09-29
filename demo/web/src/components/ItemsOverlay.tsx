@@ -4,7 +4,7 @@ import { getSlotElement } from "../state/slotRegistry";
 import { isFailModifier } from "./shared/failModifier";
 import { ItemBadge } from "./shared/ItemBadge";
 import { colorForItem, textColorForItem } from "../pipeline/colors";
-import { baseKey, isHeldKey, parentKey, type ItemFill, type ItemPositions } from "../pipeline/itemPositions";
+import { baseKey, isHeldKey, parentKey, type ItemFill, type ItemPositions, type RetainTarget } from "../pipeline/itemPositions";
 
 // Half of .item-badge's own size — centers the rectangle on its slot's midpoint. Not square: the extra width is
 // what a lane sub-item's ".1"/".2" suffix (see itemPositions.ts) needs room for.
@@ -31,6 +31,9 @@ interface Props {
   itemPositions: ItemPositions;
   /** Ctrl/⌘-click on an item's rectangle asks that one item to fail — see services/api's failItem. */
   onFailItem: (itemNo: number) => void;
+  /** A plain click on an item working in the start or a top-level stage retains that stage; a click on an item
+   * that retains one (or on its held copy there) releases it — see services/api's retainItem / releaseItem. */
+  onToggleRetain: (target: RetainTarget) => void;
 }
 
 /** Renders every in-flight item — and every lane sub-item, one level of the label deeper per lane crossing — as a
@@ -50,10 +53,11 @@ interface Props {
  * still stuck there, waiting for room ahead, renders outlined instead of solid (dashed if it's a fan-out entry
  * still waiting on its own branches' tasks) — see ../pipeline/itemPositions.
  *
- * Ctrl/⌘-clicking a rectangle injects a failure for the item as a whole — see topology.Failures and rootItemNo.
+ * Ctrl/⌘-clicking a rectangle injects a failure for the item as a whole — see topology.Failures and rootItemNo. A
+ * plain click retains or releases a stage (see ItemPositions.retain); an item holding one is captioned "retaining".
  * Only an item still in the system is clickable: one already sliding out has nothing left to fail.
  */
-export function ItemsOverlay({ itemPositions, onFailItem }: Props) {
+export function ItemsOverlay({ itemPositions, onFailItem, onToggleRetain }: Props) {
   const { screenToFlowPosition } = useReactFlow();
   const [items, setItems] = useState<Map<string, RenderedItem>>(new Map());
 
@@ -113,6 +117,8 @@ export function ItemsOverlay({ itemPositions, onFailItem }: Props) {
           // A held copy (see itemPositions' ItemFill "held") stands for an item drawn elsewhere: its label is the
           // item's own, and its data-item-key is left unset so nothing flies in from the copy instead of the item.
           const held = isHeldKey(itemKey);
+          const retain = item.exiting ? undefined : itemPositions.retain.get(itemKey);
+          const retainHint = retain ? (retain.retaining ? "; click to release the stage" : "; click to retain the stage") : "";
           return (
             <ItemBadge
               key={itemKey}
@@ -121,18 +127,26 @@ export function ItemsOverlay({ itemPositions, onFailItem }: Props) {
               color={colorForItem(no)}
               textColor={textColorForItem(no)}
               fill={item.fill}
-              className={`item-rect-overlay${item.exiting ? " exiting" : ""}`}
+              note={retain?.retaining ? "retaining" : undefined}
+              className={`item-rect-overlay${item.exiting ? " exiting" : ""}${retain ? " retain-target" : ""}`}
               title={
                 item.exiting
                   ? undefined
                   : held
-                    ? `Item ${label} — slot kept until its tasks start (admitted by pools, strict); Ctrl/⌘-click to fail it`
-                    : `Item ${label} — Ctrl/⌘-click to fail it`
+                    ? retain?.retaining
+                      ? `Item ${label} — stage kept by Retain until released${retainHint}; Ctrl/⌘-click to fail it`
+                      : `Item ${label} — slot kept until its tasks start (admitted by pools, strict); Ctrl/⌘-click to fail it`
+                    : `Item ${label}${retainHint} — Ctrl/⌘-click to fail it`
               }
               onClick={(e) => {
-                if (item.exiting || !isFailModifier(e)) return;
-                e.stopPropagation();
-                onFailItem(no);
+                if (item.exiting) return;
+                if (isFailModifier(e)) {
+                  e.stopPropagation();
+                  onFailItem(no);
+                } else if (retain) {
+                  e.stopPropagation();
+                  onToggleRetain(retain);
+                }
               }}
               style={{ transform: `translate(${item.x - ITEM_CENTER_OFFSET_X}px, ${item.y - ITEM_CENTER_OFFSET_Y}px)` }}
             />

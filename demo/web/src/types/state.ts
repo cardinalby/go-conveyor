@@ -33,6 +33,9 @@ export interface NodeState {
   blockedLeaving: number[];
   /** Always empty for a node outside any lane's interior — see LanePathEntry. */
   lanePaths: LanePathEntry[];
+  /** The start or a top-level stage only: InBody items that keep it with a live Retain, still in it or moved on —
+   * see Go's topology.Retains. */
+  retaining: number[];
 }
 
 /** A full run-mode snapshot, polled from WASM every tick. */

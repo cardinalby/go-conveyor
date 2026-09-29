@@ -141,7 +141,7 @@ func TestWaitWithStrippedContextOnCanceledItem(t *testing.T) {
 			if err := s.MoveTo(ctx); err != nil {
 				return err
 			}
-			poison := s.Retain(ctx, func() error {
+			poison := s.RetainFor(ctx, func() error {
 				<-trigger
 				return boom
 			})

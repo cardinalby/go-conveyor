@@ -87,7 +87,7 @@ func TestWaitOnRetainWaveAfterBlockedMoveAcknowledges(t *testing.T) {
 			if err := write.MoveTo(ctx); err != nil {
 				return err
 			}
-			w := write.Retain(ctx, func() error {
+			w := write.RetainFor(ctx, func() error {
 				waitFor(t, "item 2 to block at commit's door", func() bool { return parkedOf(c) == 1 })
 				return boom
 			})
@@ -175,8 +175,8 @@ func TestUnwaitedFailedWaveStillFailsCompletion(t *testing.T) {
 		// Both bgOps fail only once both waves exist: a Retain on an already poisoned item does not run its bgOp and
 		// hands back a finished wave carrying the poison instead.
 		release := make(chan struct{})
-		wa := write.Retain(ctx, func() error { <-release; return errA })
-		wb := write.Retain(ctx, func() error { <-release; return errB })
+		wa := write.RetainFor(ctx, func() error { <-release; return errA })
+		wb := write.RetainFor(ctx, func() error { <-release; return errB })
 		close(release)
 		<-wa.Finished()
 		<-wb.Finished()
@@ -253,7 +253,7 @@ func TestWaitCallerRules(t *testing.T) {
 	pool := fo.AddPool(OptName("pool"))
 
 	// Standalone: Retain with a context that carries no item hands back a finished wave carrying the reason.
-	sw := write.Retain(context.Background(), func() error { return nil })
+	sw := write.RetainFor(context.Background(), func() error { return nil })
 	if err := sw.Wait(context.Background()); !errors.Is(err, ErrForeignContext) {
 		t.Fatalf("standalone Wait = %v, want ErrForeignContext", err)
 	}
@@ -266,7 +266,7 @@ func TestWaitCallerRules(t *testing.T) {
 		if err := write.MoveTo(ctx); err != nil {
 			return err
 		}
-		w = write.Retain(ctx, func() error { return nil })
+		w = write.RetainFor(ctx, func() error { return nil })
 		if err := w.Wait(context.Background()); !errors.Is(err, ErrForeignContext) {
 			t.Errorf("Wait with a context without an item = %v, want ErrForeignContext", err)
 		}
@@ -308,7 +308,7 @@ func TestWaitByLaneChildOnParentsWavePanics(t *testing.T) {
 		if err := write.MoveTo(ctx); err != nil {
 			return err
 		}
-		pw := write.Retain(ctx, func() error { return nil })
+		pw := write.RetainFor(ctx, func() error { return nil })
 		if err := fo.MoveTo(ctx); err != nil {
 			return err
 		}
@@ -345,7 +345,7 @@ func TestWaitCleanWaveOnCanceledItemReturnsCause(t *testing.T) {
 		if err := write.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := write.Retain(ctx, func() error { return nil })
+		w := write.RetainFor(ctx, func() error { return nil })
 		<-w.Finished()
 		itemOf(ctx).cancel(boom)
 		if err := w.Wait(ctx); !errors.Is(err, boom) {
@@ -372,7 +372,7 @@ func TestWaitHonorsCallContextDeadline(t *testing.T) {
 		if err := write.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := write.Retain(ctx, func() error { <-release; return nil })
+		w := write.RetainFor(ctx, func() error { <-release; return nil })
 		dctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
 		defer cancel()
 		if err := w.Wait(dctx); !errors.Is(err, context.DeadlineExceeded) {
@@ -408,7 +408,7 @@ func TestWaitItemCauseWinsOverCallContextCause(t *testing.T) {
 		if err := write.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := write.Retain(ctx, func() error { <-release; return nil })
+		w := write.RetainFor(ctx, func() error { <-release; return nil })
 		cctx, cancel := context.WithCancelCause(ctx)
 		cancel(callCause)
 		itemOf(ctx).cancel(itemCause)
@@ -419,7 +419,7 @@ func TestWaitItemCauseWinsOverCallContextCause(t *testing.T) {
 			t.Errorf("a running wave was acknowledged")
 		}
 		// Only the call context canceled: its cause is the answer.
-		w2 := write.Retain(ctx, func() error { <-release; return nil }) // canceled item: a finished wave carrying the poison
+		w2 := write.RetainFor(ctx, func() error { <-release; return nil }) // canceled item: a finished wave carrying the poison
 		if err := w2.Wait(cctx); !errors.Is(err, itemCause) {
 			t.Errorf("Wait on the wave of a canceled Retain = %v, want the poison %v", err, itemCause)
 		}
@@ -445,7 +445,7 @@ func TestWaitOnCanceledRetainWaveReturnsRawError(t *testing.T) {
 			return err
 		}
 		itemOf(ctx).cancel(boom)
-		w := write.Retain(ctx, func() error {
+		w := write.RetainFor(ctx, func() error {
 			t.Errorf("the callback of a Retain on a canceled item ran")
 			return nil
 		})
@@ -500,7 +500,7 @@ func TestWaitConcurrentWaiters(t *testing.T) {
 		}
 		// Clean wave: the waiters park until the callback is about to finish, so they overlap with each other.
 		release := make(chan struct{})
-		clean := write.Retain(ctx, func() error { <-release; return nil })
+		clean := write.RetainFor(ctx, func() error { <-release; return nil })
 		park := make(chan struct{})
 		go func() {
 			waitFor(t, "the waiters to be about to block", func() bool { return parkedOf(c) == 0 }) // nothing else waits
@@ -516,7 +516,7 @@ func TestWaitConcurrentWaiters(t *testing.T) {
 
 		// One waiter with its own canceled call context: only it is affected. The wave is still running.
 		release2 := make(chan struct{})
-		running := write.Retain(ctx, func() error { <-release2; return nil })
+		running := write.RetainFor(ctx, func() error { <-release2; return nil })
 		cctx, cancel := context.WithCancelCause(ctx)
 		mine := errors.New("mine")
 		var wg sync.WaitGroup

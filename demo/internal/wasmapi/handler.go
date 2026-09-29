@@ -49,6 +49,12 @@ type nodeIDRequest struct {
 	ID string `json:"id"`
 }
 
+// retainRequest is the body shape shared by retainItem / releaseItem: the item and the stage it holds.
+type retainRequest struct {
+	ItemNo int64  `json:"itemNo"`
+	NodeID string `json:"nodeId"`
+}
+
 // failureRequest is the body shape shared by failItem / failTask. LaneID is read by failTask only — failItem targets
 // the item wherever it currently is, not at a particular node.
 type failureRequest struct {
@@ -127,6 +133,10 @@ func (h *handler) dispatch(req methodRequest) (any, error) {
 		return h.applyFailure(req.Body, func(r failureRequest) error { return h.manager.FailItem(r.ItemNo) })
 	case "failTask":
 		return h.applyFailure(req.Body, func(r failureRequest) error { return h.manager.FailTask(r.LaneID, r.ItemNo) })
+	case "retainItem":
+		return h.applyRetain(req.Body, h.manager.RetainItem)
+	case "releaseItem":
+		return h.applyRetain(req.Body, h.manager.ReleaseItem)
 	default:
 		return nil, fmt.Errorf("unknown method %q", req.Method)
 	}
@@ -182,6 +192,17 @@ func (h *handler) applyFailure(body json.RawMessage, apply func(req failureReque
 		return nil, err
 	}
 	if err := apply(req); err != nil {
+		return nil, err
+	}
+	return h.manager.State(), nil
+}
+
+func (h *handler) applyRetain(body json.RawMessage, apply func(id string, itemNo int64) error) (any, error) {
+	var req retainRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, err
+	}
+	if err := apply(req.NodeID, req.ItemNo); err != nil {
 		return nil, err
 	}
 	return h.manager.State(), nil

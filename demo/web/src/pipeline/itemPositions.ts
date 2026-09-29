@@ -17,10 +17,11 @@ import type { ResolvedFanOut, ResolvedNode, ResolvedStart } from "./resolve";
  *  - "blocked"  — finished this node's own work and is now trying to advance into the next node: a start/stage
  *    item past its own delay (runtime.NodeState.BlockedLeaving), or a fan-out entry with none of its work queued or
  *    running on any branch.
- *  - "held"     — a second, dimmed copy of an item that is already inside a "balanced" or "strict" fan-out (see
- *    conveyor.FanOutBackpressure): the slot it still keeps in the node before the fan-out — or in the fan-out's own
- *    waiting room — until its first Schedule has made progress. Drawn under a separate key (see heldKey) so the item
- *    appears in two places at once, which is exactly what the backpressure looks like.
+ *  - "held"     — a second, dimmed copy of an item that has moved on but still keeps a slot behind it: in the node
+ *    before a "balanced" or "strict" fan-out (see conveyor.FanOutBackpressure) — or in the fan-out's own waiting
+ *    room — until its first Schedule has made progress, or in a stage it retained (see Stage.Retain) until released.
+ *    Drawn under a separate key (see heldKey) so the item appears in several places at once, which is exactly what
+ *    the kept slot looks like.
  *
  * The three fan-out fills are derived from what is polled (PendingEntry plus each branch's InQueue/InBody), not from
  * the library's Wave channels: an open body's channels are not observable, and Wave.Started counts only the sources
@@ -28,21 +29,31 @@ import type { ResolvedFanOut, ResolvedNode, ResolvedStart } from "./resolve";
  */
 export type ItemFill = "solid" | "pending" | "blocked" | "held";
 
-/** Suffix of the key a held token's copy is drawn under (see ItemFill "held"): "42@held" for item 42, "42.1@held"
- * for a lane sub-item. Never contains "." after the base key, so parentKey/rootItemNo keep working on the base. */
-const HELD_SUFFIX = "@held";
+/** Marker of the key a held token's copy is drawn under (see ItemFill "held"): "42@held:<slot>" for item 42,
+ * "42.1@held:<slot>" for a lane sub-item. The slot key makes it unique, since an item may keep several slots at once
+ * (several retained stages). baseKey strips it, so parentKey/rootItemNo keep working on the base. */
+const HELD_MARK = "@held:";
 
-export function heldKey(key: string): string {
-  return `${key}${HELD_SUFFIX}`;
+export function heldKey(key: string, slot: string): string {
+  return `${key}${HELD_MARK}${slot}`;
 }
 
 export function isHeldKey(key: string): boolean {
-  return key.endsWith(HELD_SUFFIX);
+  return key.includes(HELD_MARK);
 }
 
 /** The item key a held copy stands for — the key itself for a normal one. */
 export function baseKey(key: string): string {
-  return isHeldKey(key) ? key.slice(0, -HELD_SUFFIX.length) : key;
+  const i = key.indexOf(HELD_MARK);
+  return i === -1 ? key : key.slice(0, i);
+}
+
+/** What a click on an item's rectangle does to its stage hold (see Stage.Retain): retain `nodeId` if `retaining` is
+ * false, release it otherwise. Only root items in the start or a top-level stage have one — see markRetain. */
+export interface RetainTarget {
+  nodeId: string;
+  itemNo: number;
+  retaining: boolean;
 }
 
 /** One in-flight item's progress through the pipeline, for the toolbar's live item list (see ../components/
@@ -67,6 +78,8 @@ export interface ItemPositions {
   /** Composite item key -> fill variant; absent (defaults to "solid") for an item actually doing work or sitting in
    * a queue. */
   fills: Map<string, ItemFill>;
+  /** Composite item key (a normal or a held one) -> its retain click target; absent where a click does nothing. */
+  retain: Map<string, RetainTarget>;
   /** Every item currently in the conveyor, earliest (lowest number) first. */
   progress: ItemProgress[];
   /** The denominator for ItemProgress.completed: the implicit Read stage plus every top-level node, a fan-out
@@ -82,6 +95,7 @@ export interface ItemPositions {
 export const NO_ITEM_POSITIONS: ItemPositions = {
   slotKeys: new Map(),
   fills: new Map(),
+  retain: new Map(),
   progress: [],
   totalStages: 0,
 };
@@ -255,19 +269,20 @@ export function assignBodySlots(
  * to any depth) — but never touches `completed`, which only computeItemPositions' own top-level walk tracks: a
  * lane's interior is "inside" whichever top-level node scheduled it, not a stage of its own. */
 function assignNode(node: ResolvedNode, slotKeys: Map<string, string>, fills: Map<string, ItemFill>): void {
-  // Slots the earlier nodes of this walk already gave this node's body occupants, read before this node overwrites
-  // them: an item inside a "balanced" or "strict" fan-out still holds its slot in the node before it until its first
-  // tasks have started (see conveyor.FanOutBackpressure), so it is genuinely in two bodies at once. Nodes are walked
-  // in pipeline order, so "already assigned" means "the node before". keyAssigner is deterministic for one
-  // (lanePaths, inBody) pair, so a throwaway one here resolves the same composite keys assignBody is about to.
+  // Slots the earlier nodes of this walk already gave this node's occupants, read before this node overwrites them:
+  // an item inside a "balanced" or "strict" fan-out still holds its slot in the node before it until its first tasks
+  // have started (see conveyor.FanOutBackpressure), and an item that retained a stage keeps it until released, so it
+  // is genuinely in two places at once. Nodes are walked in pipeline order, so "already assigned" means "a node
+  // before". keyAssigner is deterministic for one (lanePaths, inBody) pair, so a throwaway one here resolves the same
+  // composite keys assignBody is about to. The waiting room is previewed only outside a lane, where its keys need no
+  // fallback (see the queue pass below).
   const heldBefore = new Map<string, string>();
-  if (node.kind === "fanout") {
-    const preview = keyAssigner(node.lanePaths);
-    for (const no of node.inBody) {
-      const key = preview(no);
-      const slot = slotKeys.get(key);
-      if (slot !== undefined) heldBefore.set(key, slot);
-    }
+  const preview = keyAssigner(node.lanePaths);
+  const previewed = node.lanePaths.length === 0 ? [...node.inBody, ...node.inQueue] : node.inBody;
+  for (const no of previewed) {
+    const key = preview(no);
+    const slot = slotKeys.get(key);
+    if (slot !== undefined) heldBefore.set(key, slot);
   }
 
   // One keyFor shared across body *and* queue: a lane child queued here and another, concurrent child of the same
@@ -294,16 +309,17 @@ function assignNode(node: ResolvedNode, slotKeys: Map<string, string>, fills: Ma
       key = ownBodyKeys[Math.min(used, ownBodyKeys.length - 1)];
     }
     if (bodyKeys.has(key)) {
-      slotKeys.set(heldKey(key), slot);
-      fills.set(heldKey(key), "held");
+      slotKeys.set(heldKey(key, slot), slot);
+      fills.set(heldKey(key, slot), "held");
     } else {
       slotKeys.set(key, slot);
     }
   });
   heldBefore.forEach((slot, key) => {
     if (slotKeys.get(key) === slot) return; // not re-assigned here after all
-    slotKeys.set(heldKey(key), slot);
-    fills.set(heldKey(key), "held");
+    slotKeys.set(heldKey(key, slot), slot);
+    fills.set(heldKey(key, slot), "held");
+    fills.delete(key); // the fill an earlier node gave the item describes its place there, not here
   });
 
   if (node.kind === "stage") {
@@ -323,6 +339,35 @@ function assignNode(node: ResolvedNode, slotKeys: Map<string, string>, fills: Ma
   }
 }
 
+/** Fills `retain` for one start/stage node: an item working in it may retain it, and an item holding it — still in it
+ * or, through its held copy, moved on — may release it. An item already waiting to leave cannot retain any more:
+ * only its own ItemProcessor may call Retain, and it is inside MoveTo by then. Root items only, so a key is the bare
+ * item number. */
+function markRetain(
+  nodeId: string,
+  inBody: number[],
+  blockedLeaving: number[],
+  retaining: number[],
+  slotKeys: Map<string, string>,
+  retain: Map<string, RetainTarget>,
+): void {
+  const prefix = `${nodeId}:body:`;
+  const held = new Set(retaining);
+  const blocked = new Set(blockedLeaving);
+  for (const no of new Set(inBody)) {
+    const key = String(no);
+    const target: RetainTarget = { nodeId, itemNo: no, retaining: held.has(no) };
+    if (slotKeys.get(key)?.startsWith(prefix)) {
+      if (target.retaining || !blocked.has(no)) retain.set(key, target);
+      continue;
+    }
+    if (!target.retaining) continue;
+    slotKeys.forEach((slot, k) => {
+      if (isHeldKey(k) && baseKey(k) === key && slot.startsWith(prefix)) retain.set(k, target);
+    });
+  }
+}
+
 /** Computes where every currently in-flight item's rectangle belongs, using the exact same layout (stableBodySlotIndex
  * for a body, queueSlots for a waiting room) the node views render — so the overlay always targets the slot the
  * item is actually drawn in — recursing into a lane branch's own interior nodes the same way (see assignNode). It
@@ -333,6 +378,7 @@ function assignNode(node: ResolvedNode, slotKeys: Map<string, string>, fills: Ma
 export function computeItemPositions(resolved: ResolvedNode[], start: ResolvedStart): ItemPositions {
   const slotKeys = new Map<string, string>();
   const fills = new Map<string, ItemFill>();
+  const retain = new Map<string, RetainTarget>();
   const completed = new Map<number, number>();
 
   const startKeyByItem = assignBody(START_ID, 1, start.inBody, keyAssigner([]), slotKeys);
@@ -353,8 +399,13 @@ export function computeItemPositions(resolved: ResolvedNode[], start: ResolvedSt
     for (const no of n.inBody) completed.set(no, fills.get(String(no)) === "blocked" ? i + 2 : i + 1);
   });
 
+  markRetain(START_ID, start.inBody, start.blockedLeaving, start.retaining, slotKeys, retain);
+  for (const n of resolved) {
+    if (n.kind === "stage") markRetain(n.id, n.inBody, n.blockedLeaving, n.retaining, slotKeys, retain);
+  }
+
   const progress = [...completed.entries()]
     .map(([no, done]): ItemProgress => ({ no, completed: done }))
     .sort((a, b) => a.no - b.no);
-  return { slotKeys, fills, progress, totalStages: resolved.length + 1 }; // + 1: the implicit Read stage
+  return { slotKeys, fills, retain, progress, totalStages: resolved.length + 1 }; // + 1: the implicit Read stage
 }

@@ -584,6 +584,22 @@ body,
   align-items: center;
   justify-content: center;
   pointer-events: none;
+  position: relative; /* for .item-badge-note; .item-rect-overlay and .task-badge override it with absolute */
+}
+
+/* The caption under an item that keeps a stage with Retain (see ItemsOverlay). */
+.item-badge-note {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 1px;
+  font-size: 7px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--item-color, #2563eb);
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 /* Fill variants layered on the default solid fill above (see pipeline/itemPositions.ts's ItemFill): "pending" (a
@@ -630,6 +646,12 @@ body,
   transition:
     transform 200ms linear,
     opacity 200ms linear;
+}
+
+/* A plain click retains or releases a stage here (see ItemsOverlay), so unlike the fail click it gets a cursor at
+   rest. */
+.item-rect-overlay.retain-target {
+  cursor: pointer;
 }
 
 /* Leaving the last stage: keeps sliding right (see ItemsOverlay's EXIT_OFFSET_X) and fades rather than vanishing. It

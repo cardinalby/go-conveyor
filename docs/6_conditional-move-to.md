@@ -71,7 +71,7 @@ Work prepared with `Schedule` before entering (see [Schedule before entry](4_fan
 survives a decline unchanged: it starts if a later attempt or a `MoveTo` enters, and is discarded if the item moves
 past the fan-out.
 
-Neither variant takes waves, so a `TryMoveTo` that declines never waits on anything. To wait for a `Stage.Retain` or
+Neither variant takes waves, so a `TryMoveTo` that declines never waits on anything. To wait for a `Stage.RetainFor` or
 `FanOut.Retain` wave after a conditional move, call `Wave.Wait` once `entered` is true.
 
 ## Out of a fan-out

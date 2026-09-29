@@ -6,7 +6,7 @@ import { StageNodeView } from "./nodes/StageNodeView";
 import { FanOutNodeView } from "./nodes/FanOutNodeView";
 import { ItemsOverlay } from "./ItemsOverlay";
 import { START_ID } from "../types/topology";
-import type { ItemPositions } from "../pipeline/itemPositions";
+import type { ItemPositions, RetainTarget } from "../pipeline/itemPositions";
 import type { ResolvedNode, ResolvedStart } from "../pipeline/resolve";
 import type { MenuTarget } from "../types/menu";
 import type { FanOutBackpressure } from "../types/pipeline";
@@ -48,6 +48,8 @@ interface Props {
    * see ItemsOverlay and shared/TaskStrip. */
   onFailItem: (itemNo: number) => void;
   onFailTask: (poolId: string, itemNo: number) => void;
+  /** A plain click on an item rectangle retains or releases a stage — see ItemsOverlay. */
+  onToggleRetain: (target: RetainTarget) => void;
 }
 
 function shallowEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
@@ -122,6 +124,7 @@ export function PipelineCanvas({
   itemPositions,
   onFailItem,
   onFailTask,
+  onToggleRetain,
 }: Props) {
   const [sizes, setSizes] = useState<Record<string, Size>>({});
   // Reused across renders (see resolvePipeline's own caches): while running, this component re-renders on every
@@ -274,7 +277,7 @@ export function PipelineCanvas({
         proOptions={{ hideAttribution: true }}
       >
         <Background />
-        <ItemsOverlay itemPositions={itemPositions} onFailItem={onFailItem} />
+        <ItemsOverlay itemPositions={itemPositions} onFailItem={onFailItem} onToggleRetain={onToggleRetain} />
         <FitViewUntilLayoutSettles sizes={sizes} idsKey={idsKey} />
       </ReactFlow>
     </div>

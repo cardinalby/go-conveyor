@@ -121,7 +121,7 @@ func TestErrForeignContextFromRetain(t *testing.T) {
 	s := c.AddStage(OptName("s"))
 
 	var ran atomic.Bool
-	w := s.Retain(context.Background(), func() error {
+	w := s.RetainFor(context.Background(), func() error {
 		ran.Store(true)
 		return nil
 	})
@@ -181,7 +181,7 @@ func TestErrStaleContextFromFinishedItem(t *testing.T) {
 			if err := fo.Wait(stale); !errors.Is(err, ErrStaleContext) {
 				t.Errorf("FanOut.Wait with a stale context = %v, want ErrStaleContext", err)
 			}
-			rw := s.Retain(stale, func() error { return nil })
+			rw := s.RetainFor(stale, func() error { return nil })
 			<-rw.Finished()
 			if !errors.Is(rw.Err(), ErrStaleContext) {
 				t.Errorf("Retain wave error = %v, want ErrStaleContext", rw.Err())
@@ -603,7 +603,7 @@ func TestErrStageNotEnteredOnUnenteredStage(t *testing.T) {
 	s := c.AddStage(OptName("s"))
 
 	panicsInItem(t, c, errStageNotEntered, func(ctx context.Context) {
-		_ = s.Retain(ctx, func() error { return nil })
+		_ = s.RetainFor(ctx, func() error { return nil })
 	})
 }
 
@@ -632,7 +632,7 @@ func TestErrStageNotEnteredAfterLeaving(t *testing.T) {
 				_ = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
 			})
 			assertPanics(t, errBodyClosed, func() { _ = fo.Wait(ctx) })
-			_ = first.Retain(ctx, func() error { return nil })
+			_ = first.RetainFor(ctx, func() error { return nil })
 		})
 	})
 	t.Run("retain", func(t *testing.T) {
@@ -712,7 +712,7 @@ func TestErrWrongScopeIsCheckedOnEveryEntryPoint(t *testing.T) {
 		{"Stage.MoveTo", func(s Stage, _ FanOut, _ Branch, ctx context.Context) { _ = s.MoveTo(ctx) }},
 		{"Stage.TryMoveTo", func(s Stage, _ FanOut, _ Branch, ctx context.Context) { _, _ = s.TryMoveTo(ctx) }},
 		{"Stage.Retain", func(s Stage, _ FanOut, _ Branch, ctx context.Context) {
-			_ = s.Retain(ctx, func() error { return nil })
+			_ = s.RetainFor(ctx, func() error { return nil })
 		}},
 		{"FanOut.MoveTo", func(_ Stage, f FanOut, b Branch, ctx context.Context) {
 			_ = f.MoveTo(ctx)
@@ -759,7 +759,7 @@ func TestErrCannotMoveFromNonTravellingWork(t *testing.T) {
 			err = fo.Schedule(ctx, pool.NewTask(func(cctx context.Context) error {
 				assertPanics(t, errCannotMove, func() { _ = commit.MoveTo(cctx) })
 				assertPanics(t, errCannotMove, func() { _, _ = commit.TryMoveTo(cctx) })
-				assertPanics(t, errCannotMove, func() { _ = commit.Retain(cctx, func() error { return nil }) })
+				assertPanics(t, errCannotMove, func() { _ = commit.RetainFor(cctx, func() error { return nil }) })
 				assertPanics(t, errCannotMove, func() { _ = fo.Wait(cctx) })
 				if err := fo.Schedule(cctx, pool.NewTask(func(context.Context) error {
 					spawned.Store(true)

@@ -150,7 +150,7 @@ func TestTryMoveToThenWaitOnEntry(t *testing.T) {
 		if err := first.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := first.Retain(ctx, func() error {
+		w := first.RetainFor(ctx, func() error {
 			bgDone.Store(true)
 			return nil
 		})
@@ -191,7 +191,7 @@ func TestTryMoveToEnteredThenWaitFails(t *testing.T) {
 		}
 		// The bgOp fails only once the item is inside `second`, so the entry is decided before the item is poisoned:
 		// had it failed earlier, the cancellation check would decline the move instead and entered would be false.
-		w := first.Retain(ctx, func() error {
+		w := first.RetainFor(ctx, func() error {
 			<-inSecond
 			return boom
 		})
@@ -237,7 +237,7 @@ func TestTryMoveToFanOutThenWaitFailsPoisonsBody(t *testing.T) {
 		if err := first.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := first.Retain(ctx, func() error {
+		w := first.RetainFor(ctx, func() error {
 			<-inFan
 			return boom
 		})

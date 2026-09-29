@@ -98,7 +98,7 @@ type FanOut interface {
 
 	// Retain hands the work scheduled here to the returned Wave and lets the item move on without waiting for it. This
 	// fan-out's slot stays held until the work is done and the item has moved on. The work may still grow from its own
-	// running tasks. It is the fan-out counterpart of Stage.Retain: use it to overlap this fan-out's work with later
+	// running tasks. It is the fan-out counterpart of Stage.RetainFor: use it to overlap this fan-out's work with later
 	// stages, then call Wave.Wait before the step that needs the result.
 	//
 	// After Retain the ItemProcessor may not Schedule or Wait here again. Retain does not release the previous node's
@@ -363,7 +363,7 @@ func (f *fanOut) openBody(it *item, verb string) *wave {
 // contract.
 func (f *fanOut) Retain(ctx context.Context) Wave {
 	// checkCancel is false: a canceled item is handed its own wave (the work is already scheduled and will settle with
-	// the cancellation cause), not an error — the same choice Stage.Retain makes.
+	// the cancellation cause), not an error — the same choice RetainFor makes.
 	it, r, err := f.series.conveyor.actingItem(ctx, "retain", f.node, false)
 	if err != nil {
 		// No item to charge: hand back a standalone finished wave carrying the reason.

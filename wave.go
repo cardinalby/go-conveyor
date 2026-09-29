@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// Wave is a handle to background work an item started: a Stage.Retain operation, or fan-out work handed over with
+// Wave is a handle to background work an item started: a RetainFor operation, or fan-out work handed over with
 // FanOut.Retain. Wait for it with Wait, before or after the next MoveTo (the choice decides which node's slot the
 // item holds meanwhile), or read Finished and Err.
 //
@@ -47,15 +47,15 @@ type Wave interface {
 type wave struct {
 	run *run
 	// it is the item that created the wave and is charged for its work. nil only for a wave returned by a
-	// Retain that could not even resolve an item (a foreign context), which is born finished.
+	// RetainFor that could not even resolve an item (a foreign context), which is born finished.
 	it *item
 
-	// retainUnit is the unit whose slot this wave holds until its work is done: the stage a Stage.Retain was called
+	// retainUnit is the unit whose slot this wave holds until its work is done: the stage a RetainFor was called
 	// on, or the fan-out a FanOut.Retain handed over. nil while a fan-out's work is still the node's body — then the
 	// item itself holds the slot, because it cannot leave until the work is done.
 	retainUnit *unit
 
-	// atNode is the fan-out node whose body this wave is (nil for a Stage.Retain or standalone wave). It names the node
+	// atNode is the fan-out node whose body this wave is (nil for a RetainFor or standalone wave). It names the node
 	// in the error of an implicit join, and it is what lets FanOut.Retain tell this wave apart from one the item
 	// retained at an earlier fan-out and is still carrying.
 	atNode *unit
@@ -115,7 +115,7 @@ func newWave(r *run, it *item) *wave {
 }
 
 // finishedWave returns a wave of it that is already complete, carrying err. It is used for the degenerate cases
-// that must still hand back a usable handle: a MoveTo that could not enter, and a Stage.Retain that declined to run
+// that must still hand back a usable handle: a MoveTo that could not enter, and a RetainFor that declined to run
 // its bgOp. The error is registered on the item, so ignoring the handle still fails the item (see Wave). Caller holds
 // run.mu.
 func finishedWave(r *run, it *item, err error) *wave {
@@ -276,7 +276,7 @@ func (w *wave) settle() {
 	}
 }
 
-// releaseRetained gives back the slot this wave was holding on its item's behalf — the stage of a Stage.Retain, or the
+// releaseRetained gives back the slot this wave was holding on its item's behalf — the stage of a RetainFor, or the
 // fan-out of a FanOut.Retain — now that its work is done. It only frees it if the item has already moved past that
 // node; if the item is still in it, the item's next move does the freeing (releaseBelow no longer skips the unit once
 // the wave has finished). Together those two are the "whichever happens last" half of the contract: an item never sits
@@ -290,7 +290,7 @@ func (w *wave) releaseRetained() {
 	w.run.releaseBelow(w.it, w.it.reachedRank)
 }
 
-// owner describes the wave for messages: "the wave of <node>" for a body or a Retain, "the wave" otherwise.
+// owner describes the wave for messages: "the wave of <node>" for a body or a RetainFor, "the wave" otherwise.
 func (w *wave) owner() string {
 	u := w.atNode
 	if u == nil {

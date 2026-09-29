@@ -6,8 +6,8 @@ type UnitOccupants struct {
 	Unit Unit
 
 	// InBody lists the item numbers holding a slot in the node itself, in arrival order; an item holding several slots
-	// appears once per slot. A slot may belong to an item that has already moved on: one kept by Stage.Retain or
-	// FanOut.Retain for its work, or the previous node's slot kept under Balanced or Strict backpressure until the
+	// appears once per slot. A slot may belong to an item that has already moved on: one kept by Retain, RetainFor
+	// or FanOut.Retain, or the previous node's slot kept under Balanced or Strict backpressure until the
 	// item's initial batch makes progress (see FanOutBackpressure). Such an item appears in two units at once.
 	InBody []int64
 

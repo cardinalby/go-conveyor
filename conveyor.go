@@ -5,11 +5,12 @@
 //   - MoveTo advances the item into a node.
 //   - Schedule registers parallel work for a fan-out, before or after entering it.
 //   - FanOut.Wait joins the work scheduled so far without leaving the fan-out.
-//   - Retain (on a Stage or a FanOut) lets unfinished work keep the node while the item moves on.
+//   - Retain (on a Stage or a FanOut) keeps the node occupied while the item moves on: a stage until the returned
+//     release is called, a fan-out until its work is done. Stage.RetainFor does the same for a background callback.
 //   - Wave.Wait waits for retained work later in the item's path.
 //
 // Most processors need only MoveTo and Schedule. Adaptive rounds add FanOut.Wait; overlapping work across stages
-// adds Retain.
+// adds Retain or RetainFor.
 package conveyor
 
 import (
@@ -27,7 +28,7 @@ import (
 // the item schedules work onto branches (Pool or Lane) that run it in parallel. An item advances between nodes with
 // MoveTo.
 //
-// Background work started with Stage.Retain or FanOut.Retain is represented by a Wave: wait for it with Wave.Wait,
+// Background work started with Stage.RetainFor or FanOut.Retain is represented by a Wave: wait for it with Wave.Wait,
 // or read its Finished and Err.
 type Conveyor interface {
 	// AddStage adds a Stage to the end of the conveyor, admitting one item at a time by default. Chain SetLimit and
@@ -68,9 +69,9 @@ type Conveyor interface {
 	// SetNoAbortPoint marks node as the place where side effects start. When shutdown begins (the Run context is
 	// canceled, or an item fails), every item that has not entered node or a later node yet is aborted: canceled at
 	// once with a ShutdownError. Items that have entered it are not aborted, even if the point is moved later: they
-	// finish as usual, bounded by OptShutdownContext. An item waiting in node's waiting room, or blocked in
-	// MoveTo(node), has not entered it; an item that skipped node and entered a later node, or its waiting room, has
-	// passed it. It returns the conveyor for chaining.
+	// finish as usual, bounded by OptShutdownContext. Items after a failed item are still canceled, as always. An
+	// item waiting in node's waiting room, or blocked in MoveTo(node), has not entered it; an item that skipped node
+	// and entered a later node, or its waiting room, has passed it. It returns the conveyor for chaining.
 	//
 	//	write := c.AddStage() // side effects start here
 	//	commit := c.AddStage()
@@ -82,7 +83,7 @@ type Conveyor interface {
 	//
 	// Safe to call at any time, from any goroutine, including on a running conveyor. Items that have already entered
 	// node or a later node are protected at once. Items created while the point was the starting stage have entered
-	// it, so they are never aborted. Once shutdown has begun, a call changes nothing for items in flight. Code that
+	// it, so they are not aborted. Once shutdown has begun, a call changes nothing for items in flight. Code that
 	// ignores its ctx is not interrupted.
 	SetNoAbortPoint(node Unit) Conveyor
 
@@ -93,8 +94,8 @@ type Conveyor interface {
 	// MoveTo runs in it, one item at a time, and the next item is created only when it is free. It has no MoveTo
 	// and its limit is always 1.
 	//
-	// Use it to match the stage in Stats, or call Retain to hand its slot to background work: the item moves on,
-	// but the next item is not created until that work returns.
+	// Use it to match the stage in Stats, or call Retain / RetainFor to keep its slot after the item moves on: the
+	// next item is not created until the hold is released or that work returns.
 	StartingStage() RetainableStage
 
 	// Stats returns a snapshot of the active run's state and resets the gauge windows. Safe to call at any time,
@@ -145,8 +146,8 @@ type conveyor struct {
 
 	// noAbortPoint is the unit of the node set with SetNoAbortPoint, or nil for the starting stage (the default). A
 	// root item that enters it or a later node is marked noAbort; when shutdown begins, the unmarked items are
-	// aborted (see run.abortUnprotectedLocked). Atomic for the lock-free getter and the store before any run exists;
-	// while a run is active it is stored and read under run.mu.
+	// aborted (see run.abortUnprotectedLocked). Atomic for the lock-free getter. Stored under runMu, and also under
+	// run.mu while a run is active; the run reads it under run.mu.
 	noAbortPoint atomic.Pointer[unit]
 
 	// assignHook, when set by an in-package test before Run, observes every hand-out of a branch slot (see
@@ -154,8 +155,8 @@ type conveyor struct {
 	// one.
 	assignHook func(branchIdx int, col *taskCollection, queue []*taskCollection)
 
-	// noAbortStoreHook, when set by an in-package test before SetNoAbortPoint, runs in it between the load of
-	// currentRun and the store when no run was loaded: a test can start a run there. Nil in production.
+	// noAbortStoreHook, when set by an in-package test before SetNoAbortPoint, runs in it under runMu, before the
+	// store when no run was loaded: a test can try to start a run there. Nil in production.
 	noAbortStoreHook func()
 }
 
@@ -219,28 +220,25 @@ func (c *conveyor) ItemsLimit() int { return int(c.itemsLimit.Load()) }
 
 // SetNoAbortPoint sets the node before which items are aborted at shutdown (see the Conveyor interface).
 func (c *conveyor) SetNoAbortPoint(node Unit) Conveyor {
+	// Under runMu no run starts or stops (see tryRun) and no node is added, and under the run's mu the store and the
+	// marking are one step for its items, so a shutdown never sees the new point with the items past it still
+	// unmarked. Nothing is aborted here: once shutdown has begun, every live item is either marked or already
+	// aborted, and a move never clears a mark. Lock order: runMu, then run.mu.
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
 	u := c.noAbortPointUnit(node)
-	// As in unit.storeDial: under the run's mu, so the store and the marking are one step for the run's items. A run
-	// that starts between the load and the store is updated too. Nothing is aborted here: once shutdown has begun,
-	// every live item is either marked or already aborted, and a move never clears a mark.
-	apply := func(r *run) {
-		r.mu.Lock()
-		c.noAbortPoint.Store(u)
-		r.protectReachedLocked()
-		r.mu.Unlock()
-	}
 	r := c.currentRun.Load()
 	if r == nil {
 		if c.noAbortStoreHook != nil {
 			c.noAbortStoreHook()
 		}
 		c.noAbortPoint.Store(u)
-	} else {
-		apply(r)
+		return c
 	}
-	if r2 := c.currentRun.Load(); r2 != nil && r2 != r {
-		apply(r2)
-	}
+	r.mu.Lock()
+	c.noAbortPoint.Store(u)
+	r.protectReachedLocked()
+	r.mu.Unlock()
 	return c
 }
 
@@ -294,9 +292,14 @@ type startHandle struct{ u *unit }
 func (h startHandle) String() string { return h.u.String() }
 func (h startHandle) unit() *unit    { return h.u }
 
-// Retain hands the start stage's slot to a background operation (see the RetainableStage interface).
-func (h startHandle) Retain(ctx context.Context, bgOp func() error) Wave {
-	return h.u.conveyor.retain(ctx, h.u, bgOp)
+// Retain keeps the start stage's slot until the returned release is called (see the RetainableStage interface).
+func (h startHandle) Retain(ctx context.Context) func() {
+	return h.u.conveyor.retain(ctx, h.u)
+}
+
+// RetainFor hands the start stage's slot to a background operation (see the RetainableStage interface).
+func (h startHandle) RetainFor(ctx context.Context, bgOp func() error) Wave {
+	return h.u.conveyor.retainFor(ctx, h.u, bgOp)
 }
 
 // validateUnit panics if u is not a unit of this conveyor — a handle from another conveyor, or a zero handle.

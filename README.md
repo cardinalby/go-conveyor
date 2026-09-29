@@ -135,9 +135,9 @@ You still have a **single function** that processes a single batch, but the Conv
    - If item N fails:
      - the conveyor stops spawning new items
      - items with number > N receive a context cancellation error and can't enter any stage
-     - all items that are already in the pipeline are allowed to finish
+     - items with number < N are allowed to finish (by default)
    - If the context passed to `c.Run()` is canceled:
-     - all items that are already in the pipeline are allowed to finish
+     - all items that are already in the pipeline are allowed to finish (by default)
      - new items are not spawned
    - [Force shutdown support](https://pkg.go.dev/github.com/cardinalby/go-conveyor#OptShutdownContext)
    - [No-abort point](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Conveyor.SetNoAbortPoint): items that did not reach it yet are aborted at once
@@ -158,7 +158,7 @@ You still have a **single function** that processes a single batch, but the Conv
 | `MoveTo`      | Advance the item into a node; leaving a fan-out joins its work.                   |
 | `Schedule`    | Register parallel work for a fan-out, before or after entering it.                |
 | `FanOut.Wait` | Join the work scheduled so far without leaving the fan-out (rounds).              |
-| `Retain`      | Let unfinished work keep the current node occupied while the item moves on.       |
+| `Retain`      | Keep the current node occupied while the item moves on (see also `RetainFor`).    |
 | `Wave.Wait`   | Wait for retained work later in the item's path.                                  |
 
 Most processors need only `MoveTo` and `Schedule`.

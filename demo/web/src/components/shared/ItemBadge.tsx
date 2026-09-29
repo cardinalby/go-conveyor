@@ -8,6 +8,8 @@ interface Props {
   className?: string;
   style?: React.CSSProperties;
   title?: string;
+  /** A short caption drawn under the badge, e.g. "retaining" for an item that keeps a stage (see ../ItemsOverlay). */
+  note?: string;
   onClick?: (e: React.MouseEvent) => void;
   /** Root item number this badge belongs to, exposed as a `data-item-key` DOM attribute — the anchor a pool task
    * or a lane's own entrance looks up (see TaskStrip) to find "where the item currently sits in its fan-out" and
@@ -23,7 +25,7 @@ interface Props {
  * Positioning is deliberately not this component's concern — each caller lays it out its own way (a global
  * flow-coordinate transform, an absolute offset within a strip, or plain static flow for a legend preview) via
  * `className`/`style`; only the visual (size, color, label, fill) is shared. */
-export function ItemBadge({ label, color, textColor, fill = "solid", className, style, title, onClick, itemKey, ref }: Props) {
+export function ItemBadge({ label, color, textColor, fill = "solid", className, style, title, note, onClick, itemKey, ref }: Props) {
   return (
     <div
       ref={ref}
@@ -34,6 +36,7 @@ export function ItemBadge({ label, color, textColor, fill = "solid", className, 
       style={{ ...style, "--item-color": color, "--item-text": textColor } as React.CSSProperties}
     >
       {label}
+      {note && <span className="item-badge-note">{note}</span>}
     </div>
   );
 }

@@ -30,7 +30,7 @@ func TestStrippedContextCannotActForPoisonedItem(t *testing.T) {
 		if err := a.MoveTo(ctx); err != nil {
 			return err
 		}
-		first := a.Retain(ctx, func() error { return boom })
+		first := a.RetainFor(ctx, func() error { return boom })
 		<-first.Finished()
 		if got := first.Err(); !errors.Is(got, boom) {
 			t.Errorf("first wave error = %v, want %v", got, boom)
@@ -48,7 +48,7 @@ func TestStrippedContextCannotActForPoisonedItem(t *testing.T) {
 			t.Errorf("TryMoveTo with a stripped context on a poisoned item = (%v, %v), want (false, the poison)",
 				entered, err)
 		}
-		second := a.Retain(stripped, func() error {
+		second := a.RetainFor(stripped, func() error {
 			bgRan.Store(true)
 			return nil
 		})
@@ -257,7 +257,7 @@ func TestStrippedContextJoinWaitWakesOnItemCancellation(t *testing.T) {
 		if err := a.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := a.Retain(ctx, func() error {
+		w := a.RetainFor(ctx, func() error {
 			<-park
 			return nil
 		})

@@ -52,7 +52,7 @@ And per node, in `UnitStat`:
 
 | Field      | Meaning                                                                                                                                                                                |
 |------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `Occupied` | items running a stage's code / items inside a fan-out (entered and not yet moved on) / pieces of a branch's work in flight (for a lane: children at its entrance). Also a slot kept by an item that has moved on: a `Retain` in flight, or the previous stage's slot an item already inside a `Balanced` or `Strict` fan-out still holds (see below). |
+| `Occupied` | items running a stage's code / items inside a fan-out (entered and not yet moved on) / pieces of a branch's work in flight (for a lane: children at its entrance). Also a slot kept by an item that has moved on: a `Retain` not released yet, a `RetainFor` in flight, or the previous stage's slot an item already inside a `Balanced` or `Strict` fan-out still holds (see below). |
 | `Limit`    | that node's capacity — the denominator. It travels with `Occupied` because 3 is saturated at limit 3 and idle at limit 300, and the two are read under one lock, so they always agree. |
 | `Queued`   | what is piled up **in front of** the node: items in a stage's or fan-out's waiting room, or — for a branch — collections of work not yet fully handed out (one per `Schedule` call after entry that touched the branch; all calls before entry form one). |
 
@@ -67,7 +67,8 @@ the backlog as soon as its last callback has been handed out.
 
 Some slots belong to an item that is already in a later node:
 
-- a `Retain` in flight (on a stage, the starting stage, a lane or a fan-out) keeps its node's slot until the work is done;
+- a `Retain` (on a stage, the starting stage or a lane) keeps its node's slot until `release` is called; a `RetainFor`
+  or a `FanOut.Retain` keeps it until the work is done;
 - under `BackpressureBalanced` or `BackpressureStrict` an item inside a fan-out keeps the previous stage's slot (or
   its waiting-room slot, counted in that node's `Queued`) until its initial batch has started
   (see [SetBackpressure](4_fan-out.md#setbackpressure-when-the-previous-stage-is-released)).

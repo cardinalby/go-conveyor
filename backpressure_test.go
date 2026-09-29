@@ -813,7 +813,7 @@ func TestBackpressureStrict_UnrelatedRetainCompletionKeepsTheHeldToken(t *testin
 		}
 		var w Wave
 		if no == 2 {
-			w = a.Retain(ctx, func() error { <-bgDone; return nil })
+			w = a.RetainFor(ctx, func() error { <-bgDone; return nil })
 		}
 		if err := read.MoveTo(ctx); err != nil {
 			return err
@@ -880,7 +880,7 @@ func TestBackpressureStrict_RetainOnPreviousStagePlusHold(t *testing.T) {
 				if err := x.read.MoveTo(ctx); err != nil {
 					return err
 				}
-				w := x.read.Retain(ctx, func() error { <-bgDone; return nil })
+				w := x.read.RetainFor(ctx, func() error { <-bgDone; return nil })
 				waveCh <- w
 				if err := x.f.MoveTo(ctx); err != nil {
 					return err

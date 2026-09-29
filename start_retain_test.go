@@ -46,7 +46,7 @@ func TestStartingStageRetainDelaysNextItem(t *testing.T) {
 		if no != 1 {
 			return s.MoveTo(ctx)
 		}
-		w := start.Retain(ctx, func() error {
+		w := start.RetainFor(ctx, func() error {
 			<-release
 			return nil
 		})
@@ -67,7 +67,7 @@ func TestStartingStageRetainAfterFirstMovePanics(t *testing.T) {
 		if err := s.MoveTo(ctx); err != nil {
 			panic(err)
 		}
-		c.StartingStage().Retain(ctx, func() error { return nil })
+		c.StartingStage().RetainFor(ctx, func() error { return nil })
 	})
 }
 
@@ -81,7 +81,7 @@ func TestStartingStageRetainUnobservedErrorFailsRun(t *testing.T) {
 	defer cancel()
 	err := c.Run(ctx, func(ic context.Context) error {
 		if no, _ := ItemNoFromContext(ic); no == 1 {
-			_ = c.StartingStage().Retain(ic, func() error { return boom })
+			_ = c.StartingStage().RetainFor(ic, func() error { return boom })
 		}
 		return s.MoveTo(ic)
 	})
@@ -103,7 +103,7 @@ func TestStartingStageRetainByChildPanics(t *testing.T) {
 			return err
 		}
 		if err := fo.Schedule(ctx, lane.NewTask(func(cctx context.Context) error {
-			got = recoveredErr(func() { c.StartingStage().Retain(cctx, func() error { return nil }) })
+			got = recoveredErr(func() { c.StartingStage().RetainFor(cctx, func() error { return nil }) })
 			return mid.MoveTo(cctx)
 		})); err != nil {
 			return err
@@ -140,7 +140,7 @@ func TestLaneRetainDelaysNextChild(t *testing.T) {
 			if i != 0 {
 				return mid.MoveTo(cctx)
 			}
-			w := lane.Retain(cctx, func() error {
+			w := lane.RetainFor(cctx, func() error {
 				<-inMid
 				if got := started.Load(); got != 1 {
 					t.Errorf("%d children started while the lane entrance was retained, want 1", got)
@@ -183,7 +183,7 @@ func TestLaneRetainByRootItemPanics(t *testing.T) {
 	lane := fo.AddLane(OptName("lane"))
 	lane.AddStage(OptName("mid"))
 	panicsInItem(t, c, errWrongScope, func(ctx context.Context) {
-		lane.Retain(ctx, func() error { return nil })
+		lane.RetainFor(ctx, func() error { return nil })
 	})
 }
 
@@ -204,7 +204,7 @@ func TestLaneRetainAfterFirstMovePanics(t *testing.T) {
 			if err := mid.MoveTo(cctx); err != nil {
 				return err
 			}
-			got = recoveredErr(func() { lane.Retain(cctx, func() error { return nil }) })
+			got = recoveredErr(func() { lane.RetainFor(cctx, func() error { return nil }) })
 			return nil
 		})); err != nil {
 			return err
@@ -232,7 +232,7 @@ func TestLaneRetainWithoutNodesPanics(t *testing.T) {
 			return err
 		}
 		if err := fo.Schedule(ctx, lane.NewTask(func(cctx context.Context) error {
-			got = recoveredErr(func() { lane.Retain(cctx, func() error { return nil }) })
+			got = recoveredErr(func() { lane.RetainFor(cctx, func() error { return nil }) })
 			return nil
 		})); err != nil {
 			return err
@@ -261,7 +261,7 @@ func TestLaneRetainUnobservedErrorFailsRun(t *testing.T) {
 		err := fo.MoveTo(ctx)
 		if err == nil {
 			err = fo.Schedule(ctx, lane.NewTask(func(cctx context.Context) error {
-				_ = lane.Retain(cctx, func() error { return boom }) // never joined, never read
+				_ = lane.RetainFor(cctx, func() error { return boom }) // never joined, never read
 				return mid.MoveTo(cctx)
 			}))
 		}

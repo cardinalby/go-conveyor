@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	conveyor "github.com/cardinalby/go-conveyor"
@@ -48,6 +49,9 @@ type NodeState struct {
 	// the same item's occupants sitting at the same node would be indistinguishable. Always empty for a node outside
 	// any branch — see topology.LanePaths.
 	LanePaths []LanePathEntry `json:"lanePaths"`
+	// Retaining lists the InBody items of the start stage or a top-level stage that keep it with a live Retain,
+	// whether they are still in it or have moved on. Always empty for any other node — see topology.Retains.
+	Retaining []int64 `json:"retaining"`
 }
 
 // State is a full snapshot returned by Manager.State, polled by the UI while in run mode.
@@ -74,6 +78,7 @@ type Manager struct {
 	blocked    *topology.BlockedEntries
 	failures   *topology.Failures
 	lanePaths  *topology.LanePaths
+	retains    *topology.Retains
 	// cancel stops the run's context: no new items are created from that point on (see CancelCtx).
 	cancel context.CancelFunc
 	// forceCancel is the shutdown context's own cancel func — see OptShutdownContext — that Stop uses to cancel
@@ -117,6 +122,7 @@ func (m *Manager) Run(spec topology.Spec) error {
 	blocked := topology.NewBlockedEntries()
 	failures := topology.NewFailures()
 	lanePaths := topology.NewLanePaths()
+	retains := topology.NewRetains()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	m.built = built
@@ -126,6 +132,7 @@ func (m *Manager) Run(spec topology.Spec) error {
 	m.blocked = blocked
 	m.failures = failures
 	m.lanePaths = lanePaths
+	m.retains = retains
 	m.cancel = cancel
 	m.forceCancel = forceCancel
 	m.running = true
@@ -133,7 +140,7 @@ func (m *Manager) Run(spec topology.Spec) error {
 	m.forced = false
 	m.runErr = nil
 
-	proc := topology.ItemProcessor(spec, built, delays, entries, blocked, failures, taskCounts, lanePaths)
+	proc := topology.ItemProcessor(spec, built, delays, entries, blocked, failures, taskCounts, lanePaths, retains)
 	go func() {
 		runErr := built.Conveyor.Run(ctx, proc)
 		forceCancel() // release the shutdown context's resources now that the run has fully drained
@@ -193,7 +200,7 @@ func (m *Manager) Stop() {
 // the live count the UI wants.
 func (m *Manager) State() State {
 	m.mu.Lock()
-	built, delays, taskCounts, entries, blocked, lanePaths := m.built, m.delays, m.taskCounts, m.entries, m.blocked, m.lanePaths
+	built, delays, taskCounts, entries, blocked, lanePaths, retains := m.built, m.delays, m.taskCounts, m.entries, m.blocked, m.lanePaths, m.retains
 	s := State{Running: m.running, Stopping: m.stopping, Forced: m.forced}
 	if m.runErr != nil {
 		s.Error = m.runErr.Error()
@@ -231,6 +238,7 @@ func (m *Manager) State() State {
 			DelayMs:      int(delays.Get(id).Milliseconds()),
 			PendingEntry: []int64{},
 			LanePaths:    []LanePathEntry{},
+			Retaining:    []int64{},
 		}
 		if o, ok := occByUnit[u]; ok {
 			ns.InBody, ns.InQueue = o.InBody, o.InQueue
@@ -248,6 +256,10 @@ func (m *Manager) State() State {
 		// path) for such a node — LanePaths is exactly that, one entry per current occurrence — and falls back to
 		// item number alone for a node outside any branch, which can never hold the same item number twice at once.
 		ns.BlockedLeaving = stillBlocked(blocked, id, ns.InBody, ns.LanePaths, reachableThroughBranch)
+		if _, ok := u.(conveyor.RetainableStage); ok && !reachableThroughBranch {
+			// A finished item's entry stays in Retains (see there), so report only the items still in the stage.
+			ns.Retaining = retainingIn(retains.Live(id), ns.InBody)
+		}
 		if f, ok := u.(conveyor.FanOut); ok {
 			ns.PendingEntry = entries.Pending(id)
 			ns.Backpressure = topology.BackpressureName(f.Backpressure())
@@ -282,6 +294,17 @@ func stillBlocked(blocked *topology.BlockedEntries, nodeID string, inBody []int6
 		}
 	}
 	return blocked.StillBlocked(nodeID, occupants)
+}
+
+// retainingIn keeps the items of live that occupy the node (inBody), in inBody's order.
+func retainingIn(live, inBody []int64) []int64 {
+	out := []int64{}
+	for _, no := range inBody {
+		if slices.Contains(live, no) && !slices.Contains(out, no) {
+			out = append(out, no)
+		}
+	}
+	return out
 }
 
 // SetLimit adjusts a running node's concurrency limit immediately (see Stage.SetLimit / FanOut.SetLimit /
@@ -380,6 +403,42 @@ func (m *Manager) FailTask(poolID string, itemNo int64) error {
 		return fmt.Errorf("node %q is not a pool", poolID)
 	}
 	m.failures.FailTask(poolID, itemNo)
+	return nil
+}
+
+// RetainItem asks root item itemNo to keep stage id (a top-level stage or topology.StartID) after it moves on (see
+// topology.Retains). The item applies it while it still does that stage's work; later, the request is ignored. It
+// errors if nothing is running or id names something other than such a stage.
+func (m *Manager) RetainItem(id string, itemNo int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.retainableLocked(id); err != nil {
+		return err
+	}
+	m.retains.Request(id, itemNo)
+	return nil
+}
+
+// ReleaseItem releases root item itemNo's hold on stage id, or drops its request if not applied yet.
+func (m *Manager) ReleaseItem(id string, itemNo int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.retainableLocked(id); err != nil {
+		return err
+	}
+	m.retains.Release(id, itemNo)
+	return nil
+}
+
+// retainableLocked checks that id is the start stage or a top-level stage of the active run. Caller holds mu.
+func (m *Manager) retainableLocked(id string) error {
+	u, err := m.handleLocked(id)
+	if err != nil {
+		return err
+	}
+	if _, ok := u.(conveyor.RetainableStage); !ok || m.built.Depth[id] > 0 {
+		return fmt.Errorf("node %q is not a top-level stage", id)
+	}
 	return nil
 }
 

@@ -321,6 +321,111 @@ func (l *LanePaths) Snapshot(nodeID string) []LanePathEntry {
 	return out
 }
 
+// retainKey identifies one root item's hold on one stage (or the start stage).
+type retainKey struct {
+	nodeID string
+	itemNo int64
+}
+
+// Retains records UI-requested stage holds (see conveyor.RetainableStage.Retain) for root items: a click on an item
+// doing a stage's work asks it to keep that stage after it moves on, and a second click releases it. Only the item's
+// own ItemProcessor may call Retain, so a request is only recorded here; the item applies it while it sleeps out the
+// stage's delay (see sleepInStage). A request that lands after that — the item already waits for room ahead — is never
+// applied. release may be called from any goroutine, so Release calls it directly.
+//
+// Live entries are not removed when an item finishes: its release does nothing then, and Manager.State reports a hold
+// only while the item still occupies the stage. Pending requests are dropped when the ItemProcessor returns (see
+// forget), so a request that was never applied does not stay. NewRetains is called fresh per Run.
+type Retains struct {
+	mu        sync.Mutex
+	requested map[retainKey]bool
+	live      map[retainKey]func()
+	changed   chan struct{}
+}
+
+func NewRetains() *Retains {
+	return &Retains{requested: make(map[retainKey]bool), live: make(map[retainKey]func()), changed: make(chan struct{})}
+}
+
+// Request asks itemNo to retain nodeID. It does nothing if the hold is already live.
+func (r *Retains) Request(nodeID string, itemNo int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := retainKey{nodeID: nodeID, itemNo: itemNo}
+	if r.live[k] != nil {
+		return
+	}
+	r.requested[k] = true
+	close(r.changed)
+	r.changed = make(chan struct{})
+}
+
+// Release drops a pending request of itemNo for nodeID, or releases its live hold.
+func (r *Retains) Release(nodeID string, itemNo int64) {
+	r.mu.Lock()
+	k := retainKey{nodeID: nodeID, itemNo: itemNo}
+	delete(r.requested, k)
+	release := r.live[k]
+	delete(r.live, k)
+	r.mu.Unlock()
+	if release != nil {
+		release()
+	}
+}
+
+// forget drops every pending request of itemNo. Called when its ItemProcessor returns: no request can be applied
+// after that.
+func (r *Retains) forget(itemNo int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k := range r.requested {
+		if k.itemNo == itemNo {
+			delete(r.requested, k)
+		}
+	}
+}
+
+// Live reports the items with a live hold on nodeID, for one State snapshot.
+func (r *Retains) Live(nodeID string) []int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := []int64{}
+	for k := range r.live {
+		if k.nodeID == nodeID {
+			out = append(out, k.itemNo)
+		}
+	}
+	return out
+}
+
+// Changed returns a channel closed by the next Request. Take it before apply, like Failures.Changed.
+func (r *Retains) Changed() <-chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.changed
+}
+
+// apply calls stage.Retain for a pending request of itemNo on nodeID. It runs on the item's own goroutine, while the
+// item is in the stage. Retain is called under mu, so a Release racing with it either drops the request first or
+// finds the hold live.
+func (r *Retains) apply(ctx context.Context, nodeID string, itemNo int64, stage conveyor.RetainableStage) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := retainKey{nodeID: nodeID, itemNo: itemNo}
+	if !r.requested[k] {
+		return
+	}
+	delete(r.requested, k)
+	r.live[k] = stage.Retain(ctx)
+}
+
+// stageRetain is what a root item's stage sleep needs to apply retain requests: the stage and its id.
+type stageRetain struct {
+	retains *Retains
+	nodeID  string
+	stage   conveyor.RetainableStage
+}
+
 // ErrInjectedFailure is what a UI-injected item/task failure returns, wrapped with what was asked to fail. It is a
 // plain error, deliberately not a shutdown one, so the library treats it as a genuine item failure — which is the
 // entire point of injecting it (see Failures).
@@ -427,11 +532,22 @@ func (f *Failures) broadcastLocked() {
 // The loop is there for the failure side: a click can land at any point during d, and it wakes every waiter, not just
 // this one, so the wait has to be re-armed for the remaining time around each broadcast rather than being one select.
 func sleep(ctx context.Context, d time.Duration, failures *Failures, failed func() bool) bool {
+	return sleepInStage(ctx, d, failures, failed, nil, 0)
+}
+
+// sleepInStage is sleep for a root item doing a stage's work: when sr is not nil it also applies the retain requests
+// for that stage as they land (see Retains), since the item's own goroutine is the only one allowed to call Retain.
+func sleepInStage(ctx context.Context, d time.Duration, failures *Failures, failed func() bool, sr *stageRetain, no int64) bool {
 	deadline := time.Now().Add(d)
 	for {
 		// Order matters: taking the channel before testing failed() closes the window a request landing between the
-		// two would otherwise fall into — see Failures.Changed.
+		// two would otherwise fall into — see Failures.Changed. The same holds for retain requests.
 		changed := failures.Changed()
+		var retainChanged <-chan struct{}
+		if sr != nil {
+			retainChanged = sr.retains.Changed()
+			sr.retains.apply(ctx, sr.nodeID, no, sr.stage)
+		}
 		if failed() {
 			return true
 		}
@@ -445,6 +561,8 @@ func sleep(ctx context.Context, d time.Duration, failures *Failures, failed func
 			t.Stop()
 			return failed() // one last look, so a click landing right on the deadline still counts
 		case <-changed:
+			t.Stop()
+		case <-retainChanged:
 			t.Stop()
 		case <-ctx.Done():
 			t.Stop()
@@ -467,16 +585,19 @@ func ItemProcessor(
 	failures *Failures,
 	taskCounts *TaskCounts,
 	lanePaths *LanePaths,
+	retains *Retains,
 ) conveyor.ItemProcessor {
 	return func(ctx context.Context) error {
 		no, _ := conveyor.ItemNoFromContext(ctx)
 		itemFailed := func() bool { return failures.ItemFailed(no) }
+		defer retains.forget(no)
 
-		if sleep(ctx, delays.Get(StartID), failures, itemFailed) {
+		startRetain := &stageRetain{retains: retains, nodeID: StartID, stage: built.Handles[StartID].(conveyor.RetainableStage)}
+		if sleepInStage(ctx, delays.Get(StartID), failures, itemFailed, startRetain, no) {
 			return itemFailure(no)
 		}
 		blocked.Mark(StartID, no, nil) // a root item's own walk, no path to disambiguate — see BlockedEntries.Mark
-		return runNodes(ctx, no, nil, spec.Nodes, built, delays, entries, blocked, failures, taskCounts, lanePaths, noRelease)
+		return runNodes(ctx, no, nil, spec.Nodes, built, delays, entries, blocked, failures, taskCounts, lanePaths, retains, noRelease)
 	}
 }
 
@@ -520,6 +641,7 @@ func runNodes(
 	failures *Failures,
 	taskCounts *TaskCounts,
 	lanePaths *LanePaths,
+	retains *Retains,
 	releasePrev func(),
 ) error {
 	itemFailed := func() bool { return failures.ItemFailed(no) }
@@ -550,7 +672,13 @@ func runNodes(
 				release()
 				return itemFailure(no)
 			}
-			if sleep(ctx, delays.Get(n.ID), failures, itemFailed) {
+			// Only a root item's own stages take retain clicks: a lane child's held slot would need its LanePaths
+			// entry kept too, or the UI could not tell it from the root item.
+			var sr *stageRetain
+			if path == nil {
+				sr = &stageRetain{retains: retains, nodeID: n.ID, stage: st}
+			}
+			if sleepInStage(ctx, delays.Get(n.ID), failures, itemFailed, sr, no) {
 				release()
 				return itemFailure(no)
 			}
@@ -615,7 +743,7 @@ func runNodes(
 						}
 						// releaseEntrance is not called here: see runNodes' own doc on why the entrance's entry
 						// must outlive its own work until the first interior node's admission actually succeeds.
-						return runNodes(tctx, no, childPath, laneNodes, built, delays, entries, blocked, failures, taskCounts, lanePaths, releaseEntrance)
+						return runNodes(tctx, no, childPath, laneNodes, built, delays, entries, blocked, failures, taskCounts, lanePaths, retains, releaseEntrance)
 					}))
 				}
 			}

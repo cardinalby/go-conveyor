@@ -837,7 +837,7 @@ func TestNoAbortPointRetain(t *testing.T) {
 		if err := pre.MoveTo(ic); err != nil {
 			return err
 		}
-		pre.Retain(ic, func() error {
+		pre.RetainFor(ic, func() error {
 			started <- int(no)
 			select {
 			case <-ic.Done():
@@ -1064,8 +1064,8 @@ func TestNoAbortPointLaterWaitingRoom(t *testing.T) {
 	}
 }
 
-// TestNoAbortPointSetRacesRunStart: the setter sees no run, then a run starts and its item enters the new point
-// before the store. The setter must still protect the item.
+// TestNoAbortPointSetRacesRunStart: a run started while the setter sees no run must not publish itself before the
+// store; otherwise its items could stand past the new point, unmarked, while the new point is already visible.
 func TestNoAbortPointSetRacesRunStart(t *testing.T) {
 	cause := errors.New("stop")
 	c := NewConveyor()
@@ -1091,10 +1091,14 @@ func TestNoAbortPointSetRacesRunStart(t *testing.T) {
 			writeErr <- context.Cause(ic)
 			return nil
 		})
-		<-inWrite // item 1 entered write while the point was still commit
+		time.Sleep(20 * time.Millisecond) // give the run a chance to start
+		if implOf(c).currentRun.Load() != nil {
+			t.Error("a run started while SetNoAbortPoint was storing the point")
+		}
 	}
 	c.SetNoAbortPoint(write)
 	implOf(c).noAbortStoreHook = nil
+	<-inWrite
 	cancel(cause)
 	waitFor(t, "shutdown to begin", func() bool { return shutdownBegun(c) })
 	close(release)
