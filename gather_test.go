@@ -200,7 +200,7 @@ func TestFanOutWorkJoinedWhenTheProcessorReturns(t *testing.T) {
 			return boom
 		}))
 	})
-	if !errors.Is(err, boom) {
+	if !runFailedWith(err, boom) {
 		t.Fatalf("run error = %v, want the task's %v", err, boom)
 	}
 	if !ran.Load() {

@@ -221,6 +221,9 @@ func (w *wave) workStarted() { w.running++ }
 
 func (w *wave) workDone(err error) {
 	w.running--
+	if w.it != nil {
+		err = w.it.asAbort(err)
+	}
 	if err != nil {
 		w.recordErr(err)
 	}

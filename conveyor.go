@@ -45,8 +45,20 @@ type Conveyor interface {
 	AddFanOut(opts ...AnyUnitOption) FanOut
 
 	// Run starts the conveyor, creating one item per itemProcessor invocation until ctx is canceled or an item
-	// fails. It blocks until every in-flight item has finished, then returns the first item error, or else ctx's
-	// cancellation cause.
+	// fails. It blocks until every in-flight item has finished, then returns what began the shutdown, the first
+	// event only:
+	//   - an ItemError, if an item failed first. Its Unwrap is the item's own error.
+	//   - a ShutdownError, if ctx was canceled first. Its Unwrap is ctx's cancellation cause.
+	//   - nil, if neither happened.
+	//
+	// Both are RunErrors. Failures of other items during the shutdown are not lost: see RunError.ItemErrors, and
+	// RunError.DrainError for the outcome of the OptShutdownContext grace period. Items aborted by the conveyor are
+	// not failures and are not reported. ErrConveyorAlreadyRunning is returned as is.
+	//
+	// An item counts as aborted if it returns a ShutdownError (e.g. from a node method or context.Cause(ctx)), or
+	// any error wrapping context.Canceled after the conveyor canceled it. The second is a guess: such an error
+	// from your own code is not reported either. To keep an error visible during a shutdown, do not wrap
+	// context.Canceled in it.
 	//
 	// Build all nodes before calling Run; the topology is frozen from the first Run on. Run may be called again
 	// after it returns, but a concurrent second call returns ErrConveyorAlreadyRunning.
@@ -164,7 +176,7 @@ type conveyor struct {
 type Option func(c *conveyor)
 
 // ShutdownContextFactory produces the context that bounds a shutdown. cause is the first item error, or the Run
-// context's cancellation cause. See OptShutdownContext.
+// context's cancellation cause, whichever began the shutdown. See OptShutdownContext.
 type ShutdownContextFactory func(cause error) (context.Context, context.CancelFunc)
 
 // OptShutdownContext bounds how long items may keep running after a shutdown begins — triggered by the Run

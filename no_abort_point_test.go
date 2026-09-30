@@ -101,7 +101,7 @@ func TestNoAbortPointCancelsItemsBeforeIt(t *testing.T) {
 	assertShutdownCause(t, "item in the starting stage", recvErr(t, "start item cancel", startErr), cause)
 	close(release) // item 1 is still in write: it was not canceled
 
-	if err := recvErr(t, "Run", done); err != cause {
+	if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 	if !committed.Load() {
@@ -151,7 +151,7 @@ func TestNoAbortPointCancelsWaitingForIt(t *testing.T) {
 		assertShutdownCause(t, "item before write", recvErr(t, "canceled item", errs), cause)
 	}
 	close(release)
-	if err := recvErr(t, "Run", done); err != cause {
+	if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 	if e := firstErr.Load(); e != nil {
@@ -197,7 +197,7 @@ func TestNoAbortPointSkippedIsPassed(t *testing.T) {
 	cancel(cause)
 	assertShutdownCause(t, "item in the starting stage", recvErr(t, "start item cancel", startErr), cause)
 	close(release)
-	if err := recvErr(t, "Run", done); err != cause {
+	if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 	if e := laterErr.Load(); e != nil {
@@ -262,7 +262,7 @@ func TestNoAbortPointFanOut(t *testing.T) {
 		assertShutdownCause(t, "item before fo", recvErr(t, "canceled item", errs), cause)
 	}
 	close(release)
-	if err := recvErr(t, "Run", done); err != cause {
+	if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 	if e := taskErr.Load(); e != nil {
@@ -319,7 +319,7 @@ func TestNoAbortPointAfterFanOut(t *testing.T) {
 	if err := recvErr(t, "MoveTo(write)", moveErr); !isShutdown(err) {
 		t.Fatalf("MoveTo(write) = %v, want a ShutdownError", err)
 	}
-	if err := recvErr(t, "Run", done); err != cause {
+	if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 	if ran[1].Load() {
@@ -382,7 +382,7 @@ func TestNoAbortPointErrorShutdown(t *testing.T) {
 		assertShutdownCause(t, "item before write", recvErr(t, "canceled item", errs), errBoom)
 	}
 	close(release)
-	if err := recvErr(t, "Run", done); err != errBoom {
+	if err := recvErr(t, "Run", done); !errors.Is(err, errBoom) {
 		t.Fatalf("Run error = %v, want %v", err, errBoom)
 	}
 	if e := firstErr.Load(); e != nil {
@@ -455,7 +455,7 @@ func TestNoAbortPointReset(t *testing.T) {
 		t.Fatalf("item in the starting stage was aborted: %v", err)
 	}
 	close(release)
-	if err := recvErr(t, "Run", done); err != cause {
+	if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 }
@@ -507,7 +507,7 @@ func TestNoAbortPointWithShutdownContext(t *testing.T) {
 	if earlyCancel.Load() {
 		t.Fatal("item past the point was canceled before the shutdown context was done")
 	}
-	if err := recvErr(t, "Run", done); err != cause {
+	if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 }
@@ -587,7 +587,7 @@ func moveAndCancel(t *testing.T, c Conveyor, write Stage, duringShutdown bool, m
 	close(release)
 	writeAborted = recvErr(t, "write item", writeErr) != nil
 	startAborted = recvErr(t, "start item", startErr) != nil
-	if err := recvErr(t, "Run", done); err != cause {
+	if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 	return writeAborted, startAborted
@@ -683,7 +683,7 @@ func TestNoAbortPointEnterRacesShutdown(t *testing.T) {
 		case mErr != nil && !isShutdown(mErr):
 			t.Fatalf("iteration %d: MoveTo = %v, want nil or a ShutdownError", i, mErr)
 		}
-		if err := recvErr(t, "Run", done); err != cause {
+		if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 			t.Fatalf("iteration %d: Run error = %v, want %v", i, err, cause)
 		}
 	}
@@ -724,7 +724,7 @@ func TestNoAbortPointSetRacesEnter(t *testing.T) {
 		if err := recvErr(t, "write item", writeErr); err != nil {
 			t.Fatalf("iteration %d: item in the point was aborted: %v", i, err)
 		}
-		if err := recvErr(t, "Run", done); err != cause {
+		if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 			t.Fatalf("iteration %d: Run error = %v, want %v", i, err, cause)
 		}
 	}
@@ -769,7 +769,7 @@ func TestNoAbortPointTryMoveTo(t *testing.T) {
 	if err := recvErr(t, "write item", writeErr); err != nil {
 		t.Fatalf("item that entered with TryMoveTo was aborted: %v", err)
 	}
-	if err := recvErr(t, "Run", done); err != cause {
+	if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 }
@@ -810,7 +810,7 @@ func TestNoAbortPointLaneChild(t *testing.T) {
 	<-inLane
 	cancel(cause)
 	assertShutdownCause(t, "child item", recvErr(t, "child item", childErr), cause)
-	if err := recvErr(t, "Run", done); err != cause {
+	if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 }
@@ -868,7 +868,7 @@ func TestNoAbortPointRetain(t *testing.T) {
 	if err := recvErr(t, "item 1 work", bgErr[0]); err != nil {
 		t.Fatalf("work of the protected item was canceled: %v", err)
 	}
-	if err := recvErr(t, "Run", done); err != cause {
+	if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 }
@@ -1059,7 +1059,7 @@ func TestNoAbortPointLaterWaitingRoom(t *testing.T) {
 		}
 	}
 	assertShutdownCause(t, "item in the starting stage", recvErr(t, "item 3", errs[2]), cause)
-	if err := recvErr(t, "Run", done); err != cause {
+	if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 }
@@ -1105,7 +1105,7 @@ func TestNoAbortPointSetRacesRunStart(t *testing.T) {
 	if err := recvErr(t, "write item", writeErr); err != nil {
 		t.Fatalf("item in the point was aborted: %v", err)
 	}
-	if err := recvErr(t, "Run", done); err != cause {
+	if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 }
@@ -1169,7 +1169,7 @@ func TestNoAbortPointMovedDuringGracePeriod(t *testing.T) {
 	if earlyCancel.Load() {
 		t.Fatal("protected item was canceled before the shutdown context was done")
 	}
-	if err := recvErr(t, "Run", done); err != cause {
+	if err := recvErr(t, "Run", done); !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 }

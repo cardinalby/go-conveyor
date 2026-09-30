@@ -1062,7 +1062,7 @@ func TestBackpressureStrict_CancellationDropsEnteringCollectionAndDischarges(t *
 		return x.commit.MoveTo(ctx)
 	})
 	<-done
-	if !errors.Is(err, boom) {
+	if !runFailedWith(err, boom) {
 		t.Fatalf("Run = %v, want %v", err, boom)
 	}
 	rn.mu.Lock()

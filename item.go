@@ -1,6 +1,9 @@
 package conveyor
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // item identifies one journey through a series and tracks its position and its outstanding background work. Both
 // kinds of journey are items:
@@ -145,6 +148,19 @@ func (it *item) poison(cause error) {
 	if it.parentWave != nil && it.parentWave.it != nil {
 		it.parentWave.it.poison(cause)
 	}
+}
+
+// asAbort maps the error an aborted item returns to the abort itself: if the conveyor canceled the item (its
+// context cause is a ShutdownError) and err is a plain context cancellation, e.g. from a driver interrupted mid-call,
+// the item was aborted, not failed. Any other cause (a failed task or RetainFor) leaves err as it is. Needs no lock.
+func (it *item) asAbort(err error) error {
+	if err == nil || isShutdown(err) || !errors.Is(err, context.Canceled) {
+		return err
+	}
+	if cause := context.Cause(it.ctx); isShutdown(cause) {
+		return cause
+	}
+	return err
 }
 
 // cancelCause is why this item may not go on, or nil: its own context's cause first (the item's true status), else

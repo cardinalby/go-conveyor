@@ -171,7 +171,7 @@ func TestFanOutRetainedErrorNobodyJoinedFailsTheItem(t *testing.T) {
 		_ = fo.Retain(ctx) // deliberately never joined
 		return commit.MoveTo(ctx)
 	})
-	if !errors.Is(err, boom) {
+	if !runFailedWith(err, boom) {
 		t.Fatalf("run error = %v, want the retained work's %v", err, boom)
 	}
 }

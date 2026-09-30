@@ -58,7 +58,9 @@ func runUntil(t *testing.T, c Conveyor, want int64, proc func(ctx context.Contex
 		if no == want {
 			// Stop creating items only after the last interesting one has done its work. Items still in flight
 			// are left to finish (no OptShutdownContext, so nothing bounds them), so their assertions still hold.
-			cancel()
+			if err == nil {
+				cancel() // a failure stops the run by itself; canceling first would make ctx the first trigger
+			}
 			close(stopped)
 		}
 		return err
@@ -77,6 +79,24 @@ func runNOK(t *testing.T, c Conveyor, want int64, proc func(ctx context.Context,
 
 // runOnce runs a single item through c and returns Run's error. Used for the many tests that only need one
 // journey. Later items take no part; they park until the first one is done, for the reason given at runUntil.
+// runFailedWith reports whether a Run result shows the failure target: as the trigger, or, when the Run context was
+// canceled first, among the failures that followed it (RunError.ItemErrors).
+func runFailedWith(err, target error) bool {
+	if errors.Is(err, target) {
+		return true
+	}
+	var re RunError
+	if !errors.As(err, &re) {
+		return false
+	}
+	for _, e := range re.ItemErrors() {
+		if errors.Is(e, target) {
+			return true
+		}
+	}
+	return false
+}
+
 func runOnce(t *testing.T, c Conveyor, proc func(ctx context.Context) error) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -89,7 +109,9 @@ func runOnce(t *testing.T, c Conveyor, proc func(ctx context.Context) error) err
 		once.Do(func() {
 			ran = true
 			err = proc(ic)
-			cancel()
+			if err == nil {
+				cancel() // a failure stops the run by itself; canceling first would make ctx the first trigger
+			}
 			close(stopped)
 		})
 		if !ran {

@@ -5,6 +5,42 @@ Shutdown begins when the context passed to `Run` is canceled, or when an item re
 - items already in the pipeline are allowed to finish
 - after an item error, all later items are canceled with a `ShutdownError`
 
+## What Run returns
+
+`Run` returns what began the shutdown, the first event only:
+
+| Result                      | When                                 | `errors.Unwrap` gives            |
+|-----------------------------|--------------------------------------|----------------------------------|
+| `ItemError`                 | an item failed first                 | the item's own error             |
+| `ShutdownError`             | the `Run` context was canceled first | the context's cancellation cause |
+| `ErrConveyorAlreadyRunning` | `Run` is already running             | -                                |
+| `nil`                       | nothing happened                     | -                                |
+
+```go
+err := c.Run(ctx, proc)
+
+var ie conveyor.ItemError
+var se conveyor.ShutdownError
+switch {
+case err == nil:
+case errors.As(err, &ie):
+    // an item failed. errors.Is(err, yourErr) works. ie.Unit() is the node where it failed.
+case errors.As(err, &se):
+    // stopped from outside. errors.Is(err, context.Canceled) or your own cause works.
+}
+```
+
+Both are `RunError`s and have two more getters:
+- `ItemErrors()`: failures of other items during the shutdown. If the `Run` context is canceled and an
+  in-flight item then fails to commit, `Run` still returns a `ShutdownError`, so check this list.
+- `DrainError()`: nil if the in-flight items finished on their own. If the `OptShutdownContext` context was done first,
+  it is that context's cause.
+
+Items aborted by the conveyor are not failures. An item is aborted when it gets a `ShutdownError` from a node
+method, or returns `context.Canceled` after the conveyor canceled it. Items see a `ShutdownError` as the cause of their
+context. It unwraps to the reason: the `Run` context's cause, or the `ItemError` of the item that failed first.
+`DrainError()` and `ItemErrors()` are always empty there.
+
 ## No-abort point
 
 Often the first stages have no side effects (read from a broker), and the later ones do (write, commit).

@@ -228,8 +228,8 @@ func TestShutdownErrorFromRunContextCancellation(t *testing.T) {
 				t.Errorf("MoveTo after shutdown = %v, want a ShutdownError", err)
 				return
 			}
-			if !errors.Is(se.Cause(), context.Canceled) {
-				t.Errorf("ShutdownError.Cause() = %v, want context.Canceled", se.Cause())
+			if !errors.Is(se.Unwrap(), context.Canceled) {
+				t.Errorf("ShutdownError.Unwrap() = %v, want context.Canceled", se.Unwrap())
 			}
 			if !errors.Is(err, context.Canceled) {
 				t.Errorf("errors.Is(%v, context.Canceled) = false, want true (the cause must be reachable)", err)
@@ -245,8 +245,12 @@ func TestShutdownErrorFromRunContextCancellation(t *testing.T) {
 		t.Fatalf("Run = %v, want context.Canceled", runErr)
 	}
 	var se ShutdownError
-	if errors.As(runErr, &se) {
-		t.Fatalf("Run returned a ShutdownError (%v); it must return the raw cause", runErr)
+	if !errors.As(runErr, &se) {
+		t.Fatalf("Run = %v, want a ShutdownError", runErr)
+	}
+	var ie ItemError
+	if errors.As(runErr, &ie) {
+		t.Fatalf("Run returned an ItemError (%v) though no item failed", runErr)
 	}
 	if !checked.Load() {
 		t.Fatalf("the shutdown checks did not run")
@@ -284,8 +288,8 @@ func TestShutdownErrorFromItemError(t *testing.T) {
 				t.Errorf("context cause = %v, want a ShutdownError", cause)
 				return nil
 			}
-			if !errors.Is(se.Cause(), boom) {
-				t.Errorf("ShutdownError.Cause() = %v, want the item error", se.Cause())
+			if !errors.Is(se.Unwrap(), boom) {
+				t.Errorf("ShutdownError.Unwrap() = %v, want the item error", se.Unwrap())
 			}
 			if !errors.Is(cause, boom) {
 				t.Errorf("errors.Is(%v, boom) = false, want true (the cause must be reachable)", cause)

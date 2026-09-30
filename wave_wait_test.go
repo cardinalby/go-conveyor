@@ -185,7 +185,7 @@ func TestUnwaitedFailedWaveStillFailsCompletion(t *testing.T) {
 		}
 		return nil
 	})
-	if !errors.Is(err, errB) {
+	if !runFailedWith(err, errB) {
 		t.Fatalf("Run = %v, want the unacknowledged %v", err, errB)
 	}
 }

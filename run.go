@@ -3,6 +3,7 @@ package conveyor
 import (
 	"context"
 	"math"
+	"slices"
 	"sync"
 )
 
@@ -40,9 +41,14 @@ type run struct {
 	// fast ItemProcessor would spawn a fresh goroutine per item — unboundedly, since the pool never gets a chance
 	// to park (worst on a single-P runtime, where the new goroutines simply pile up on the run queue).
 	spawning     int
-	stopCreating bool           // once set, no new root items are created and idle workers exit
-	runErr       error          // first non-shutdown item error; becomes Run's result
-	workers      sync.WaitGroup // all root-item worker goroutines
+	stopCreating bool // once set, no new root items are created and idle workers exit
+	// trigger is why the shutdown began, set once by the first event: the Run context's cancellation cause, or the
+	// *itemError of the first failed item. It is Run's result (see result) and the cause of the ShutdownError that
+	// aborted items see.
+	trigger  error
+	lateErrs []error        // *itemError of the items that failed after the trigger
+	drainErr error          // cause of the shutdown context, if it was done before the items finished
+	workers  sync.WaitGroup // all root-item worker goroutines
 
 	// shutdownCh is closed once, when shutdown begins from either trigger (caller-context cancellation or an
 	// item error). watchShutdown waits on it to bound how long the in-flight items may keep running.
@@ -84,13 +90,27 @@ func (c *conveyor) Run(ctx context.Context, itemProcessor ItemProcessor) error {
 	close(stopWatch)
 	<-watcherDone
 
+	return r.result(ctx)
+}
+
+// result builds the error Run returns from the trigger of the shutdown, the failures that followed it and the
+// drain outcome. The trigger decides the kind: an ItemError when an item failed first, else a ShutdownError with
+// the Run context's cause. It is nil if the Run context was never canceled and nothing failed.
+func (r *run) result(ctx context.Context) error {
 	r.mu.Lock()
-	runErr := r.runErr
-	r.mu.Unlock()
-	if runErr != nil {
-		return runErr
+	defer r.mu.Unlock()
+	if ie, ok := r.trigger.(*itemError); ok {
+		// A copy: items keep ie as their cancellation cause and must not see the run-level data.
+		return &itemError{unit: ie.unit, err: ie.err, drain: r.drainErr, items: slices.Clone(r.lateErrs)}
 	}
-	return context.Cause(ctx)
+	cause := r.trigger
+	if cause == nil {
+		cause = context.Cause(ctx)
+	}
+	if cause == nil {
+		return nil
+	}
+	return &shutdownError{cause: cause, drain: r.drainErr, items: slices.Clone(r.lateErrs)}
 }
 
 // tryRun creates the run and publishes it as currentRun, under runMu: SetNoAbortPoint relies on no run starting
@@ -140,7 +160,7 @@ func (r *run) watchShutdown(ctx context.Context, stopWatch <-chan struct{}, done
 	if factory == nil {
 		return // no limit: in-flight items are left to finish
 	}
-	shutdownCtx, cancel := factory(r.shutdownCause(ctx))
+	shutdownCtx, cancel := factory(r.shutdownCause())
 	if cancel != nil {
 		// Release the shutdown context (a timer, typically) as soon as it is out of use: the watcher outlives the
 		// items it bounds by nothing, and Run joins it before returning.
@@ -151,7 +171,10 @@ func (r *run) watchShutdown(ctx context.Context, stopWatch <-chan struct{}, done
 	}
 	select {
 	case <-shutdownCtx.Done():
-		r.cancelInFlight(ctx) // the items outlived the shutdown context
+		r.mu.Lock()
+		r.drainErr = context.Cause(shutdownCtx)
+		r.mu.Unlock()
+		r.cancelInFlight() // the items outlived the shutdown context
 	case <-stopWatch:
 	}
 }
@@ -166,11 +189,14 @@ func (r *run) beginShutdown(cause error) {
 }
 
 // markShutdownLocked records that shutdown has begun: it stops new items from being created, aborts the items
-// before the no-abort point with cause, and signals the watcher (which applies the shutdown context). The first
-// cause is kept. Idempotent. The caller holds r.mu and must broadcast.
+// before the no-abort point, and signals the watcher (which applies the shutdown context). cause becomes the
+// trigger unless an earlier one is kept. Idempotent. The caller holds r.mu and must broadcast.
 func (r *run) markShutdownLocked(cause error) {
 	r.stopCreating = true
-	r.abortUnprotectedLocked(cause)
+	if r.trigger == nil {
+		r.trigger = cause
+	}
+	r.abortUnprotectedLocked(r.trigger)
 	r.shutdownOnce.Do(func() { close(r.shutdownCh) })
 }
 
@@ -219,26 +245,37 @@ func (r *run) protectReachedLocked() {
 // from their parents'). Code inside an ItemProcessor that ignores its context (e.g. a bare channel receive) is not
 // forcibly interrupted — only node calls unblock. Items already canceled individually (the error cascade in
 // completeItem) keep their more specific cause, since the first cancellation of a context wins.
-func (r *run) cancelInFlight(ctx context.Context) {
-	r.cancelItems(&shutdownError{cause: r.shutdownCause(ctx)})
+func (r *run) cancelInFlight() {
+	r.mu.Lock()
+	trigger := r.trigger
+	r.mu.Unlock()
+	r.cancelItems(&shutdownError{cause: trigger})
 	r.mu.Lock()
 	r.cond.Broadcast()
 	r.mu.Unlock()
 }
 
-// shutdownCause is why the shutdown happened: the first item error if one was recorded, else the Run context's
-// cancellation cause. It is what the canceled items see as their ShutdownError's cause, and what the
-// ShutdownContextFactory is told. Deliberately not the shutdown context's own cause: an expired grace period says
-// nothing an item does not already know, while the trigger — which SIGTERM, which item error — does. It is read
-// afresh at each use, so an item error recorded after the factory was asked still wins.
-func (r *run) shutdownCause(ctx context.Context) error {
+// shutdownCause is why the shutdown began, as the ShutdownContextFactory is told: the first failed item's own
+// error, or the Run context's cancellation cause. Deliberately not the shutdown context's own cause: an expired
+// grace period says nothing an item does not already know, while the trigger does (it is reported by
+// RunError.DrainError instead).
+func (r *run) shutdownCause() error {
 	r.mu.Lock()
-	cause := r.runErr
-	r.mu.Unlock()
-	if cause == nil {
-		cause = context.Cause(ctx)
+	defer r.mu.Unlock()
+	if ie, ok := r.trigger.(*itemError); ok {
+		return ie.err
 	}
-	return cause
+	return r.trigger
+}
+
+// itemUnit is the node a root item occupies or waits in front of now, for ItemError.Unit. Caller holds mu.
+func (r *run) itemUnit(it *item) Unit {
+	for _, u := range r.conveyor.units {
+		if u.scope == 0 && (u.rank == it.reachedRank || u.queueRank() == it.reachedRank) {
+			return u.handle()
+		}
+	}
+	return r.conveyor.units[0].handle()
 }
 
 // spawnWorker starts one worker goroutine. Workers self-propagate via acquireItem, so the pool grows to match the
@@ -320,6 +357,7 @@ func (r *run) acquireItem(arrived bool) *item {
 func (r *run) completeItem(it *item, procErr error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	procErr = it.asAbort(procErr)
 	it.returned = true
 	r.dropDormant(it, math.MaxInt) // work prepared for a fan-out never entered: nothing waits for it
 
@@ -351,16 +389,18 @@ func (r *run) completeItem(it *item, procErr error) {
 		}
 	}
 	if it.parentWave == nil && effErr != nil && !isShutdownErr {
-		if r.runErr == nil {
-			r.runErr = effErr
+		ie := &itemError{unit: r.itemUnit(it), err: effErr}
+		if r.trigger != nil {
+			r.lateErrs = append(r.lateErrs, ie) // the shutdown began earlier; this failure is reported beside it
 		}
-		// Cancel every later item immediately (error semantics), with this error as the shutdown cause; earlier
-		// items are left to finish, bounded by the shutdown context via the watcher that markShutdownLocked wakes,
-		// except those before the no-abort point, which markShutdownLocked aborts.
+		// Cancel every later item immediately (error semantics), with the trigger as the shutdown cause: this error,
+		// or the earlier event that began the shutdown. Earlier items are left to finish, bounded by the shutdown
+		// context via the watcher that markShutdownLocked wakes, except those before the no-abort point, which
+		// markShutdownLocked aborts.
+		r.markShutdownLocked(ie)
 		for later := it.next; later != nil; later = later.next {
-			later.cancel(&shutdownError{cause: effErr})
+			later.cancel(&shutdownError{cause: r.trigger})
 		}
-		r.markShutdownLocked(effErr)
 	}
 	r.finishItem(it)
 	if it.cancel != nil {

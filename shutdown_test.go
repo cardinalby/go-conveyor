@@ -34,8 +34,8 @@ func assertShutdownCause(t *testing.T, what string, err error, want error) {
 	if !errors.As(err, &se) {
 		t.Fatalf("%s: error %v is not a ShutdownError", what, err)
 	}
-	if se.Cause() != want {
-		t.Fatalf("%s: shutdown cause = %v, want %v", what, se.Cause(), want)
+	if !errors.Is(se.Unwrap(), want) {
+		t.Fatalf("%s: shutdown cause = %v, want %v", what, se.Unwrap(), want)
 	}
 }
 
@@ -51,7 +51,7 @@ func TestGracefulShutdownFinishesInFlightItems(t *testing.T) {
 	commit := c.AddStage(OptName("commit"))
 
 	release := make(chan struct{})
-	var created, arrived, bg atomic.Int64
+	var created, bg atomic.Int64
 	var triggered atomic.Bool
 	var committed numbers
 
@@ -63,7 +63,6 @@ func TestGracefulShutdownFinishesInFlightItems(t *testing.T) {
 		if err := gate.MoveTo(ic); err != nil {
 			return err
 		}
-		n := arrived.Add(1)
 		ferr := fo.MoveTo(ic)
 		if ferr == nil {
 			ferr = fo.Schedule(ic, pool.NewTasks(perItem, func(cctx context.Context, i int) error {
@@ -75,7 +74,9 @@ func TestGracefulShutdownFinishesInFlightItems(t *testing.T) {
 		if ferr != nil {
 			return ferr
 		}
-		if n == 4 && triggered.CompareAndSwap(false, true) {
+		// Decided by the item number, not by arrival order at this line: the fan-out admits items in order, so only
+		// item 4 is sure to get in while items 1-3 hold their slots until the work is released.
+		if no == 4 && triggered.CompareAndSwap(false, true) {
 			cancel(cause) // shut down with four items past the gate and all of their work outstanding
 			close(release)
 		}
@@ -86,7 +87,7 @@ func TestGracefulShutdownFinishesInFlightItems(t *testing.T) {
 		return nil
 	})
 
-	if err != cause {
+	if !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 	got := committed.all()
@@ -152,7 +153,7 @@ func TestShutdownContextAlreadyDoneCancelsInFlight(t *testing.T) {
 		return nil
 	})
 
-	if err != cause {
+	if !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 	if laneStarted.Load() < 2 {
@@ -214,7 +215,7 @@ func TestShutdownGracePeriodLetsItemsDrain(t *testing.T) {
 		return nil
 	})
 
-	if err != cause {
+	if !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 	if canceledEarly.Load() != 0 {
@@ -259,7 +260,7 @@ func TestShutdownGracePeriodOverrunCancelsItems(t *testing.T) {
 		return nil
 	})
 
-	if err != cause {
+	if !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 	mu.Lock()
@@ -310,7 +311,7 @@ func TestErrorShutdownIsBoundedByShutdownContext(t *testing.T) {
 		return nil
 	})
 
-	if err != boom {
+	if !errors.Is(err, boom) {
 		t.Fatalf("Run error = %v, want %v", err, boom)
 	}
 	select {
@@ -367,7 +368,7 @@ func TestShutdownContextCancelsItemsLater(t *testing.T) {
 		return context.Cause(ic)
 	})
 
-	if err != cause {
+	if !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 	if got := <-factoryCause; got != cause {
@@ -502,7 +503,7 @@ func TestProcessorErrorCancelsOnlyLaterItems(t *testing.T) {
 		return nil
 	})
 
-	if err != boom {
+	if !errors.Is(err, boom) {
 		t.Fatalf("Run error = %v, want %v", err, boom)
 	}
 	got := committed.all()
@@ -551,7 +552,7 @@ func TestFirstItemErrorWins(t *testing.T) {
 		return nil
 	})
 
-	if err != first {
+	if !errors.Is(err, first) {
 		t.Fatalf("Run error = %v, want %v", err, first)
 	}
 	if !failedSecond.Load() {
@@ -585,11 +586,15 @@ func TestShutdownErrorFromProcessorIsNotAFailure(t *testing.T) {
 		return nil
 	})
 
-	if err != cause {
+	if !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want the run context cause %v", err, cause)
 	}
-	if isShutdown(err) {
-		t.Fatalf("Run returned a ShutdownError (%v) instead of the raw cause", err)
+	var se ShutdownError
+	if !errors.As(err, &se) {
+		t.Fatalf("Run returned %v, want a ShutdownError", err)
+	}
+	if n := len(se.ItemErrors()); n != 0 {
+		t.Fatalf("ItemErrors = %v, want none: the aborted items are not failures", se.ItemErrors())
 	}
 	if wrapped.Load() == 0 {
 		t.Fatal("no item returned a wrapped ShutdownError, so the test proved nothing")
@@ -645,7 +650,7 @@ func TestGracefulShutdownJoinsChildren(t *testing.T) {
 		return nil // return without joining: completing the item must join them anyway
 	})
 
-	if err != cause {
+	if !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 	if finished.Load() != children {
@@ -703,7 +708,7 @@ func TestShutdownCancelsChildren(t *testing.T) {
 		return nil
 	})
 
-	if err != cause {
+	if !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 	if unwound.Load() != children {

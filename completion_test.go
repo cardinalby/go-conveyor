@@ -54,7 +54,7 @@ func TestCompletionSealsBusyBodyAndJoinsTheTree(t *testing.T) {
 			})
 
 			if tc.fail {
-				if !errors.Is(err, boom) {
+				if !runFailedWith(err, boom) {
 					t.Fatalf("Run = %v, want the unobserved leaf error %v", err, boom)
 				}
 			} else if err != nil && !errors.Is(err, context.Canceled) {
@@ -170,11 +170,16 @@ func TestCompletionShutdownErrorYieldsToUnobservedWaveError(t *testing.T) {
 		return cause
 	})
 
-	if !errors.Is(err, boom) {
+	if !runFailedWith(err, boom) {
 		t.Fatalf("Run = %v, want the wave's unobserved error %v", err, boom)
 	}
-	if isShutdown(err) {
-		t.Fatalf("Run returned a ShutdownError (%v); the wave error should have replaced it", err)
+	var re RunError
+	if errors.As(err, &re) {
+		for _, e := range re.ItemErrors() {
+			if isShutdown(e) {
+				t.Fatalf("ItemErrors has a ShutdownError (%v); the wave error should have replaced it", e)
+			}
+		}
 	}
 }
 
@@ -225,7 +230,7 @@ func TestShutdownWhileBlockedInWaitDropsQueuedSpawns(t *testing.T) {
 		return werr
 	})
 
-	if err != cause {
+	if !errors.Is(err, cause) {
 		t.Fatalf("Run = %v, want the run context's cause %v", err, cause)
 	}
 	if aDone.Load() != 1 {
@@ -282,7 +287,7 @@ func TestCompletionAbandonmentDoesNotHideALaterTaskError(t *testing.T) {
 		return context.Cause(ic)
 	})
 
-	if !errors.Is(err, boom) {
+	if !runFailedWith(err, boom) {
 		t.Fatalf("Run = %v, want the task's own error %v", err, boom)
 	}
 }
