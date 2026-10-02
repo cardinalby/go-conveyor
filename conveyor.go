@@ -52,14 +52,15 @@ type Conveyor interface {
 	//   - a ShutdownError, if ctx was canceled first. Its Unwrap is ctx's cancellation cause.
 	//   - nil, if neither happened.
 	//
-	// Both are RunErrors. Failures of other items during the shutdown are not lost: see RunError.ItemErrors, and
-	// RunError.DrainError for the outcome of the grace period (OptGracePeriod). Items aborted by the conveyor are
-	// not failures and are not reported. ErrConveyorAlreadyRunning is returned as is.
+	// Both are RunErrors. RunError.DrainError tells how the items in flight finished: the first failure among them,
+	// or the drain timeout (OptDrainTimeout). To see every failure, log it where it happens (the
+	// ItemProcessor, a task, a RetainFor callback). Items aborted by the conveyor are not failures and are not
+	// reported. ErrConveyorAlreadyRunning is returned as is.
 	//
-	// An item counts as aborted if it returns a ShutdownError (e.g. from a node method or context.Cause(ctx)), or
-	// any error wrapping context.Canceled once shutdown has begun (e.g. a read canceled through UntilShutdown) or
-	// after the conveyor canceled it. The second is a guess: such an error from your own code is not reported
-	// either. To keep an error visible during a shutdown, do not wrap context.Canceled in it.
+	// An item counts as aborted if it returns an error that is or wraps a ShutdownError (e.g. from a node method,
+	// or context.Cause of an UntilShutdown context), or any error after the conveyor canceled it. Any other error
+	// is a failure, also one that wraps context.Canceled: for a read canceled through UntilShutdown, return
+	// context.Cause of that context instead.
 	//
 	// An item that fails or is aborted cancels all younger items, so no younger item gets past it. Use UntilShutdown
 	// to stop items at once when shutdown begins, before their side effects start.
@@ -107,9 +108,9 @@ type conveyor struct {
 	// series is the root series; its AddStage / AddFanOut are promoted, satisfying that part of Conveyor.
 	*series
 
-	// gracePeriodFunc is asked for the context that bounds the grace period, once a shutdown begins (see
-	// OptGracePeriodFunc). Nil means in-flight items are left to finish on their own.
-	gracePeriodFunc GracePeriodFunc
+	// drainContext is asked for the context that bounds the drain, once a shutdown begins at start (see
+	// OptDrainTimeout, OptDrainContextFunc). Nil means in-flight items are left to finish on their own.
+	drainContext func(start time.Time, cause error) (context.Context, context.CancelFunc)
 
 	// units is every capacity unit, in creation order; index 0 is the implicit start stage. Immutable after the
 	// first Run.
@@ -140,39 +141,50 @@ type conveyor struct {
 	// run.grabNext). Nil in production; read without a lock, so it must be set before Run and never changed during
 	// one.
 	assignHook func(branchIdx int, col *taskCollection, queue []*taskCollection)
+	// watchHook, when set by an in-package test before Run, counts the watches UntilShutdown contexts keep on the
+	// shutdown: +1 when one is registered, -1 when a done context removes it (see run.newUntilShutdown). Nil in
+	// production; read without a lock, so it must be set before Run and never changed during one.
+	watchHook func(delta int)
 }
 
-// Option configures a Conveyor at creation. See NewConveyor, OptGracePeriod and OptGracePeriodFunc.
+// Option configures a Conveyor at creation. See NewConveyor, OptDrainTimeout and OptDrainContextFunc.
 type Option func(c *conveyor)
 
-// GracePeriodFunc produces the context that bounds the grace period of a shutdown. cause is the first item error,
-// or the Run context's cancellation cause, whichever began the shutdown. See OptGracePeriodFunc.
-type GracePeriodFunc func(cause error) (context.Context, context.CancelFunc)
+// DrainContextFunc produces the context that bounds the drain of a shutdown. cause is the first item error,
+// or the Run context's cancellation cause, whichever began the shutdown. See OptDrainContextFunc.
+type DrainContextFunc func(cause error) (context.Context, context.CancelFunc)
 
-// OptGracePeriod lets in-flight items run for d after a shutdown begins (the Run context is canceled, or an
+// OptDrainTimeout lets in-flight items run for d after a shutdown begins (the Run context is canceled, or an
 // ItemProcessor fails), then cancels their contexts. d <= 0 cancels them at once.
 //
-// Without this option or OptGracePeriodFunc, items are left to finish on their own. Of the two options, the last
+// Without this option or OptDrainContextFunc, items are left to finish on their own. Of the two options, the last
 // one wins.
-func OptGracePeriod(d time.Duration) Option {
-	return OptGracePeriodFunc(func(error) (context.Context, context.CancelFunc) {
-		return context.WithTimeout(context.Background(), d)
-	})
+func OptDrainTimeout(d time.Duration) Option {
+	return func(c *conveyor) {
+		// Counted from the moment shutdown begins, not from when the watcher gets to it.
+		c.drainContext = func(start time.Time, _ error) (context.Context, context.CancelFunc) {
+			return context.WithDeadline(context.Background(), start.Add(d))
+		}
+	}
 }
 
-// OptGracePeriodFunc bounds how long items may keep running after a shutdown begins (the Run context is canceled,
+// OptDrainContextFunc bounds how long items may keep running after a shutdown begins (the Run context is canceled,
 // or an ItemProcessor fails). Once shutdown starts, f is asked for a context; when that context is done, every
 // in-flight item's context is canceled.
 //
-//	return context.WithTimeout(context.Background(), 30*time.Second) // a grace period, then cancel
+//	return context.WithTimeout(context.Background(), 30*time.Second) // a drain timeout, then cancel
 //	return alreadyDoneCtx, nil                                       // cancel in-flight items at once
 //	return nil, nil                                                  // no limit: leave them to finish
 //
-// Without this option or OptGracePeriod, items are left to finish on their own. Of the two options, the last one
+// Without this option or OptDrainTimeout, items are left to finish on their own. Of the two options, the last one
 // wins.
-func OptGracePeriodFunc(f GracePeriodFunc) Option {
+func OptDrainContextFunc(f DrainContextFunc) Option {
 	return func(c *conveyor) {
-		c.gracePeriodFunc = f
+		if f == nil {
+			c.drainContext = nil
+			return
+		}
+		c.drainContext = func(_ time.Time, cause error) (context.Context, context.CancelFunc) { return f(cause) }
 	}
 }
 

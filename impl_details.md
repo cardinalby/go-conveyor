@@ -90,7 +90,7 @@ Everything below `run.mu` is guarded by it:
 - `scopes[]` — the in-flight item list of each scope (0 = the root series, one per branch);
 - `inFlight`, `liveWorkers` — windowed gauges;
 - the pool bookkeeping (`idle`, `spawning`, `stopCreating`, `nextItemNo`, `nextSeq`);
-- the shutdown state (`trigger`, `shutdownErr`, `lateErrs`, `drainErr`).
+- the shutdown state (`trigger`, `shutdownErr`, `drainErr`).
 
 `run.cond` is **broadcast, never signaled**, on every mutation: waiters block on different conditions, so a
 targeted wake is not possible and all of them must re-check. `waitUntil` is the single blocking helper — it checks
@@ -539,7 +539,8 @@ and adds its own. `FanOut.Retain` is the exception: it hands back the item's own
 state.
 
 **`completeItem`** runs after any item's processor returns — an ItemProcessor for a root item, a `TaskFunc` for a
-child. It poisons the item on a real (non-shutdown) processor error, **seals the open body** if any (state `closed`;
+child. It poisons the item on any processor error, an abort too (only a nil return lets the item's running tasks and
+`RetainFor` bgOps finish), **seals the open body** if any (state `closed`;
 without this an idle body would never finish and the item would wait forever, and from here the item's own path is
 refused — which covers a `RetainFor` callback that holds the item's context and schedules after the processor
 returned), waits for every outstanding wave (a sealed body still grows from its running tasks until the tree is
@@ -547,8 +548,9 @@ exhausted), then computes the effective error: the processor's own, else the fir
 observed. Then:
 
 - a **child** reports it to `parentWave.workDone`, which cancels the parent and surfaces there;
-- a **root item's** real error triggers error-shutdown: `markShutdownLocked`, record it as the trigger (or in
-  `lateErrs`), and cancel every *later* item with `shutdownErr` (earlier ones are left to finish);
+- a **root item's** real error triggers error-shutdown: `markShutdownLocked`, record it as the trigger (or, after the
+  trigger, as `drainErr` if that is still nil: the first failure of the drain), and cancel every *later* item with
+  `shutdownErr` (earlier ones are left to finish);
 - a **root item's** abort (the effective error is a `ShutdownError`) while shutdown is in progress is the **abort
   cascade**: every later item is canceled with `shutdownErr` too. Returning nil never cascades, and a child's abort
   does not cascade by itself (it poisons its parent, as any wave error does).
@@ -562,9 +564,12 @@ the branch already released.
 **Shutdown** has two triggers — the `Run` context being canceled, or an item error. Both go through
 `markShutdownLocked` (under `mu`): it sets `stopCreating`, records the first `trigger` with
 `shutdownErr = &shutdownError{cause: trigger}`, cancels `run.shutdownCtx` with it, and closes `shutdownCh`.
-`watchShutdown` then asks the `GracePeriodFunc` (`OptGracePeriodFunc`; `OptGracePeriod(d)` is a func returning
-`context.WithTimeout(d)`) for the context that bounds the grace period, passing the shutdown cause, and cancels the
-in-flight items once that context is done — no func, or a nil context from it, leaves them to finish. The func is
+`watchShutdown` then asks `conveyor.drainContext` (set by `OptDrainContextFunc`, or by `OptDrainTimeout(d)` as a
+deadline of `shutdownAt` + d, so a late watcher does not extend it) for the context that bounds the drain,
+passing the shutdown cause, and cancels the in-flight items once that context is done — no func, or a
+nil context from it, leaves them to finish. `drainErr` is set to that context's cause only if items are still in
+flight when it is done and no root failure after the trigger set it first, so it stays nil when the run drained in
+time. `drainErr` is thus the first problem of the drain, and never the trigger. The func is
 asked at most once per run, and not at all if the run drains just as the shutdown is noticed; its `CancelFunc` runs
 before `Run` returns, so a timer-backed context is released promptly. Cancellation goes through the common parent
 `itemsCtx`, so items blocked in a node method return promptly; code inside an ItemProcessor that ignores its context
@@ -580,14 +585,19 @@ cancellation are inherited. Its cancel is called with `shutdownErr`:
   once it is done, so the watch lives no longer than ctx; `Run` cancels `shutdownCtx` on return as a backstop.
 
 The context made from the item's own ctx is cached on the item (`item.untilShutdown`), so a call in a loop costs one
-registration per item; a call with any other ctx makes a new one, released with ctx. Its `Done` is closed by a
+registration per item; a call with any other ctx makes a new one, released when ctx or the item is done (a call per
+loop step with a fresh `WithValue` ctx grows until then). A call with a ctx that already is an UntilShutdown context
+of this run returns it without taking `mu`: the check reads `shutdownBegun`, an atomic mirror of `shutdownErr != nil`. Its `Done` is closed by a
 goroutine, so it may lag the shutdown. Node methods do not rely on it: `cancelCause` checks `shutdownErr` under `mu`
 for any context carrying the mark, in the same lock hold as the entry, so a move with it never succeeds once
 `markShutdownLocked` has run, and a waiter woken by its broadcast fails.
 
-**Abort classification** (`item.asAbort`, under `mu`). An error that wraps `context.Canceled` is mapped to an abort
-when the item's own context cause is a `ShutdownError`, or when the item's context is not canceled and shutdown has
-begun (e.g. a read canceled through `UntilShutdown`). Any other item cause (a failed task) keeps the error.
+**Abort classification** (`item.asAbort`, needs no lock). An error that is or wraps a `ShutdownError` is an abort
+as is. Any other non-nil error is mapped to the item's context cause when that cause is a `ShutdownError` (the
+conveyor canceled the item, so whatever it returns follows from that). Any other item cause (a failed task, a failed
+`RetainFor`), or an item that is not canceled, keeps the error: an error wrapping `context.Canceled` from an item the
+conveyor did not cancel is a failure, also after shutdown has begun (e.g. a read canceled through `UntilShutdown` and
+returned as is).
 
 **`ShutdownError`** is a sealed interface, so an ItemProcessor cannot fabricate a value that `completeItem` would
 mistake for a shutdown abort — `isShutdown` can therefore trust `errors.As`.
@@ -687,8 +697,9 @@ Break any of these and the model stops holding:
 6. **User code never runs under `run.mu`.** Task callbacks, generator pulls, channel receives, `RetainFor` bgOps and
    source releases all run outside the lock. `dropCollection` therefore hands abandoned sources to their own
    goroutine.
-7. **An error is never lost.** A wave whose error nobody acknowledged fails its item at completion; a root item's
-   real error becomes the trigger, or is listed in `lateErrs`.
+7. **A wave error is never lost.** A wave whose error nobody acknowledged fails its item at completion. A root item's
+   real error becomes the trigger, or the drain error if it is the first failure after the trigger; later ones are
+   not reported, so the ItemProcessor logs them if needed.
 8. **No slot outlives its item, and no item sits somewhere holding nothing.** The two halves of the retain
    handover, and of the upstream hold: a held token is freed by a discharge (the mode's start milestone, or a body
    sealed with no root submission) or by `finishItem`, whichever comes first, and every discharge goes through

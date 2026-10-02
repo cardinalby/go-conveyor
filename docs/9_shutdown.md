@@ -1,9 +1,9 @@
 # Shutdown
 
 Shutdown begins when the context passed to `Run` is canceled, or when an item returns an error. It has three steps:
-1. **Shutdown begins**: no new items are started, and contexts from [`UntilShutdown`](#untilshutdown) are done.
-2. **Grace period**: items already in the pipeline finish.
-3. **Grace period ends** (only with [`OptGracePeriod` / `OptGracePeriodFunc`](#grace-period)): the contexts of the remaining items are canceled.
+1. **Shutdown begins**: no new items are started, and contexts from [`UntilShutdown`](#untilshutdown) are canceled.
+2. **Drain**: items already in the pipeline finish.
+3. **Drain times out** (only with [`OptDrainTimeout` / `OptDrainContextFunc`](#drain-timeout)): the contexts of the remaining items are canceled.
 
 After an item error, all later items are canceled with a `ShutdownError` at once.
 
@@ -32,17 +32,30 @@ case errors.As(err, &se):
 }
 ```
 
-Both are `RunError`s and have two more getters:
-- `ItemErrors()`: failures of other items during the shutdown. If the `Run` context is canceled and an
-  in-flight item then fails to commit, `Run` still returns a `ShutdownError`, so check this list.
-- `DrainError()`: nil if the in-flight items finished on their own. If the grace period ended first, it is the cause of
-  the grace-period context.
+Both are `RunError`s. `DrainError()` tells how the items in flight when shutdown began finished:
+- nil: they all finished without failing (aborts are not failures).
+- an `ItemError`: one of them failed first. For example, the `Run` context is canceled and an in-flight item then
+  fails to commit: `Run` returns a `ShutdownError`, and `DrainError()` has the commit failure.
+- the cause of the drain context (for example, `context.DeadlineExceeded`): the drain timed out first, and
+  the remaining items were canceled.
 
-Items aborted by the conveyor are not failures. An item is aborted when it returns a `ShutdownError` (for example,
-from a node method), or an error that wraps `context.Canceled` after shutdown has begun (for example, a driver call
-interrupted by an `UntilShutdown` context). Items see a `ShutdownError` as the cause of their context. It unwraps to
-the reason: the `Run` context's cause, or the `ItemError` of the item that failed first. `DrainError()` and
-`ItemErrors()` are always empty there.
+`DrainError()` is only the first problem and never repeats what began the shutdown. To see every failure, log it where
+it happens: in the ItemProcessor, a task, a lane callback, or a `RetainFor` callback.
+
+Items aborted by the conveyor are not failures and are not reported. An item is aborted when:
+- its error is or wraps a `ShutdownError`: from a node method, or `context.Cause(pre)` of an
+  [`UntilShutdown`](#untilshutdown) context;
+- the conveyor canceled it (younger than a dropped item, or the drain timed out). Then any error it returns is an
+  abort.
+
+Any other error is a failure, also one that wraps `context.Canceled`. A driver call interrupted by an `UntilShutdown`
+context returns such an error: return `context.Cause(pre)` instead to abort (see the example below).
+
+Items see a `ShutdownError` as the cause of their context. It unwraps to the reason: the `Run` context's cause, or
+the `ItemError` of the item that failed first. `DrainError()` is always nil there.
+
+Any error the ItemProcessor returns, an abort too, cancels the item's context, and with it the item's tasks and
+`RetainFor` work that still run. Only a nil return lets them finish.
 
 An item that fails or is aborted cancels all younger items. So a younger item never enters a node that an older
 dropped item did not enter. This matters for cumulative commits like Kafka offsets: do the commit in its own stage,
@@ -61,12 +74,15 @@ c.Run(ctx, func(ctx context.Context) error {
     pre := conveyor.UntilShutdown(ctx) // dropped if shutdown begins before write
     msg, err := reader.Fetch(pre)
     if err != nil {
+        if pre.Err() != nil {
+            return context.Cause(pre) // a ShutdownError: an abort, not a failure
+        }
         return err
     }
     if err := write.MoveTo(pre); err != nil { // last call with pre
-        return err
+        return err // a ShutdownError once shutdown has begun
     }
-    // from here on use ctx: the item finishes, bounded by the grace period
+    // from here on use ctx: the item finishes, bounded by the drain timeout
     if err := db.Write(ctx, msg); err != nil {
         return err
     }
@@ -81,6 +97,15 @@ Use `pre` while dropping the item is still safe: nothing is done yet that must b
 `ctx` at the first step that must finish. `MoveTo(pre)` only affects the wait to enter the node (queue,
 backpressure). Never use `pre` for the side effect itself.
 
+After a failed call with `pre`, check `pre.Err()` and return `context.Cause(pre)`. The call's own error wraps
+`context.Canceled`: returned as is, it is a failure, not an abort.
+
+Use `pre` only before the stage where side effects start, not inside it. An item dropped there is aborted and cancels
+all younger items, also those in the same stage (with `SetLimit(n > 1)`) that already started their side effects.
+
+`pre.Done()` may close a moment after shutdown begins. Node methods called with `pre` fail from the moment shutdown
+begins.
+
 ### Partial batch
 
 Read a batch with `pre`. When shutdown begins, stop reading and go on with what was read, using `ctx`:
@@ -93,7 +118,7 @@ c.Run(ctx, func(ctx context.Context) error {
         msg, err := reader.Fetch(pre)
         if err != nil {
             if ctx.Err() != nil {
-                return err // the item itself is canceled: abort
+                return err // the conveyor canceled the item: any error is an abort
             }
             if pre.Err() != nil {
                 break // shutdown: go on with what was read
@@ -117,19 +142,71 @@ done too. Don't judge by the error itself: it looks the same in both cases. Retu
 
 `UntilShutdown` returns `ctx` unchanged if `ctx` is not an item's context.
 
-## Grace period
+Call `UntilShutdown` once per item path and derive other contexts from its result, e.g. `context.WithValue(pre, k, v)`.
+Each call with a context other than the item's own makes a new context that lives until that context or the item is
+done. So `UntilShutdown(context.WithValue(ctx, k, v))` in a loop of a long-running item grows memory.
 
-By default, items finish on their own. To limit how long they may run after shutdown begins, use
-[`OptGracePeriod`](https://pkg.go.dev/github.com/cardinalby/go-conveyor#OptGracePeriod):
+### Tasks and lane children
+
+Any error a pool task or a lane child returns fails its item at once: the item's context and its sibling tasks are
+canceled. This includes the error of a call interrupted by an `UntilShutdown` context. Return the error only if
+dropping the whole item is fine. If sibling work must finish, return nil on shutdown and tell the item through the
+task's result:
 
 ```go
-c := conveyor.NewConveyor(conveyor.OptGracePeriod(30 * time.Second))
+c.Run(ctx, func(ctx context.Context) error {
+    var stopped error // set by the task, read after Wait
+    err := fo.Schedule(ctx,
+        writes.NewTask(func(ctx context.Context) error {
+            return db.Write(ctx, msg) // must finish
+        }),
+        fetches.NewTask(func(ctx context.Context) error {
+            pre := conveyor.UntilShutdown(ctx)
+            for _, page := range pages {
+                if err := fetchPage(pre, page); err != nil {
+                    if ctx.Err() == nil && pre.Err() != nil {
+                        stopped = context.Cause(pre) // shutdown: stop, don't cancel the write
+                        return nil
+                    }
+                    return err
+                }
+            }
+            return nil
+        }),
+    )
+    if err != nil {
+        return err
+    }
+    if err := fo.MoveTo(ctx); err != nil {
+        return err
+    }
+    if err := fo.Wait(ctx); err != nil {
+        return err
+    }
+    if stopped != nil {
+        return stopped // a ShutdownError: skip the commit, the item is aborted
+    }
+    return commit.MoveTo(ctx)
+})
 ```
 
-After 30 seconds the contexts of the remaining items are canceled. `d <= 0` cancels them at once.
+`ctx.Err()` is checked first, as in the partial batch: it tells an abort of the item from a shutdown. A task that
+returns nil counts as a success, so `Wait` returns nil. If the item decides to commit when all its tasks are done,
+the task must report that it stopped early.
+
+## Drain timeout
+
+By default, items finish on their own. To limit how long they may run after shutdown begins, use
+[`OptDrainTimeout`](https://pkg.go.dev/github.com/cardinalby/go-conveyor#OptDrainTimeout):
+
+```go
+c := conveyor.NewConveyor(conveyor.OptDrainTimeout(30 * time.Second))
+```
+
+30 seconds after shutdown begins, the contexts of the remaining items are canceled. `d <= 0` cancels them at once.
 
 If the limit depends on the shutdown cause, or comes from an outside deadline, use
-[`OptGracePeriodFunc`](https://pkg.go.dev/github.com/cardinalby/go-conveyor#OptGracePeriodFunc). The function is
+[`OptDrainContextFunc`](https://pkg.go.dev/github.com/cardinalby/go-conveyor#OptDrainContextFunc). The function is
 called when shutdown begins. When the returned context is done, the item contexts are canceled. A nil context means
 no limit. The two options override each other: the last one wins.
 

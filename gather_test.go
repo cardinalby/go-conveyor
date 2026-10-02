@@ -362,7 +362,7 @@ func TestFanOutWorkPerPoolOrderSurvivesTheWaitingRoom(t *testing.T) {
 // shutdown that cancels in-flight items reaches it there — the wait is not a hole in the cancellation story.
 func TestShutdownReleasesAnItemWaitingForItsWork(t *testing.T) {
 	cause := errors.New("shutting down")
-	c := NewConveyor(OptGracePeriod(0)) // cancel in-flight items at once
+	c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items at once
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
 	commit := c.AddStage(OptName("commit"))

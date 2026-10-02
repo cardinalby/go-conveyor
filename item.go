@@ -2,7 +2,6 @@ package conveyor
 
 import (
 	"context"
-	"errors"
 )
 
 // item identifies one journey through a series and tracks its position and its outstanding background work. Both
@@ -151,20 +150,15 @@ func (it *item) poison(cause error) {
 	}
 }
 
-// asAbort maps the error an aborted item returns to the abort itself. err must wrap a plain context cancellation,
-// e.g. from a driver interrupted mid-call, and either the conveyor canceled the item (its context cause is a
-// ShutdownError), or the item is not canceled and shutdown has begun (a read canceled through UntilShutdown). Any other
-// cause (a failed task or RetainFor) leaves err as it is. Caller holds run.mu.
+// asAbort maps the error of an item the conveyor canceled (its context cause is a ShutdownError) to that cause:
+// whatever it returns then, e.g. a driver error from a call interrupted mid-way, follows from the cancellation. Any
+// other cause (a failed task or RetainFor) leaves err as it is. Needs no lock.
 func (it *item) asAbort(err error) error {
-	if err == nil || isShutdown(err) || !errors.Is(err, context.Canceled) {
+	if err == nil || isShutdown(err) {
 		return err
 	}
-	cause := context.Cause(it.ctx)
-	if isShutdown(cause) {
+	if cause := context.Cause(it.ctx); isShutdown(cause) {
 		return cause
-	}
-	if cause == nil && it.run.shutdownErr != nil {
-		return it.run.shutdownErr
 	}
 	return err
 }

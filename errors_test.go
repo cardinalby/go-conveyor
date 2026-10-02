@@ -203,7 +203,7 @@ func TestErrStaleContextFromFinishedItem(t *testing.T) {
 // TestShutdownErrorFromRunContextCancellation: an item canceled by shutdown sees a ShutdownError whose cause is the
 // Run context's cause, while Run itself returns that raw cause.
 func TestShutdownErrorFromRunContextCancellation(t *testing.T) {
-	c := NewConveyor(OptGracePeriod(0)) // cancel in-flight items at once on shutdown
+	c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items at once on shutdown
 	s := c.AddStage(OptName("s"))
 
 	ctx, cancel := context.WithCancel(context.Background())

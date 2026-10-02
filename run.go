@@ -3,8 +3,9 @@ package conveyor
 import (
 	"context"
 	"math"
-	"slices"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // run holds the mutable state of a single Run invocation. A fresh run is allocated per Run so state never leaks
@@ -49,12 +50,15 @@ type run struct {
 	// shutdownErr is the ShutdownError with the trigger as cause, set with it. Its presence is the "shutdown has begun"
 	// flag that UntilShutdown contexts and the abort rules check under mu.
 	shutdownErr *shutdownError
+	// shutdownBegun mirrors shutdownErr != nil for the lock-free fast path of UntilShutdown. Set with it, never
+	// cleared.
+	shutdownBegun atomic.Bool
+	shutdownAt    time.Time // when shutdownErr was set; OptDrainTimeout counts from it
 	// shutdownCtx is canceled with shutdownErr in the same step that sets it, and when Run returns. UntilShutdown
 	// contexts watch it.
 	shutdownCtx    context.Context
 	cancelShutdown context.CancelCauseFunc
-	lateErrs       []error        // *itemError of the items that failed after the trigger
-	drainErr       error          // cause of the grace period context, if it was done before the items finished
+	drainErr       error          // first problem of the drain: an *itemError after the trigger, or the drain timeout cause
 	workers        sync.WaitGroup // all root-item worker goroutines
 
 	// shutdownCh is closed once, when shutdown begins from either trigger (caller-context cancellation or an
@@ -102,15 +106,14 @@ func (c *conveyor) Run(ctx context.Context, itemProcessor ItemProcessor) error {
 	return r.result(ctx)
 }
 
-// result builds the error Run returns from the trigger of the shutdown, the failures that followed it and the
-// drain outcome. The trigger decides the kind: an ItemError when an item failed first, else a ShutdownError with
+// result builds the error Run returns from the trigger of the shutdown and the drain outcome. The trigger decides the kind: an ItemError when an item failed first, else a ShutdownError with
 // the Run context's cause. It is nil if the Run context was never canceled and nothing failed.
 func (r *run) result(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if ie, ok := r.trigger.(*itemError); ok {
 		// A copy: items keep ie as their cancellation cause and must not see the run-level data.
-		return &itemError{unit: ie.unit, err: ie.err, drain: r.drainErr, items: slices.Clone(r.lateErrs)}
+		return &itemError{unit: ie.unit, err: ie.err, drain: r.drainErr}
 	}
 	cause := r.trigger
 	if cause == nil {
@@ -119,7 +122,7 @@ func (r *run) result(ctx context.Context) error {
 	if cause == nil {
 		return nil
 	}
-	return &shutdownError{cause: cause, drain: r.drainErr, items: slices.Clone(r.lateErrs)}
+	return &shutdownError{cause: cause, drain: r.drainErr}
 }
 
 // tryRun creates the run and publishes it as currentRun, under runMu.
@@ -148,7 +151,7 @@ func (c *conveyor) stopRun() {
 
 // watchShutdown waits for shutdown to begin — from either trigger: the caller cancels ctx, or an item error
 // closes shutdownCh — and then bounds how long the in-flight items may keep running: it asks the configured
-// GracePeriodFunc for the grace period context (see OptGracePeriodFunc) and cancels the items once that context is
+// DrainContextFunc for the drain context (see OptDrainContextFunc) and cancels the items once that context is
 // done. No func, or a nil context from it, leaves the items to finish on their own.
 //
 // It exits early (without touching in-flight items, and without asking the func) if the run drains before any
@@ -165,25 +168,32 @@ func (r *run) watchShutdown(ctx context.Context, stopWatch <-chan struct{}, done
 		// shutdown already begun by an item error
 	}
 
-	grace := r.conveyor.gracePeriodFunc
-	if grace == nil {
+	drainFunc := r.conveyor.drainContext
+	if drainFunc == nil {
 		return // no limit: in-flight items are left to finish
 	}
-	graceCtx, cancel := grace(r.shutdownCause())
+	start, cause := r.shutdownCause()
+	drainCtx, cancel := drainFunc(start, cause)
 	if cancel != nil {
-		// Release the grace period context (a timer, typically) as soon as it is out of use: the watcher outlives the
+		// Release the drain context (a timer, typically) as soon as it is out of use: the watcher outlives the
 		// items it bounds by nothing, and Run joins it before returning.
 		defer cancel()
 	}
-	if graceCtx == nil {
+	if drainCtx == nil {
 		return // the caller declined a limit for this shutdown
 	}
 	select {
-	case <-graceCtx.Done():
+	case <-drainCtx.Done():
 		r.mu.Lock()
-		r.drainErr = context.Cause(graceCtx)
+		// Run joins this watcher only after the items have finished, so a drain context that is done with or after them
+		// (always, if it was born done) must not count as an overrun.
+		if r.inFlight.val > 0 {
+			if r.drainErr == nil { // an item failure that came first is kept
+				r.drainErr = context.Cause(drainCtx)
+			}
+			r.cancelInFlight() // the items outlived the drain timeout
+		}
 		r.mu.Unlock()
-		r.cancelInFlight() // the items outlived the grace period
 	case <-stopWatch:
 	}
 }
@@ -198,13 +208,15 @@ func (r *run) beginShutdown(cause error) {
 }
 
 // markShutdownLocked records that shutdown has begun: it stops new items from being created, cancels the
-// UntilShutdown contexts, and signals the watcher (which applies the grace period). cause becomes the trigger unless
+// UntilShutdown contexts, and signals the watcher (which applies the drain timeout). cause becomes the trigger unless
 // an earlier one is kept. Idempotent. The caller holds r.mu and must broadcast.
 func (r *run) markShutdownLocked(cause error) {
 	r.stopCreating = true
 	if r.trigger == nil {
 		r.trigger = cause
 		r.shutdownErr = &shutdownError{cause: cause}
+		r.shutdownAt = time.Now()
+		r.shutdownBegun.Store(true)
 		// Under mu: node methods check shutdownErr in the same lock hold as an entry, so an UntilShutdown context
 		// never enters a node after this point, even before its Done channel is closed.
 		r.cancelShutdown(r.shutdownErr)
@@ -216,28 +228,23 @@ func (r *run) markShutdownLocked(cause error) {
 // items blocked in a node method return promptly (child items are canceled with them, their contexts descending
 // from their parents'). Code inside an ItemProcessor that ignores its context (e.g. a bare channel receive) is not
 // forcibly interrupted — only node calls unblock. Items already canceled individually (the error cascade in
-// completeItem) keep their more specific cause, since the first cancellation of a context wins.
+// completeItem) keep their more specific cause, since the first cancellation of a context wins. Caller holds mu.
 func (r *run) cancelInFlight() {
-	r.mu.Lock()
-	cause := r.shutdownErr
-	r.mu.Unlock()
-	r.cancelItems(cause)
-	r.mu.Lock()
+	r.cancelItems(r.shutdownErr)
 	r.cond.Broadcast()
-	r.mu.Unlock()
 }
 
-// shutdownCause is why the shutdown began, as the GracePeriodFunc is told: the first failed item's own error, or
-// the Run context's cancellation cause. Deliberately not the grace period context's own cause: an expired
-// grace period says nothing an item does not already know, while the trigger does (it is reported by
+// shutdownCause is when the shutdown began, and why, as the DrainContextFunc is told: the first failed item's own
+// error, or the Run context's cancellation cause. Deliberately not the drain context's own cause: an expired
+// drain timeout says nothing an item does not already know, while the trigger does (it is reported by
 // RunError.DrainError instead).
-func (r *run) shutdownCause() error {
+func (r *run) shutdownCause() (time.Time, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if ie, ok := r.trigger.(*itemError); ok {
-		return ie.err
+		return r.shutdownAt, ie.err
 	}
-	return r.trigger
+	return r.shutdownAt, r.trigger
 }
 
 // cancelLater cancels every root item younger than it with the shutdown error. Caller holds mu and must broadcast.
@@ -331,7 +338,8 @@ func (r *run) acquireItem(arrived bool) *item {
 // (see Wave). Where it goes depends on the kind of item:
 //   - a child reports it to the wave that created it, which cancels its parent (fail-fast) and surfaces there;
 //   - a root item's real (non-shutdown) error triggers error-shutdown: record the first error, stop creating, and
-//     cancel every later item so they abort while earlier items keep finishing;
+//     cancel every later item so they abort while earlier items keep finishing; after the trigger, the first such
+//     error is the drain error;
 //   - a root item's abort during a shutdown cancels every later item too (the abort cascade), so no later item
 //     gets past it.
 func (r *run) completeItem(it *item, procErr error) {
@@ -341,10 +349,15 @@ func (r *run) completeItem(it *item, procErr error) {
 	it.returned = true
 	r.dropDormant(it, math.MaxInt) // work prepared for a fan-out never entered: nothing waits for it
 
-	// A real processor error aborts the item's own still-running background work; a graceful return lets it
+	// Any processor error, an abort too, cancels the item's own still-running background work; a nil return lets it
 	// finish (a live task owns its slot and cannot be force-freed).
-	if procErr != nil && !isShutdown(procErr) {
+	if procErr != nil {
 		it.poison(procErr)
+	}
+	// A root failure after the trigger is the drain error from now on, not only once the join below is over: a drain
+	// timeout during the join must not take its place.
+	if it.parentWave == nil && procErr != nil && !isShutdown(procErr) && r.trigger != nil && r.drainErr == nil {
+		r.drainErr = &itemError{unit: r.itemUnit(it), err: procErr}
 	}
 	// An open fan-out body is sealed: the processor's path into it is over, and an idle body finishes only once
 	// sealed, so the wait below would otherwise never end. It still grows from its own running work; an error of it
@@ -370,11 +383,11 @@ func (r *run) completeItem(it *item, procErr error) {
 	}
 	if it.parentWave == nil && effErr != nil && !isShutdownErr {
 		ie := &itemError{unit: r.itemUnit(it), err: effErr}
-		if r.trigger != nil {
-			r.lateErrs = append(r.lateErrs, ie) // the shutdown began earlier; this failure is reported beside it
+		if r.trigger != nil && r.drainErr == nil {
+			r.drainErr = ie // the shutdown began earlier; this is the first failure of the drain
 		}
 		// Cancel every later item immediately (error semantics), with the trigger as the shutdown cause: this error,
-		// or the earlier event that began the shutdown. Earlier items are left to finish, bounded by the grace period
+		// or the earlier event that began the shutdown. Earlier items are left to finish, bounded by the drain timeout
 		// via the watcher that markShutdownLocked wakes.
 		r.markShutdownLocked(ie)
 		r.cancelLater(it)

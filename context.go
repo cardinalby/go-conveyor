@@ -55,7 +55,8 @@ func ItemNoFromContext(ctx context.Context) (no int64, ok bool) {
 
 // UntilShutdown returns a context derived from ctx, an item's context, that is also done once shutdown of the run
 // begins: the Run context is canceled, or an item fails. Its cause is then a ShutdownError. If shutdown has already
-// begun, the context is born done. Node methods called with it fail after shutdown has begun.
+// begun, the context is born done. Its Done channel may close a moment after shutdown begins, but node methods
+// called with it fail from the moment shutdown begins.
 //
 // Use it for the part of the path that may stop at once, such as reading the input and moving into the first node
 // with side effects; use ctx after that:
@@ -63,15 +64,23 @@ func ItemNoFromContext(ctx context.Context) (no int64, ok bool) {
 //	pre := conveyor.UntilShutdown(ctx)
 //	msg, err := reader.Fetch(pre)
 //	if err != nil {
-//		return err // an abort, not a failure, once shutdown has begun
+//		if pre.Err() != nil {
+//			return context.Cause(pre) // a ShutdownError: an abort, not a failure
+//		}
+//		return err
 //	}
 //	if err := write.MoveTo(pre); err != nil {
-//		return err
+//		return err // a ShutdownError once shutdown has begun
 //	}
 //	// from here on, use ctx
 //
-// An error wrapping context.Canceled returned after shutdown has begun counts as an abort (see Conveyor.Run). An
-// item may also go on with ctx after its UntilShutdown context is done, e.g. to finish a partial batch.
+// The error of a call canceled through it, e.g. one wrapping context.Canceled, is a failure if returned as is (see
+// Conveyor.Run). An item may also go on with ctx after its UntilShutdown context is done, e.g. to finish a partial
+// batch.
+//
+// Calls with the item's own ctx return the same context. Any other ctx gets a new context that lives until ctx or
+// the item is done, so call it once per item and derive from the result (context.WithValue(pre, ...)) instead of
+// calling UntilShutdown(context.WithValue(ctx, ...)) in a loop.
 //
 // A ctx that does not belong to a conveyor item is returned unchanged.
 func UntilShutdown(ctx context.Context) context.Context {
@@ -80,12 +89,14 @@ func UntilShutdown(ctx context.Context) context.Context {
 		return ctx
 	}
 	r := it.run
+	// Already one: no lock needed. A shutdown that begins right after the load is the same as one that begins right
+	// after the return, and node methods check shutdownErr under mu.
+	m, ok := ctx.Value(untilShutdownCtxKey).(untilShutdownMark)
+	if ok && m.r == r && m.done == ctx.Done() && (!r.shutdownBegun.Load() || ctx.Err() != nil) {
+		return ctx
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	m, ok := ctx.Value(untilShutdownCtxKey).(untilShutdownMark)
-	if ok && m.r == r && m.done == ctx.Done() && (r.shutdownErr == nil || ctx.Err() != nil) {
-		return ctx // already one
-	}
 	if ctx != it.ctx {
 		out, _ := r.newUntilShutdown(ctx)
 		return out
@@ -108,7 +119,15 @@ func (r *run) newUntilShutdown(ctx context.Context) (context.Context, context.Ca
 		return out, cancel
 	}
 	stop := context.AfterFunc(r.shutdownCtx, func() { cancel(context.Cause(r.shutdownCtx)) })
-	context.AfterFunc(d, func() { stop() })
+	h := r.conveyor.watchHook
+	if h != nil {
+		h(1)
+	}
+	context.AfterFunc(d, func() {
+		if stop() && h != nil {
+			h(-1)
+		}
+	})
 	return out, cancel
 }
 

@@ -25,11 +25,10 @@ var (
 
 // RunError describes why a run shut down and how the shutdown went. Run returns one of its two kinds: a
 // ShutdownError when the Run context was canceled first, or an ItemError when an item failed first. Only the
-// event that came first decides the kind. Failures of other items that happen during the shutdown are listed by
-// ItemErrors.
+// event that came first decides the kind. DrainError tells how the items in flight at that moment finished.
 //
 // Items see a ShutdownError too, as the cancellation cause of their context when the conveyor aborts them. There,
-// DrainError and ItemErrors are always nil: they describe the whole shutdown and are known only when Run returns.
+// DrainError is always nil: it describes the whole shutdown and is known only when Run returns.
 //
 // The interface is sealed: only the conveyor creates these errors.
 type RunError interface {
@@ -37,14 +36,12 @@ type RunError interface {
 	// Unwrap returns the trigger of the shutdown, never nil: the Run context's cancellation cause for a
 	// ShutdownError, the failed item's own error for an ItemError.
 	Unwrap() error
-	// DrainError is nil if all in-flight items finished on their own. If the grace period (see OptGracePeriod)
-	// ended first, it is the cause of its context (e.g. context.DeadlineExceeded) and the remaining items were
-	// canceled.
+	// DrainError is nil if the items in flight when the shutdown began all finished without failing. Else it is
+	// the first problem of the drain: an ItemError, if another item failed first, or the cause of the drain
+	// context (see OptDrainTimeout), e.g. context.DeadlineExceeded, if the drain timed out first and the remaining
+	// items were canceled. It never repeats the trigger. Items aborted by the conveyor are not failures (see
+	// Conveyor.Run).
 	DrainError() error
-	// ItemErrors returns the failures of other items during the shutdown, in completion order. It does not repeat
-	// the trigger and does not include items aborted by the conveyor. Errors that a canceled item returns
-	// because of its cancellation, but not as a plain context.Canceled, are listed too.
-	ItemErrors() []error
 	sealedRunError()
 }
 
@@ -52,8 +49,8 @@ type RunError interface {
 // gives the context's cancellation cause, so errors.Is(err, ErrSignalReceived{}) works.
 //
 // It is also the cancellation cause of an item's context when the conveyor aborts the item: because the Run
-// context was canceled, an earlier item failed (Unwrap gives its ItemError) or was aborted, or the grace period is
-// over. And it is the cause of an UntilShutdown context once shutdown begins. Recover it with errors.As.
+// context was canceled, an earlier item failed (Unwrap gives its ItemError) or was aborted, or the drain timed
+// out. And it is the cause of an UntilShutdown context once shutdown begins. Recover it with errors.As.
 // errors.Is(err, context.Canceled) reaches the wrapped trigger.
 type ShutdownError interface {
 	RunError
@@ -74,16 +71,14 @@ type ItemError interface {
 // shutdownError is the only ShutdownError implementation.
 type shutdownError struct {
 	cause error
-	// drain and items are set only on the value Run returns.
+	// drain is set only on the value Run returns.
 	drain error
-	items []error
 }
 
 func (e *shutdownError) sealedRunError()      {}
 func (e *shutdownError) sealedShutdownError() {}
 func (e *shutdownError) Unwrap() error        { return e.cause }
 func (e *shutdownError) DrainError() error    { return e.drain }
-func (e *shutdownError) ItemErrors() []error  { return e.items }
 
 func (e *shutdownError) Error() string {
 	msg := "conveyor is shutting down"
@@ -97,29 +92,23 @@ func (e *shutdownError) Error() string {
 type itemError struct {
 	unit Unit
 	err  error
-	// drain and items are set only on the value Run returns.
+	// drain is set only on the value Run returns.
 	drain error
-	items []error
 }
 
-func (e *itemError) sealedRunError()     {}
-func (e *itemError) sealedItemError()    {}
-func (e *itemError) Unit() Unit          { return e.unit }
-func (e *itemError) Unwrap() error       { return e.err }
-func (e *itemError) DrainError() error   { return e.drain }
-func (e *itemError) ItemErrors() []error { return e.items }
-func (e *itemError) Error() string       { return e.err.Error() + runErrorSuffix(e) }
+func (e *itemError) sealedRunError()   {}
+func (e *itemError) sealedItemError()  {}
+func (e *itemError) Unit() Unit        { return e.unit }
+func (e *itemError) Unwrap() error     { return e.err }
+func (e *itemError) DrainError() error { return e.drain }
+func (e *itemError) Error() string     { return e.err.Error() + runErrorSuffix(e) }
 
 // runErrorSuffix tells in the error text that the shutdown had more to report, so it shows up in logs.
 func runErrorSuffix(e RunError) string {
-	var s string
-	if n := len(e.ItemErrors()); n > 0 {
-		s += fmt.Sprintf(" (and %d more item errors)", n)
-	}
 	if d := e.DrainError(); d != nil {
-		s += fmt.Sprintf(" (drain: %v)", d)
+		return fmt.Sprintf(" (drain: %v)", d)
 	}
-	return s
+	return ""
 }
 
 // isShutdown reports whether err is, or wraps, a shutdown cancellation.

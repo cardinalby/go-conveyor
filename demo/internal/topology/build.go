@@ -28,7 +28,7 @@ type nodeHost interface {
 // Build interprets spec into a fresh Conveyor: one AddStage/AddFanOut/AddPool/AddLane call per node/branch,
 // recursing into a lane's own interior nodes exactly like the top level, with OptName/SetLimit/SetQueueSize applied
 // from the spec, plus whatever options the caller passes through — see runtime.Manager.Run, which supplies
-// OptGracePeriodFunc so its own force-stop button can cancel in-flight items on demand instead of leaving them to
+// OptDrainContextFunc so its own force-stop button can cancel in-flight items on demand instead of leaving them to
 // finish on their own.
 //
 // It returns an error for a malformed spec (a blank, reserved or duplicate id, an unknown Kind) rather than letting

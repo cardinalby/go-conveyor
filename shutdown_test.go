@@ -39,7 +39,7 @@ func assertShutdownCause(t *testing.T, what string, err error, want error) {
 	}
 }
 
-// TestGracefulShutdownFinishesInFlightItems: with no OptGracePeriod, cancelling the Run context only stops
+// TestGracefulShutdownFinishesInFlightItems: with no OptDrainTimeout, cancelling the Run context only stops
 // item creation — every item already in flight finishes its whole journey, background work included.
 func TestGracefulShutdownFinishesInFlightItems(t *testing.T) {
 	const perItem = 2
@@ -103,12 +103,12 @@ func TestGracefulShutdownFinishesInFlightItems(t *testing.T) {
 	}
 }
 
-// TestGracePeriodAlreadyDoneCancelsInFlight: a grace period context that is already done cancels every in-flight
+// TestDrainContextAlreadyDoneCancelsInFlight: a drain context that is already done cancels every in-flight
 // item at once, so blocked node calls and ctx-respecting pool work return promptly with the run cause as shutdown
 // cause.
-func TestGracePeriodAlreadyDoneCancelsInFlight(t *testing.T) {
+func TestDrainContextAlreadyDoneCancelsInFlight(t *testing.T) {
 	cause := errors.New("stop now")
-	c := NewConveyor(OptGracePeriod(0))
+	c := NewConveyor(OptDrainTimeout(0))
 	fo := c.AddFanOut(OptName("fo")).SetLimit(4)
 	pool := fo.AddPool(OptName("pool")).SetLimit(2)
 	commit := c.AddStage(OptName("commit")) // exclusive: the items behind block in MoveTo
@@ -172,11 +172,11 @@ func TestGracePeriodAlreadyDoneCancelsInFlight(t *testing.T) {
 	}
 }
 
-// TestShutdownGracePeriodLetsItemsDrain: with a timer-backed grace period context, items that drain inside the grace
-// period are never canceled and complete their journey normally.
-func TestShutdownGracePeriodLetsItemsDrain(t *testing.T) {
+// TestShutdownDrainTimeoutLetsItemsDrain: with a timer-backed drain context, items that drain inside the
+// timeout are never canceled and complete their journey normally.
+func TestShutdownDrainTimeoutLetsItemsDrain(t *testing.T) {
 	cause := errors.New("time to stop")
-	c := NewConveyor(OptGracePeriod(5 * time.Second)) // generous: the items below drain at once
+	c := NewConveyor(OptDrainTimeout(5 * time.Second)) // generous: the items below drain at once
 	gate := c.AddStage(OptName("gate")).SetLimit(4)
 	commit := c.AddStage(OptName("commit"))
 
@@ -187,7 +187,7 @@ func TestShutdownGracePeriodLetsItemsDrain(t *testing.T) {
 
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	// The items are held until the shutdown has begun, then all drain at once, well inside the grace period.
+	// The items are held until the shutdown has begun, then all drain at once, well inside the drain timeout.
 	go func() {
 		<-ctx.Done()
 		close(release)
@@ -219,7 +219,7 @@ func TestShutdownGracePeriodLetsItemsDrain(t *testing.T) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
 	if canceledEarly.Load() != 0 {
-		t.Fatalf("%d items were canceled inside the grace period", canceledEarly.Load())
+		t.Fatalf("%d items were canceled inside the drain timeout", canceledEarly.Load())
 	}
 	got := committed.all()
 	if int64(len(got)) != created.Load() {
@@ -228,12 +228,12 @@ func TestShutdownGracePeriodLetsItemsDrain(t *testing.T) {
 	assertStrictlyIncreasing(t, got, "commit order after a graceful shutdown")
 }
 
-// TestShutdownGracePeriodOverrunCancelsItems: an item still in flight when the grace period context expires has its
+// TestShutdownDrainTimeoutOverrunCancelsItems: an item still in flight when the drain context expires has its
 // context canceled with a ShutdownError carrying the Run context's cause — not the expiry.
-func TestShutdownGracePeriodOverrunCancelsItems(t *testing.T) {
+func TestShutdownDrainTimeoutOverrunCancelsItems(t *testing.T) {
 	cause := errors.New("time to stop")
-	c := NewConveyor(OptGracePeriod(20 * time.Millisecond)) // tiny: the item below overruns it
-	hold := c.AddStage(OptName("hold"))                     // exclusive: the item behind blocks in MoveTo
+	c := NewConveyor(OptDrainTimeout(20 * time.Millisecond)) // tiny: the item below overruns it
+	hold := c.AddStage(OptName("hold"))                      // exclusive: the item behind blocks in MoveTo
 
 	var mu sync.Mutex
 	seen := map[int64]error{}
@@ -253,7 +253,7 @@ func TestShutdownGracePeriodOverrunCancelsItems(t *testing.T) {
 		}
 		if no == 1 {
 			cancel(cause)
-			<-ic.Done() // nothing releases this item: only the expiring grace period does
+			<-ic.Done() // nothing releases this item: only the expiring drain context does
 			record(no, context.Cause(ic))
 			return context.Cause(ic)
 		}
@@ -266,21 +266,21 @@ func TestShutdownGracePeriodOverrunCancelsItems(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if _, ok := seen[1]; !ok {
-		t.Fatal("item 1 was not canceled when the grace period expired")
+		t.Fatal("item 1 was not canceled when the drain timeout expired")
 	}
 	for no, e := range seen {
 		assertShutdownCause(t, sprintf("item %d", no), e, cause)
 	}
 }
 
-// TestErrorShutdownIsBoundedByGracePeriod: an ItemProcessor error starts a shutdown without the Run context
-// being canceled, so the grace period func is the caller's only notice of it — it is asked, it is told the item
+// TestErrorShutdownIsBoundedByDrainContext: an ItemProcessor error starts a shutdown without the Run context
+// being canceled, so the drain context func is the caller's only notice of it — it is asked, it is told the item
 // error as the cause, and the context it returns is what releases an earlier item that would otherwise never return.
-func TestErrorShutdownIsBoundedByGracePeriod(t *testing.T) {
+func TestErrorShutdownIsBoundedByDrainContext(t *testing.T) {
 	boom := errors.New("boom")
-	graceCause := make(chan error, 1)
-	c := NewConveyor(OptGracePeriodFunc(func(cause error) (context.Context, context.CancelFunc) {
-		graceCause <- cause
+	askedCause := make(chan error, 1)
+	c := NewConveyor(OptDrainContextFunc(func(cause error) (context.Context, context.CancelFunc) {
+		askedCause <- cause
 		shutdownCtx, cancel := context.WithCancel(context.Background())
 		cancel() // at once: item 1 below never returns on its own
 		return shutdownCtx, cancel
@@ -299,7 +299,7 @@ func TestErrorShutdownIsBoundedByGracePeriod(t *testing.T) {
 		switch no {
 		case 1:
 			blocked.Store(true)
-			<-ic.Done() // nothing but the grace period context releases this item
+			<-ic.Done() // nothing but the drain context releases this item
 			item1Err.Store(context.Cause(ic))
 			return context.Cause(ic)
 		case 2:
@@ -315,12 +315,12 @@ func TestErrorShutdownIsBoundedByGracePeriod(t *testing.T) {
 		t.Fatalf("Run error = %v, want %v", err, boom)
 	}
 	select {
-	case got := <-graceCause:
+	case got := <-askedCause:
 		if got != boom {
-			t.Fatalf("grace period func cause = %v, want the item error %v", got, boom)
+			t.Fatalf("drain context func cause = %v, want the item error %v", got, boom)
 		}
 	default:
-		t.Fatal("the grace period func was never asked, so nothing bounded the error shutdown")
+		t.Fatal("the drain context func was never asked, so nothing bounded the error shutdown")
 	}
 	ie, ok := item1Err.Load().(error)
 	if !ok {
@@ -329,18 +329,18 @@ func TestErrorShutdownIsBoundedByGracePeriod(t *testing.T) {
 	assertShutdownCause(t, "item 1", ie, boom)
 }
 
-// TestGracePeriodCancelsItemsLater: a grace period context the caller cancels itself makes the shutdown two-phase.
+// TestDrainContextCancelsItemsLater: a drain context the caller cancels itself makes the shutdown two-phase.
 // The items are left alone while it is live — even though the shutdown has begun — and canceled when it is done,
-// with the cause that started the shutdown rather than the grace period context's own.
-func TestGracePeriodCancelsItemsLater(t *testing.T) {
+// with the cause that started the shutdown rather than the drain context's own.
+func TestDrainContextCancelsItemsLater(t *testing.T) {
 	cause := errors.New("time to stop")
 	forceCtx, forceNow := context.WithCancelCause(context.Background())
 	defer forceNow(nil)
 
-	graceCause := make(chan error, 1)
+	askedCause := make(chan error, 1)
 	asked := make(chan struct{})
-	c := NewConveyor(OptGracePeriodFunc(func(c error) (context.Context, context.CancelFunc) {
-		graceCause <- c
+	c := NewConveyor(OptDrainContextFunc(func(c error) (context.Context, context.CancelFunc) {
+		askedCause <- c
 		close(asked)
 		return forceCtx, nil // the caller owns it; no CancelFunc to hand over
 	}))
@@ -358,9 +358,9 @@ func TestGracePeriodCancelsItemsLater(t *testing.T) {
 			return nil
 		}
 		cancel(cause) // phase one: graceful — item 1 keeps running
-		<-asked       // the conveyor has taken the grace period context
+		<-asked       // the conveyor has taken the drain context
 		if ic.Err() != nil {
-			return errors.New("the item was canceled while the grace period context was still live")
+			return errors.New("the item was canceled while the drain context was still live")
 		}
 		forceNow(errors.New("kill now")) // phase two: forceful
 		<-ic.Done()
@@ -371,22 +371,22 @@ func TestGracePeriodCancelsItemsLater(t *testing.T) {
 	if !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
-	if got := <-graceCause; got != cause {
-		t.Fatalf("grace period func cause = %v, want the Run context cause %v", got, cause)
+	if got := <-askedCause; got != cause {
+		t.Fatalf("drain context func cause = %v, want the Run context cause %v", got, cause)
 	}
 	ie, ok := item1Err.Load().(error)
 	if !ok {
-		t.Fatal("item 1 was never canceled by the grace period context")
+		t.Fatal("item 1 was never canceled by the drain context")
 	}
-	// The shutdown cause is the trigger, not the grace period context's own cause ("kill now").
+	// The shutdown cause is the trigger, not the drain context's own cause ("kill now").
 	assertShutdownCause(t, "item 1", ie, cause)
 }
 
-// TestGracePeriodNilMeansNoLimit: a grace period func that returns no context leaves the in-flight items alone, exactly
-// like configuring no grace period func at all.
-func TestGracePeriodNilMeansNoLimit(t *testing.T) {
+// TestDrainContextNilMeansNoLimit: a drain context func that returns no context leaves the in-flight items alone, exactly
+// like configuring no drain context func at all.
+func TestDrainContextNilMeansNoLimit(t *testing.T) {
 	asked := make(chan struct{})
-	c := NewConveyor(OptGracePeriodFunc(func(error) (context.Context, context.CancelFunc) {
+	c := NewConveyor(OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
 		close(asked)
 		return nil, nil
 	}))
@@ -414,16 +414,16 @@ func TestGracePeriodNilMeansNoLimit(t *testing.T) {
 		t.Fatalf("Run error = %v, want the Run context cancellation", err)
 	}
 	if !committed.Load() {
-		t.Fatal("the item was canceled although the grace period func returned no grace period context")
+		t.Fatal("the item was canceled although the drain context func returned no drain context")
 	}
 }
 
-// TestGracePeriodCancelFuncCalledBeforeRunReturns: the conveyor releases the grace period context it was handed —
+// TestDrainContextCancelFuncCalledBeforeRunReturns: the conveyor releases the drain context it was handed —
 // a timer-backed one must not outlive the run.
-func TestGracePeriodCancelFuncCalledBeforeRunReturns(t *testing.T) {
+func TestDrainContextCancelFuncCalledBeforeRunReturns(t *testing.T) {
 	asked := make(chan struct{})
 	var released atomic.Bool
-	c := NewConveyor(OptGracePeriodFunc(func(error) (context.Context, context.CancelFunc) {
+	c := NewConveyor(OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), testTimeout) // outlives the run
 		close(asked)
 		return shutdownCtx, func() {
@@ -440,7 +440,7 @@ func TestGracePeriodCancelFuncCalledBeforeRunReturns(t *testing.T) {
 			return e
 		}
 		cancel()
-		<-asked // hold the run open until the conveyor has taken the grace period context
+		<-asked // hold the run open until the conveyor has taken the drain context
 		return nil
 	})
 
@@ -448,7 +448,64 @@ func TestGracePeriodCancelFuncCalledBeforeRunReturns(t *testing.T) {
 		t.Fatalf("Run error = %v, want the Run context cancellation", err)
 	}
 	if !released.Load() {
-		t.Fatal("the grace period context's CancelFunc was not called before Run returned")
+		t.Fatal("the drain context's CancelFunc was not called before Run returned")
+	}
+}
+
+// TestDrainTimeoutNoDrainErrorWhenNothingInFlight: a drain context that is done when no item is left in flight (here
+// born done, after the only item has failed) is no overrun: DrainError is nil.
+func TestDrainTimeoutNoDrainErrorWhenNothingInFlight(t *testing.T) {
+	boom := errors.New("boom")
+	c := NewConveyor(OptDrainTimeout(0)).SetItemsLimit(1) // the failing item is the only one, and no later one is made
+	err := c.Run(context.Background(), func(ic context.Context) error { return boom })
+	var re RunError
+	if !errors.As(err, &re) || !errors.Is(err, boom) {
+		t.Fatalf("Run error = %v, want a RunError wrapping %v", err, boom)
+	}
+	if de := re.DrainError(); de != nil {
+		t.Fatalf("DrainError = %v, want nil", de)
+	}
+}
+
+// TestDrainTimeoutCountsFromShutdownStart: the drain context a run uses with OptDrainTimeout(d) ends d after
+// the moment shutdown began (here, an item error), not after the moment the watcher asks for it.
+func TestDrainTimeoutCountsFromShutdownStart(t *testing.T) {
+	const d = time.Hour
+	boom := errors.New("boom")
+	c := NewConveyor(OptDrainTimeout(d)).SetItemsLimit(1)
+	ci := implOf(c)
+	drainFunc := ci.drainContext
+	var deadline, askedAt time.Time
+	var hasDeadline bool
+	ci.drainContext = func(start time.Time, cause error) (context.Context, context.CancelFunc) {
+		askedAt = time.Now()
+		ctx, cancel := drainFunc(start, cause)
+		deadline, hasDeadline = ctx.Deadline()
+		return ctx, cancel
+	}
+	var r *run
+	var failedAt time.Time
+	err := c.Run(context.Background(), func(ic context.Context) error {
+		r = itemOf(ic).run
+		failedAt = time.Now()
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("Run error = %v, want %v", err, boom)
+	}
+	// Run joins the watcher, so its writes are visible here.
+	if askedAt.IsZero() {
+		t.Fatal("the drain context was never asked for")
+	}
+	r.mu.Lock()
+	at := r.shutdownAt
+	r.mu.Unlock()
+	if at.Before(failedAt) || at.After(askedAt) {
+		t.Fatalf("shutdownAt = %v, want between the item error at %v and the drain context request at %v",
+			at, failedAt, askedAt)
+	}
+	if !hasDeadline || !deadline.Equal(at.Add(d)) {
+		t.Fatalf("drain context deadline = %v (set: %v), want shutdownAt + %v = %v", deadline, hasDeadline, d, at.Add(d))
 	}
 }
 
@@ -564,7 +621,7 @@ func TestFirstItemErrorWins(t *testing.T) {
 // ShutdownError a node call handed it does not make Run fail — Run still reports the Run context's cause.
 func TestShutdownErrorFromProcessorIsNotAFailure(t *testing.T) {
 	cause := errors.New("stop now")
-	c := NewConveyor(OptGracePeriod(0))
+	c := NewConveyor(OptDrainTimeout(0))
 	hold := c.AddStage(OptName("hold")) // exclusive: the item behind blocks in MoveTo
 
 	var wrapped atomic.Int64
@@ -593,8 +650,10 @@ func TestShutdownErrorFromProcessorIsNotAFailure(t *testing.T) {
 	if !errors.As(err, &se) {
 		t.Fatalf("Run returned %v, want a ShutdownError", err)
 	}
-	if n := len(se.ItemErrors()); n != 0 {
-		t.Fatalf("ItemErrors = %v, want none: the aborted items are not failures", se.ItemErrors())
+	// Item 1 outlives the drain timeout, so the drain reports its end, not a failure: the aborted items are not
+	// failures.
+	if de := se.DrainError(); !errors.Is(de, context.DeadlineExceeded) {
+		t.Fatalf("DrainError = %v, want %v", de, context.DeadlineExceeded)
 	}
 	if wrapped.Load() == 0 {
 		t.Fatal("no item returned a wrapped ShutdownError, so the test proved nothing")
@@ -658,12 +717,12 @@ func TestGracefulShutdownJoinsChildren(t *testing.T) {
 	}
 }
 
-// TestShutdownCancelsChildren: when the grace period context is done at once, the in-flight children of a lane are
+// TestShutdownCancelsChildren: when the drain context is done at once, the in-flight children of a lane are
 // canceled with the shutdown cause, they unwind, and Run waits for all of them.
 func TestShutdownCancelsChildren(t *testing.T) {
 	const children = 4
 	cause := errors.New("stop now")
-	c := NewConveyor(OptGracePeriod(0))
+	c := NewConveyor(OptDrainTimeout(0))
 	fo := c.AddFanOut(OptName("fo"))
 	lane := fo.AddLane(OptName("lane"))
 	inner := lane.AddStage(OptName("inner")).SetLimit(children)

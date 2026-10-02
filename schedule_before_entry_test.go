@@ -408,7 +408,7 @@ func TestScheduleBeforeEntry_ReturningDiscardsTheWork(t *testing.T) {
 // TestScheduleBeforeEntry_CancellationDiscardsTheWork: an item canceled while waiting to enter never activates its
 // prepared work; a Schedule after the cancellation prepares nothing either.
 func TestScheduleBeforeEntry_CancellationDiscardsTheWork(t *testing.T) {
-	c := NewConveyor(OptGracePeriod(0))
+	c := NewConveyor(OptDrainTimeout(0))
 	read := c.AddStage(OptName("read")).SetLimit(2)
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
@@ -633,7 +633,7 @@ func TestScheduleBeforeEntry_DiscardedTaskStaysConsumed(t *testing.T) {
 // method observes the cancellation, not only when the processor returns, so a processor that winds down slowly
 // does not keep the prepared callbacks alive.
 func TestScheduleBeforeEntry_CanceledItemDropsTheWorkAtOnce(t *testing.T) {
-	c := NewConveyor(OptGracePeriod(0))
+	c := NewConveyor(OptDrainTimeout(0))
 	read := c.AddStage(OptName("read")).SetLimit(2)
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))

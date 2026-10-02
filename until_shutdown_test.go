@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -80,8 +81,8 @@ func TestUntilShutdownOnRunCancel(t *testing.T) {
 	}
 	err := recvErr(t, "Run", done)
 	assertShutdownCause(t, "Run", err, cause)
-	if re := err.(RunError); len(re.ItemErrors()) != 0 {
-		t.Fatalf("ItemErrors = %v, want none", re.ItemErrors())
+	if de := err.(RunError).DrainError(); de != nil {
+		t.Fatalf("DrainError = %v, want nil", de)
 	}
 }
 
@@ -295,8 +296,8 @@ func TestUntilShutdownMoveToBlocked(t *testing.T) {
 			}
 			err := recvErr(t, "Run", done)
 			assertShutdownCause(t, "Run", err, cause)
-			if re := err.(RunError); len(re.ItemErrors()) != 0 {
-				t.Fatalf("ItemErrors = %v, want none", re.ItemErrors())
+			if de := err.(RunError).DrainError(); de != nil {
+				t.Fatalf("DrainError = %v, want nil", de)
 			}
 			if e := firstErr.Load(); e != nil {
 				t.Fatalf("item in write failed: %v", e)
@@ -384,72 +385,140 @@ func TestUntilShutdownPartialBatch(t *testing.T) {
 	}
 	err := recvErr(t, "Run", done)
 	assertShutdownCause(t, "Run", err, cause)
-	if re := err.(RunError); len(re.ItemErrors()) != 0 {
-		t.Fatalf("ItemErrors = %v, want none", re.ItemErrors())
+	if de := err.(RunError).DrainError(); de != nil {
+		t.Fatalf("DrainError = %v, want nil", de)
 	}
 	if !committed.Load() || batchLen.Load() != 2 {
 		t.Fatalf("committed = %v with %d values, want a partial batch of 2", committed.Load(), batchLen.Load())
 	}
 }
 
-// TestUntilShutdownWrappedCanceledIsAbort: an error wrapping context.Canceled returned once shutdown has begun is an
-// abort, not a failure, for either trigger. Before any shutdown it is a failure.
-func TestUntilShutdownWrappedCanceledIsAbort(t *testing.T) {
+// TestUntilShutdownWrappedCanceled: a read canceled through UntilShutdown whose error (wrapping context.Canceled)
+// is returned as is fails the item, for either trigger: it is the DrainError. Returning context.Cause(pre) instead is
+// an abort. An item the conveyor canceled is aborted whatever it returns. Before any shutdown such an error is a
+// failure too.
+func TestUntilShutdownWrappedCanceled(t *testing.T) {
+	errFetch := errors.New("fetch")
 	fetch := func(ctx context.Context) error {
 		<-ctx.Done()
-		return fmt.Errorf("fetch: %w", context.Canceled)
+		return fmt.Errorf("%w: %w", errFetch, context.Canceled)
 	}
-	t.Run("run canceled", func(t *testing.T) {
-		cause := errors.New("stop")
-		c := NewConveyor()
-		ready := make(chan struct{})
-		cancel, done := runAsync(c, func(ic context.Context) error {
-			if itemNo(ic) != 1 {
+	read := func(ic context.Context, returnCause bool) error {
+		pre := UntilShutdown(ic)
+		err := fetch(pre)
+		if returnCause && pre.Err() != nil {
+			return context.Cause(pre)
+		}
+		return err
+	}
+	// assertDrain fails unless DrainError is nil (returnCause) or an ItemError of item 1 in unit u with the fetch error.
+	assertDrain := func(t *testing.T, err error, returnCause bool, u Unit) {
+		t.Helper()
+		de := err.(RunError).DrainError()
+		if returnCause {
+			if de != nil {
+				t.Fatalf("DrainError = %v, want nil", de)
+			}
+			return
+		}
+		var ie ItemError
+		if !errors.As(de, &ie) || !errors.Is(ie.Unwrap(), errFetch) || !errors.Is(de, context.Canceled) ||
+			ie.Unit() != u {
+			t.Fatalf("DrainError = %v, want an ItemError in %v with the fetch error", de, u)
+		}
+	}
+	for _, returnCause := range []bool{false, true} {
+		t.Run(fmt.Sprintf("run canceled/return cause=%v", returnCause), func(t *testing.T) {
+			cause := errors.New("stop")
+			c := NewConveyor()
+			ready := make(chan struct{})
+			cancel, done := runAsync(c, func(ic context.Context) error {
+				if itemNo(ic) != 1 {
+					<-ic.Done()
+					return context.Cause(ic)
+				}
+				signal(ready)
+				return read(ic, returnCause)
+			})
+			<-ready
+			cancel(cause)
+			err := recvErr(t, "Run", done)
+			assertShutdownCause(t, "Run", err, cause)
+			assertDrain(t, err, returnCause, c.StartingStage())
+		})
+		t.Run(fmt.Sprintf("item failed/return cause=%v", returnCause), func(t *testing.T) {
+			boom := errors.New("boom")
+			c := NewConveyor()
+			s := c.AddStage(OptName("s")).SetLimit(2)
+			inS := make(chan struct{})
+			_, done := runAsync(c, func(ic context.Context) error {
+				switch itemNo(ic) {
+				case 1:
+					if err := s.MoveTo(ic); err != nil {
+						return err
+					}
+					signal(inS)
+					return read(ic, returnCause)
+				case 2:
+					<-inS
+					if err := s.MoveTo(ic); err != nil {
+						return err
+					}
+					return boom
+				}
 				<-ic.Done()
 				return context.Cause(ic)
+			})
+			err := recvErr(t, "Run", done)
+			var ie ItemError
+			if !errors.As(err, &ie) || ie.Unwrap() != boom {
+				t.Fatalf("Run = %v, want an ItemError with %v", err, boom)
 			}
-			signal(ready)
-			return fetch(UntilShutdown(ic))
+			assertDrain(t, err, returnCause, s)
 		})
-		<-ready
-		cancel(cause)
-		err := recvErr(t, "Run", done)
-		assertShutdownCause(t, "Run", err, cause)
-		if re := err.(RunError); len(re.ItemErrors()) != 0 {
-			t.Fatalf("ItemErrors = %v, want none", re.ItemErrors())
-		}
-	})
-	t.Run("item failed", func(t *testing.T) {
+	}
+	t.Run("canceled by the conveyor", func(t *testing.T) {
 		boom := errors.New("boom")
 		c := NewConveyor()
 		s := c.AddStage(OptName("s")).SetLimit(2)
-		inS := make(chan struct{})
+		w := c.AddStage(OptName("w"))
+		inW := make(chan struct{})
+		moveErr := make(chan error, 1)
 		_, done := runAsync(c, func(ic context.Context) error {
 			switch itemNo(ic) {
 			case 1:
 				if err := s.MoveTo(ic); err != nil {
 					return err
 				}
-				signal(inS)
-				return fetch(UntilShutdown(ic))
+				if err := w.MoveTo(ic); err != nil {
+					return err
+				}
+				signal(inW)
+				// Fail only once item 2 is blocked behind this one, so the cascade cancels it.
+				if !awaitTrue(func() bool { return parkedOf(c) == 1 }) {
+					return errors.New("item 2 never blocked")
+				}
+				return boom
 			case 2:
-				<-inS
+				<-inW
 				if err := s.MoveTo(ic); err != nil {
 					return err
 				}
-				return boom
+				moveErr <- w.MoveTo(ic)
+				return errors.New("own error after the cancellation") // an abort all the same
 			}
 			<-ic.Done()
 			return context.Cause(ic)
 		})
 		err := recvErr(t, "Run", done)
 		var ie ItemError
-		if !errors.As(err, &ie) || !errors.Is(err, boom) {
+		if !errors.As(err, &ie) || ie.Unwrap() != boom {
 			t.Fatalf("Run = %v, want an ItemError with %v", err, boom)
 		}
-		if len(ie.ItemErrors()) != 0 {
-			t.Fatalf("ItemErrors = %v, want none", ie.ItemErrors())
+		if de := ie.DrainError(); de != nil {
+			t.Fatalf("DrainError = %v, want nil", de)
 		}
+		assertShutdownCause(t, "item 2 MoveTo", recvErr(t, "item 2", moveErr), boom)
 	})
 	t.Run("no shutdown", func(t *testing.T) {
 		c := NewConveyor()
@@ -464,56 +533,137 @@ func TestUntilShutdownWrappedCanceledIsAbort(t *testing.T) {
 }
 
 // TestUntilShutdownAbortCascade: an older item that stops through its UntilShutdown context cancels a younger item
-// that uses its own context, so the younger one never enters a later node. The run reports no item errors.
+// that uses its own context, so the younger one never enters a later node. If it returns context.Cause(pre), it is
+// an abort and DrainError is nil; if it returns the read's wrapped context.Canceled, it is a failure and the
+// DrainError, and the younger item is canceled all the same.
 func TestUntilShutdownAbortCascade(t *testing.T) {
-	cause := errors.New("stop")
-	c := NewConveyor()
-	read := c.AddStage(OptName("read")).SetLimit(2)
-	write := c.AddStage(OptName("write"))
+	for _, returnCause := range []bool{true, false} {
+		t.Run(fmt.Sprintf("return cause=%v", returnCause), func(t *testing.T) {
+			cause := errors.New("stop")
+			c := NewConveyor()
+			read := c.AddStage(OptName("read")).SetLimit(2)
+			write := c.AddStage(OptName("write"))
 
-	inRead := make(chan struct{})
-	youngerErr := make(chan error, 1)
-	var youngerWrote atomic.Bool
-	cancel, done := runAsync(c, func(ic context.Context) error {
-		switch itemNo(ic) {
-		case 1:
-			pre := UntilShutdown(ic)
-			if err := read.MoveTo(ic); err != nil {
-				return err
-			}
-			signal(inRead)
-			<-pre.Done()
-			// The younger item is blocked behind this one in MoveTo(write).
-			if !awaitTrue(func() bool { return parkedOf(c) == 1 }) {
-				return errors.New("item 2 never blocked")
-			}
-			return fmt.Errorf("fetch: %w", context.Canceled)
-		case 2:
+			inRead := make(chan struct{})
+			youngerErr := make(chan error, 1)
+			var youngerWrote atomic.Bool
+			cancel, done := runAsync(c, func(ic context.Context) error {
+				switch itemNo(ic) {
+				case 1:
+					pre := UntilShutdown(ic)
+					if err := read.MoveTo(ic); err != nil {
+						return err
+					}
+					signal(inRead)
+					<-pre.Done()
+					// The younger item is blocked behind this one in MoveTo(write).
+					if !awaitTrue(func() bool { return parkedOf(c) == 1 }) {
+						return errors.New("item 2 never blocked")
+					}
+					if returnCause {
+						return context.Cause(pre)
+					}
+					return fmt.Errorf("fetch: %w", pre.Err())
+				case 2:
+					<-inRead
+					if err := read.MoveTo(ic); err != nil {
+						return err
+					}
+					err := write.MoveTo(ic)
+					if err == nil {
+						youngerWrote.Store(true)
+					}
+					youngerErr <- err
+					return err
+				}
+				<-ic.Done()
+				return context.Cause(ic)
+			})
 			<-inRead
-			if err := read.MoveTo(ic); err != nil {
-				return err
+			waitFor(t, "item 2 blocked in MoveTo(write)", func() bool { return parkedOf(c) == 1 })
+			cancel(cause)
+			assertShutdownCause(t, "younger item", recvErr(t, "item 2", youngerErr), cause)
+			err := recvErr(t, "Run", done)
+			assertShutdownCause(t, "Run", err, cause)
+			de := err.(RunError).DrainError()
+			if returnCause && de != nil {
+				t.Fatalf("DrainError = %v, want nil", de)
 			}
-			err := write.MoveTo(ic)
-			if err == nil {
-				youngerWrote.Store(true)
+			var ie ItemError
+			if !returnCause && (!errors.As(de, &ie) || !errors.Is(de, context.Canceled) || ie.Unit() != Unit(read)) {
+				t.Fatalf("DrainError = %v, want an ItemError in %v with the read's error", de, read)
 			}
-			youngerErr <- err
-			return err
-		}
-		<-ic.Done()
-		return context.Cause(ic)
-	})
-	<-inRead
-	waitFor(t, "item 2 blocked in MoveTo(write)", func() bool { return parkedOf(c) == 1 })
-	cancel(cause)
-	assertShutdownCause(t, "younger item", recvErr(t, "item 2", youngerErr), cause)
-	err := recvErr(t, "Run", done)
-	assertShutdownCause(t, "Run", err, cause)
-	if re := err.(RunError); len(re.ItemErrors()) != 0 {
-		t.Fatalf("ItemErrors = %v, want none", re.ItemErrors())
+			if youngerWrote.Load() {
+				t.Fatal("younger item entered write after an older one stopped")
+			}
+		})
 	}
-	if youngerWrote.Load() {
-		t.Fatal("younger item entered write after an older one was aborted")
+}
+
+// TestUntilShutdownCascadeSameStage: an older item that stops through UntilShutdown inside a stage and returns
+// context.Cause(pre) cancels a younger item in the same stage that already works with its own context, with no drain
+// timeout. If the older item returns nil instead, the younger one is not canceled.
+func TestUntilShutdownCascadeSameStage(t *testing.T) {
+	for _, returnErr := range []bool{true, false} {
+		t.Run(fmt.Sprintf("return error=%v", returnErr), func(t *testing.T) {
+			cause := errors.New("stop")
+			c := NewConveyor()
+			s := c.AddStage(OptName("s")).SetLimit(2)
+
+			inS, youngerInS, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			youngerErr := make(chan error, 1)
+			cancel, done := runAsync(c, func(ic context.Context) error {
+				switch itemNo(ic) {
+				case 1:
+					if err := s.MoveTo(ic); err != nil {
+						return err
+					}
+					signal(inS)
+					pre := UntilShutdown(ic)
+					<-pre.Done()
+					if !returnErr {
+						return nil
+					}
+					return context.Cause(pre) // an abort
+				case 2:
+					<-inS
+					if err := s.MoveTo(ic); err != nil {
+						return err
+					}
+					signal(youngerInS)
+					select {
+					case <-ic.Done():
+					case <-release:
+					}
+					youngerErr <- context.Cause(ic)
+					return context.Cause(ic)
+				}
+				<-UntilShutdown(ic).Done()
+				return nil
+			})
+			<-youngerInS
+			cancel(cause)
+			if returnErr {
+				err, ok := recvErrWithin(youngerErr, 5*time.Second)
+				if !ok {
+					close(release)
+					t.Fatal("younger item in the same stage not canceled after the older one was aborted")
+				}
+				assertShutdownCause(t, "younger item", err, cause)
+			} else {
+				// Item 1 has freed its slot: its completion, where the cascade would cancel item 2, is over.
+				waitFor(t, "item 1 done", func() bool { return occupancyOf(c, s) <= 1 })
+				close(release)
+				if err := recvErr(t, "younger item", youngerErr); err != nil {
+					t.Fatalf("younger item canceled: %v", err)
+				}
+			}
+			err := recvErr(t, "Run", done)
+			assertShutdownCause(t, "Run", err, cause)
+			if de := err.(RunError).DrainError(); de != nil {
+				t.Fatalf("DrainError = %v, want nil", de)
+			}
+		})
 	}
 }
 
@@ -541,9 +691,8 @@ func TestUntilShutdownNoGap(t *testing.T) {
 		writeIdx := write.unit().index
 
 		var mu sync.Mutex
-		var entered, committed []int64
+		var entered, committed, refused []int64
 		var failure atomic.Value
-		var refused atomic.Int64
 		var delays sync.Map
 		delay := func(no int64) time.Duration {
 			if d, ok := delays.Load(no); ok {
@@ -565,7 +714,9 @@ func TestUntilShutdownNoGap(t *testing.T) {
 			}
 			time.Sleep(delay(no))
 			if err := write.MoveTo(pre); err != nil {
-				refused.Add(1)
+				mu.Lock()
+				refused = append(refused, no)
+				mu.Unlock()
 				return err
 			}
 			mu.Lock()
@@ -606,23 +757,31 @@ func TestUntilShutdownNoGap(t *testing.T) {
 
 		err := recvErr(t, "Run", done)
 		assertShutdownCause(t, fmt.Sprintf("seed %d: Run", seed), err, cause)
-		if re := err.(RunError); len(re.ItemErrors()) != 0 {
-			t.Fatalf("seed %d: ItemErrors = %v, want none", seed, re.ItemErrors())
+		if de := err.(RunError).DrainError(); de != nil {
+			t.Fatalf("seed %d: DrainError = %v, want nil", seed, de)
 		}
 		if e := failure.Load(); e != nil {
 			t.Fatalf("seed %d: %v", seed, e)
 		}
+		// No gap: entered and committed are exactly 1..m, and every item refused at write is younger than all of them.
+		// Two items inside commit (limit 2) may record in either order, so committed is compared as a set.
 		assertStrictlyIncreasing(t, entered, fmt.Sprintf("seed %d: entered write", seed))
+		slices.Sort(committed)
 		assertStrictlyIncreasing(t, committed, fmt.Sprintf("seed %d: committed", seed))
 		if len(committed) != len(entered) {
 			t.Fatalf("seed %d: entered %v, committed %v", seed, entered, committed)
+		}
+		for _, no := range refused {
+			if no <= int64(len(entered)) {
+				t.Fatalf("seed %d: item %d refused at write, but entered %v", seed, no, entered)
+			}
 		}
 		for _, no := range entered {
 			if !before[no] {
 				t.Fatalf("seed %d: item %d entered write after shutdown began", seed, no)
 			}
 		}
-		if len(entered) > 0 && refused.Load() > 0 {
+		if len(entered) > 0 && len(refused) > 0 {
 			mixed++
 		}
 	}
@@ -741,15 +900,124 @@ func TestUntilShutdownLaneChild(t *testing.T) {
 	assertShutdownCause(t, "Run", recvErr(t, "Run", done), cause)
 }
 
-// TestUntilShutdownGracePeriodItems: with a grace period, items stopped through UntilShutdown end at once; items
-// using their own context are canceled only when the grace period ends.
-func TestUntilShutdownGracePeriodItems(t *testing.T) {
+// TestUntilShutdownWorkReturn: a pool task or lane child whose read stops through UntilShutdown fails fast if it
+// returns context.Cause(pre): the item and a sibling using its own context are canceled with a ShutdownError. If it
+// returns nil instead, the sibling finishes and the item goes on, with no drain timeout.
+func TestUntilShutdownWorkReturn(t *testing.T) {
+	for _, kind := range []string{"pool task", "lane child"} {
+		for _, returnErr := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/return error=%v", kind, returnErr), func(t *testing.T) {
+				cause := errors.New("stop")
+				c := NewConveyor()
+				fo := c.AddFanOut(OptName("fo"))
+				pool := fo.AddPool(OptName("pool")).SetLimit(2)
+				lane := fo.AddLane(OptName("lane"))
+				laneStage := lane.AddStage(OptName("lane stage")).SetLimit(2) // past the lane's start, both run at once
+				write := c.AddStage(OptName("write"))
+
+				reading, siblingRunning, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+				siblingErr, itemErr := make(chan error, 1), make(chan error, 1)
+				var wrote atomic.Bool
+				var it atomic.Pointer[item]
+				read := func(wctx context.Context) error {
+					pre := UntilShutdown(wctx)
+					signal(reading)
+					<-pre.Done()
+					if !returnErr {
+						return nil
+					}
+					return context.Cause(pre) // an abort
+				}
+				sibling := func(wctx context.Context) error {
+					signal(siblingRunning)
+					select {
+					case <-wctx.Done():
+					case <-release:
+					}
+					siblingErr <- context.Cause(wctx)
+					return nil
+				}
+				cancel, done := runAsync(c, func(ic context.Context) error {
+					if itemNo(ic) != 1 {
+						<-UntilShutdown(ic).Done()
+						return nil
+					}
+					it.Store(itemOf(ic))
+					if err := fo.MoveTo(ic); err != nil {
+						return err
+					}
+					var err error
+					if kind == "pool task" {
+						err = fo.Schedule(ic, pool.NewTask(read), pool.NewTask(sibling))
+					} else {
+						err = fo.Schedule(ic, lane.NewTasks(2, func(cctx context.Context, i int) error {
+							if err := laneStage.MoveTo(cctx); err != nil {
+								return err
+							}
+							if i == 0 {
+								return read(cctx)
+							}
+							return sibling(cctx)
+						}))
+					}
+					if err != nil {
+						return err
+					}
+					err = write.MoveTo(ic)
+					if err == nil {
+						wrote.Store(true)
+					}
+					itemErr <- context.Cause(ic)
+					return err
+				})
+				<-reading
+				<-siblingRunning
+				cancel(cause)
+				if returnErr {
+					err, ok := recvErrWithin(siblingErr, 5*time.Second)
+					if !ok {
+						close(release)
+						t.Fatal("sibling not canceled after the reader returned its error")
+					}
+					assertShutdownCause(t, "sibling", err, cause)
+					assertShutdownCause(t, "item", recvErr(t, "item", itemErr), cause)
+				} else {
+					waitFor(t, "reader done", func() bool {
+						r := it.Load().run
+						r.mu.Lock()
+						defer r.mu.Unlock()
+						return it.Load().pending.running <= 1
+					})
+					close(release)
+					if err := recvErr(t, "sibling", siblingErr); err != nil {
+						t.Fatalf("sibling canceled: %v", err)
+					}
+					if err := recvErr(t, "item", itemErr); err != nil {
+						t.Fatalf("item canceled: %v", err)
+					}
+				}
+				err := recvErr(t, "Run", done)
+				assertShutdownCause(t, "Run", err, cause)
+				if de := err.(RunError).DrainError(); de != nil {
+					t.Fatalf("DrainError = %v, want nil", de)
+				}
+				if wrote.Load() == returnErr {
+					t.Fatalf("item entered write = %v, want %v", wrote.Load(), !returnErr)
+				}
+			})
+		}
+	}
+}
+
+// TestUntilShutdownDrainTimeoutItems: with a drain timeout, items stopped through UntilShutdown end at once; items
+// using their own context are canceled only when the drain times out.
+func TestUntilShutdownDrainTimeoutItems(t *testing.T) {
 	cause := errors.New("stop")
-	graceCtx, endGrace := context.WithCancel(context.Background())
-	defer endGrace()
-	var graceOver atomic.Bool
-	c := NewConveyor(OptGracePeriodFunc(func(error) (context.Context, context.CancelFunc) {
-		return graceCtx, nil
+	drainCtx, endDrain := context.WithCancel(context.Background())
+	defer endDrain()
+	var drainOver atomic.Bool
+	c := NewConveyor(OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
+		return drainCtx, nil
 	}))
 	s := c.AddStage(OptName("s")).SetLimit(2)
 
@@ -764,7 +1032,7 @@ func TestUntilShutdownGracePeriodItems(t *testing.T) {
 			}
 			signal(inS)
 			<-ic.Done()
-			if !graceOver.Load() {
+			if !drainOver.Load() {
 				earlyCancel.Store(true)
 			}
 			ctxErr <- context.Cause(ic)
@@ -783,21 +1051,21 @@ func TestUntilShutdownGracePeriodItems(t *testing.T) {
 	<-waiting
 	cancel(cause)
 	assertShutdownCause(t, "pre item", recvErr(t, "pre item", preErr), cause)
-	graceOver.Store(true)
-	endGrace()
+	drainOver.Store(true)
+	endDrain()
 	assertShutdownCause(t, "ctx item", recvErr(t, "ctx item", ctxErr), cause)
 	if earlyCancel.Load() {
-		t.Fatal("item using its own context was canceled before the grace period ended")
+		t.Fatal("item using its own context was canceled before the drain timed out")
 	}
 	assertShutdownCause(t, "Run", recvErr(t, "Run", done), cause)
 }
 
-// TestOptGracePeriod: items are canceled once the grace period ends (at once for d <= 0), and DrainError reports it.
-func TestOptGracePeriod(t *testing.T) {
+// TestOptDrainTimeout: items are canceled once the drain times out (at once for d <= 0), and DrainError reports it.
+func TestOptDrainTimeout(t *testing.T) {
 	for _, d := range []time.Duration{-time.Second, 0, 50 * time.Millisecond} {
 		t.Run(d.String(), func(t *testing.T) {
 			cause := errors.New("stop")
-			c := NewConveyor(OptGracePeriod(d))
+			c := NewConveyor(OptDrainTimeout(d))
 			ready := make(chan struct{})
 			var canceledAfter time.Duration
 			var begun time.Time
@@ -820,27 +1088,27 @@ func TestOptGracePeriod(t *testing.T) {
 				t.Fatalf("DrainError = %v, want %v", de, context.DeadlineExceeded)
 			}
 			if d > 0 && canceledAfter < d {
-				t.Fatalf("item canceled after %v, before the grace period of %v", canceledAfter, d)
+				t.Fatalf("item canceled after %v, before the drain timeout of %v", canceledAfter, d)
 			}
 		})
 	}
 }
 
-// TestOptGracePeriodLastWins: OptGracePeriod and OptGracePeriodFunc override each other; the last one wins.
-func TestOptGracePeriodLastWins(t *testing.T) {
-	noLimit := OptGracePeriodFunc(func(error) (context.Context, context.CancelFunc) { return nil, nil })
-	cases := []struct {
-		name         string
-		opts         []Option
-		wantCanceled bool
-	}{
-		{"func then duration", []Option{noLimit, OptGracePeriod(0)}, true},
-		{"duration then func", []Option{OptGracePeriod(0), noLimit}, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
+// TestOptDrainTimeoutLastWins: OptDrainTimeout and OptDrainContextFunc override each other; the last one wins.
+func TestOptDrainTimeoutLastWins(t *testing.T) {
+	for _, funcLast := range []bool{false, true} {
+		t.Run(fmt.Sprintf("func last=%v", funcLast), func(t *testing.T) {
+			asked := make(chan struct{})
+			noLimit := OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
+				signal(asked)
+				return nil, nil
+			})
+			opts := []Option{noLimit, OptDrainTimeout(0)}
+			if funcLast {
+				opts = []Option{OptDrainTimeout(0), noLimit}
+			}
 			cause := errors.New("stop")
-			c := NewConveyor(tc.opts...)
+			c := NewConveyor(opts...)
 			ready := make(chan struct{})
 			got := make(chan error, 1)
 			cancel, done := runAsync(c, func(ic context.Context) error {
@@ -849,21 +1117,25 @@ func TestOptGracePeriodLastWins(t *testing.T) {
 					return context.Cause(ic)
 				}
 				signal(ready)
-				if !awaitTrue(func() bool { return shutdownBegun(c) }) {
-					got <- errors.New("shutdown never began")
-					return nil
-				}
 				select {
+				case <-asked:
+					if !funcLast {
+						got <- errors.New("the drain context func was asked although OptDrainTimeout came last")
+						return nil
+					}
+					// The func declined a limit, so the watcher cancels nothing after that.
+					got <- context.Cause(ic)
 				case <-ic.Done():
-				case <-time.After(50 * time.Millisecond):
+					got <- context.Cause(ic)
+				case <-time.After(testTimeout):
+					got <- errors.New("the item was neither canceled nor did the watcher ask the func")
 				}
-				got <- context.Cause(ic)
 				return nil
 			})
 			<-ready
 			cancel(cause)
 			err := recvErr(t, "item", got)
-			if tc.wantCanceled {
+			if !funcLast {
 				assertShutdownCause(t, "item", err, cause)
 			} else if err != nil {
 				t.Fatalf("item canceled: %v, want no limit", err)
@@ -873,8 +1145,8 @@ func TestOptGracePeriodLastWins(t *testing.T) {
 	}
 }
 
-// TestUntilShutdownNoLeak: many calls for one item, with its own context and with derived ones, leave no goroutine
-// or watch behind once the run is over.
+// TestUntilShutdownNoLeak: many calls for one item reuse the cached context for its own context, and with derived
+// ones leave no goroutine behind once the run is over. TestUntilShutdownWatchFreed checks the watches.
 func TestUntilShutdownNoLeak(t *testing.T) {
 	base := runtime.NumGoroutine()
 	c := NewConveyor()
@@ -895,4 +1167,163 @@ func TestUntilShutdownNoLeak(t *testing.T) {
 		t.Fatalf("Run = %v", err)
 	}
 	waitFor(t, "goroutines to return to the baseline", func() bool { return runtime.NumGoroutine() <= base })
+}
+
+// TestUntilShutdownWatchFreed: an UntilShutdown context whose parent is canceled removes its watch on the
+// shutdown, so in a live item the watches do not grow with the number of such contexts.
+func TestUntilShutdownWatchFreed(t *testing.T) {
+	const n = 1000
+	c := NewConveyor()
+	var watches atomic.Int64
+	implOf(c).watchHook = func(delta int) { watches.Add(int64(delta)) }
+	err := runOnce(t, c, func(ic context.Context) error {
+		base := watches.Load()
+		cancels := make([]context.CancelFunc, 0, n)
+		pres := make([]context.Context, 0, n)
+		for i := 0; i < n; i++ {
+			parent, cancelParent := context.WithCancel(ic)
+			cancels = append(cancels, cancelParent)
+			pres = append(pres, UntilShutdown(parent))
+		}
+		if got := watches.Load() - base; got != n {
+			return fmt.Errorf("live watches = %d with %d live contexts, want %d", got, n, n)
+		}
+		for _, cancelParent := range cancels {
+			cancelParent()
+		}
+		for _, pre := range pres {
+			if !errors.Is(context.Cause(pre), context.Canceled) || isShutdown(context.Cause(pre)) {
+				return fmt.Errorf("pre cause = %v, want the parent's cancel", context.Cause(pre))
+			}
+		}
+		// A done context removes its watch on a goroutine of its own.
+		if !awaitTrue(func() bool { return watches.Load() == base }) {
+			return fmt.Errorf("live watches = %d after the contexts are done, want %d", watches.Load(), base)
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v", err)
+	}
+}
+
+// TestUntilShutdownFastPath: before shutdown, a call with an UntilShutdown context (or a value derivation of it)
+// returns that context without taking the run's lock.
+func TestUntilShutdownFastPath(t *testing.T) {
+	c := NewConveyor()
+	err := runOnce(t, c, func(ic context.Context) error {
+		r := itemOf(ic).run
+		own := UntilShutdown(ic)
+		derived := UntilShutdown(context.WithValue(ic, ctxKey(100), 1))
+		for _, pre := range []context.Context{own, derived, context.WithValue(own, ctxKey(101), 2)} {
+			locked, returned := make(chan struct{}), make(chan struct{})
+			var timedOut atomic.Bool
+			go func() {
+				r.mu.Lock()
+				defer r.mu.Unlock() // released in all paths, so a call that waits for it does not hang the test
+				signal(locked)
+				select {
+				case <-returned:
+				case <-time.After(5 * time.Second):
+					timedOut.Store(true)
+				}
+			}()
+			<-locked
+			got := UntilShutdown(pre)
+			signal(returned)
+			if timedOut.Load() {
+				return errors.New("UntilShutdown waited for the run's lock")
+			}
+			if got != pre {
+				return errors.New("UntilShutdown returned a new context, want the same one")
+			}
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v", err)
+	}
+}
+
+// TestUntilShutdownAbortCancelsOwnWork: an item that aborts (returns a ShutdownError while its own context is alive)
+// cancels its own running pool task or RetainFor work. If it returns nil instead, that work finishes.
+func TestUntilShutdownAbortCancelsOwnWork(t *testing.T) {
+	for _, kind := range []string{"pool task", "RetainFor"} {
+		for _, abort := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/abort=%v", kind, abort), func(t *testing.T) {
+				cause := errors.New("stop")
+				c := NewConveyor()
+				hold := c.AddStage(OptName("hold"))
+				fo := c.AddFanOut(OptName("fo"))
+				pool := fo.AddPool(OptName("pool"))
+				write := c.AddStage(OptName("write"))
+
+				running, release := make(chan struct{}), make(chan struct{})
+				workCause := make(chan error, 1)
+				work := func(ctx context.Context) error {
+					signal(running)
+					select {
+					case <-ctx.Done():
+					case <-release:
+					}
+					workCause <- context.Cause(ctx)
+					return nil
+				}
+				var it atomic.Pointer[item]
+				cancel, done := runAsync(c, func(ic context.Context) error {
+					if itemNo(ic) != 1 {
+						<-UntilShutdown(ic).Done()
+						return nil
+					}
+					it.Store(itemOf(ic))
+					pre := UntilShutdown(ic)
+					if kind == "pool task" {
+						if err := fo.MoveTo(ic); err != nil {
+							return err
+						}
+						if err := fo.Schedule(ic, pool.NewTask(work)); err != nil {
+							return err
+						}
+					} else {
+						if err := hold.MoveTo(ic); err != nil {
+							return err
+						}
+						hold.RetainFor(ic, func() error { return work(ic) })
+					}
+					<-pre.Done()
+					if !abort {
+						return nil
+					}
+					return write.MoveTo(pre) // a ShutdownError while the item's context is alive
+				})
+				<-running
+				cancel(cause)
+				if abort {
+					err, ok := recvErrWithin(workCause, 5*time.Second)
+					if !ok {
+						close(release)
+						t.Fatal("own work not canceled after the item aborted")
+					}
+					assertShutdownCause(t, "own work", err, cause)
+				} else {
+					// The item has returned and its completion, where an abort would cancel the work, is done.
+					waitFor(t, "item 1 returned", func() bool {
+						r := it.Load().run
+						r.mu.Lock()
+						defer r.mu.Unlock()
+						return it.Load().returned
+					})
+					close(release)
+					if err := recvErr(t, "own work", workCause); err != nil {
+						t.Fatalf("own work canceled: %v", err)
+					}
+				}
+				err := recvErr(t, "Run", done)
+				assertShutdownCause(t, "Run", err, cause)
+				if de := err.(RunError).DrainError(); de != nil {
+					t.Fatalf("DrainError = %v, want nil", de)
+				}
+			})
+		}
+	}
 }

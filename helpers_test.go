@@ -39,7 +39,7 @@ func runUntil(t *testing.T, c Conveyor, want int64, proc func(ctx context.Contex
 		err := proc(ic, no)
 		if no == want {
 			// Stop creating items only after the last interesting one has done its work. Items still in flight
-			// are left to finish (no grace period option, so nothing bounds them), so their assertions still hold.
+			// are left to finish (no drain timeout option, so nothing bounds them), so their assertions still hold.
 			if err == nil {
 				cancel() // a failure stops the run by itself; canceling first would make ctx the first trigger
 			}
@@ -59,26 +59,18 @@ func runNOK(t *testing.T, c Conveyor, want int64, proc func(ctx context.Context,
 	}
 }
 
-// runOnce runs a single item through c and returns Run's error. Used for the many tests that only need one
-// journey. Later items take no part; they park until the first one is done, for the reason given at runUntil.
 // runFailedWith reports whether a Run result shows the failure target: as the trigger, or, when the Run context was
-// canceled first, among the failures that followed it (RunError.ItemErrors).
+// canceled first, as the first failure that followed it (RunError.DrainError).
 func runFailedWith(err, target error) bool {
 	if errors.Is(err, target) {
 		return true
 	}
 	var re RunError
-	if !errors.As(err, &re) {
-		return false
-	}
-	for _, e := range re.ItemErrors() {
-		if errors.Is(e, target) {
-			return true
-		}
-	}
-	return false
+	return errors.As(err, &re) && errors.Is(re.DrainError(), target)
 }
 
+// runOnce runs a single item through c and returns Run's error. Used for the many tests that only need one
+// journey. Later items take no part; they park until the first one is done, for the reason given at runUntil.
 func runOnce(t *testing.T, c Conveyor, proc func(ctx context.Context) error) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -407,6 +399,17 @@ func recvErr(t *testing.T, what string, ch <-chan error) error {
 	case <-time.After(testTimeout):
 		t.Fatalf("timed out waiting for %s", what)
 		return nil
+	}
+}
+
+// recvErrWithin receives one error from ch and reports whether it came within d. Use it where a broken property
+// leaves the sender blocked, so the test fails fast instead of at testTimeout.
+func recvErrWithin(ch <-chan error, d time.Duration) (error, bool) {
+	select {
+	case err := <-ch:
+		return err, true
+	case <-time.After(d):
+		return nil, false
 	}
 }
 

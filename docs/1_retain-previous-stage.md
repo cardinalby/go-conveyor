@@ -111,6 +111,9 @@ fails the item when it completes. If the callback fails while other work of the 
 returns the item's cancellation cause instead; wait for `Finished` and read `Err`, or call `Wait` again after
 `Finished` is closed, to observe the wave's own error.
 
+If the ItemProcessor returns an error (a shutdown abort too), the item's context is canceled while a `RetainFor`
+callback may still use it. Return nil to let the callback finish.
+
 ## Retain the starting stage
 
 To retain the implicit starting stage of the conveyor, use its own `conv.StartingStage().Retain()` or

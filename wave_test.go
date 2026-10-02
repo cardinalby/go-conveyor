@@ -312,7 +312,7 @@ func TestWaitForeignWavePanics(t *testing.T) {
 
 // TestWaveResolvesOnShutdown: a wave always resolves — on cancellation its work stops and the wave finishes.
 func TestWaveResolvesOnShutdown(t *testing.T) {
-	c := NewConveyor(OptGracePeriod(0)) // cancel in-flight items at once on shutdown
+	c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items at once on shutdown
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
 
@@ -424,7 +424,7 @@ func TestWaveNeverReportsCleanFinishForSkippedWork(t *testing.T) {
 		wantAll bool // the item keeps permission, so every task must run and the wave must be clean
 	}{
 		{name: "allowed to continue", wantAll: true},
-		{name: "canceled at once", opts: []Option{OptGracePeriod(0)}},
+		{name: "canceled at once", opts: []Option{OptDrainTimeout(0)}},
 	} {
 		for shape, build := range shapes {
 			t.Run(tc.name+"/"+shape, func(t *testing.T) {

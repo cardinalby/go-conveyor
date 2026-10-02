@@ -139,7 +139,7 @@ You still have a **single function** that processes a single batch, but the Conv
    - If the context passed to `c.Run()` is canceled:
      - all items that are already in the pipeline are allowed to finish (by default)
      - new items are not spawned
-   - [Grace period](https://pkg.go.dev/github.com/cardinalby/go-conveyor#OptGracePeriod): cancel the remaining items after a timeout
+   - [Drain timeout](https://pkg.go.dev/github.com/cardinalby/go-conveyor#OptDrainTimeout): cancel the remaining items after a timeout
    - [UntilShutdown](https://pkg.go.dev/github.com/cardinalby/go-conveyor#UntilShutdown): drop items that have not started side effects yet
 8. Pull-based [observability](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Conveyor.Stats)
 

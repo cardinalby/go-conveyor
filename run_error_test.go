@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -41,8 +42,8 @@ func TestRunErrorItemFailure(t *testing.T) {
 	if ie.Unit() != Unit(s) {
 		t.Fatalf("Unit = %v, want %v", ie.Unit(), s)
 	}
-	if ie.DrainError() != nil || len(ie.ItemErrors()) != 0 {
-		t.Fatalf("DrainError = %v, ItemErrors = %v, want none", ie.DrainError(), ie.ItemErrors())
+	if ie.DrainError() != nil {
+		t.Fatalf("DrainError = %v, want nil", ie.DrainError())
 	}
 }
 
@@ -96,8 +97,8 @@ func TestRunErrorAlreadyRunningIsPlain(t *testing.T) {
 	<-done
 }
 
-// TestRunErrorFirstEventWins: when the Run context is canceled first, a later item failure does not replace the
-// ShutdownError; it is listed in ItemErrors.
+// TestRunErrorFirstEventWins: when the Run context is canceled first, a later failure of an item in flight does not
+// replace the ShutdownError; it is the DrainError, an ItemError with the item's unit and error.
 func TestRunErrorFirstEventWins(t *testing.T) {
 	c := NewConveyor()
 	s := c.AddStage(OptName("s"))
@@ -130,13 +131,12 @@ func TestRunErrorFirstEventWins(t *testing.T) {
 	}
 	var re RunError
 	errors.As(err, &re)
-	items := re.ItemErrors()
-	if len(items) != 1 || !errors.Is(items[0], boom) {
-		t.Fatalf("ItemErrors = %v, want the later failure", items)
-	}
 	var ie ItemError
-	if !errors.As(items[0], &ie) || ie.Unit() != Unit(s) {
-		t.Fatalf("ItemErrors[0] = %v, want an ItemError in %v", items[0], s)
+	if !errors.As(re.DrainError(), &ie) || ie.Unwrap() != boom || ie.Unit() != Unit(s) {
+		t.Fatalf("DrainError = %v, want an ItemError with %v in %v", re.DrainError(), boom, s)
+	}
+	if want := "conveyor is shutting down: stop (drain: boom)"; err.Error() != want {
+		t.Fatalf("Error() = %q, want %q", err.Error(), want)
 	}
 }
 
@@ -192,8 +192,8 @@ func TestRunErrorItemsSeeTheTrigger(t *testing.T) {
 	if !errors.As(err, &runIe) || runIe.Unwrap() != ie.Unwrap() || runIe.Unit() != ie.Unit() {
 		t.Fatalf("Run = %v, want the ItemError the item saw (%v)", err, ie)
 	}
-	if se.DrainError() != nil || se.ItemErrors() != nil {
-		t.Fatalf("item-side ShutdownError has run-level data: %v %v", se.DrainError(), se.ItemErrors())
+	if se.DrainError() != nil {
+		t.Fatalf("item-side ShutdownError has run-level data: %v", se.DrainError())
 	}
 }
 
@@ -228,7 +228,7 @@ func TestRunErrorLateFailureDoesNotReplaceTriggerForLaterItems(t *testing.T) {
 			if err := s.MoveTo(ic); err != nil {
 				return err
 			}
-			signal(secondInS) // only the boom cascade or the grace period can cancel it
+			signal(secondInS) // only the boom cascade or the drain timeout can cancel it
 			<-ic.Done()
 			kept <- context.Cause(ic)
 		}
@@ -248,12 +248,12 @@ func TestRunErrorLateFailureDoesNotReplaceTriggerForLaterItems(t *testing.T) {
 }
 
 // TestRunErrorItemSideCauseIsNotFilledByRun: the ItemError an aborted item keeps as its cancellation cause stays free
-// of run-level data (DrainError, ItemErrors) after Run fills them in the error it returns.
+// of run-level data (DrainError) after Run fills it in the error it returns.
 func TestRunErrorItemSideCauseIsNotFilledByRun(t *testing.T) {
 	boom := errors.New("boom")
 	late := errors.New("late")
-	drainCause := errors.New("grace over")
-	c := NewConveyor(OptGracePeriodFunc(func(error) (context.Context, context.CancelFunc) {
+	drainCause := errors.New("drain timed out")
+	c := NewConveyor(OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
 		return context.WithTimeoutCause(context.Background(), 20*time.Millisecond, drainCause)
 	}))
 	s := c.AddStage(OptName("s"))
@@ -273,9 +273,10 @@ func TestRunErrorItemSideCauseIsNotFilledByRun(t *testing.T) {
 			return boom
 		case 2:
 			close(secondReady)
-			<-ic.Done() // aborted only when the grace period expires
+			<-ic.Done() // canceled by item 1's failure
 			kept <- context.Cause(ic)
-			time.Sleep(50 * time.Millisecond) // outlive the grace period so the drain fails
+			// Outlive the drain timeout so the drain fails. late is an abort: the conveyor canceled the item.
+			time.Sleep(50 * time.Millisecond)
 			return late
 		}
 		return nil
@@ -285,23 +286,22 @@ func TestRunErrorItemSideCauseIsNotFilledByRun(t *testing.T) {
 	if !errors.As(err, &runIe) {
 		t.Fatalf("Run = %v, want an ItemError", err)
 	}
-	if !errors.Is(runIe.DrainError(), drainCause) || len(runIe.ItemErrors()) != 1 {
-		t.Fatalf("Run error: DrainError = %v, ItemErrors = %v, want the drain cause and one item error",
-			runIe.DrainError(), runIe.ItemErrors())
+	if !errors.Is(runIe.DrainError(), drainCause) {
+		t.Fatalf("Run error: DrainError = %v, want the drain cause", runIe.DrainError())
 	}
 	var ie ItemError
 	if !errors.As(<-kept, &ie) {
 		t.Fatal("kept cause has no ItemError")
 	}
-	if ie.DrainError() != nil || len(ie.ItemErrors()) != 0 {
-		t.Fatalf("kept ItemError changed after Run: DrainError = %v, ItemErrors = %v", ie.DrainError(), ie.ItemErrors())
+	if ie.DrainError() != nil {
+		t.Fatalf("kept ItemError changed after Run: DrainError = %v", ie.DrainError())
 	}
 }
 
-// TestRunErrorDrainTimeout: when the grace period context expires before the items finish, DrainError reports its cause.
+// TestRunErrorDrainTimeout: when the drain context expires before the items finish, DrainError reports its cause.
 func TestRunErrorDrainTimeout(t *testing.T) {
-	drainCause := errors.New("grace over")
-	c := NewConveyor(OptGracePeriodFunc(func(error) (context.Context, context.CancelFunc) {
+	drainCause := errors.New("drain timed out")
+	c := NewConveyor(OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
 		return context.WithTimeoutCause(context.Background(), 20*time.Millisecond, drainCause)
 	}))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -309,7 +309,7 @@ func TestRunErrorDrainTimeout(t *testing.T) {
 
 	err := c.Run(ctx, func(ic context.Context) error {
 		cancel()
-		<-ic.Done() // only the expiring grace period ends this item
+		<-ic.Done() // only the expiring drain context cancels this item
 		return context.Cause(ic)
 	})
 
@@ -320,14 +320,11 @@ func TestRunErrorDrainTimeout(t *testing.T) {
 	if !errors.Is(re.DrainError(), drainCause) {
 		t.Fatalf("DrainError = %v, want %v", re.DrainError(), drainCause)
 	}
-	if len(re.ItemErrors()) != 0 {
-		t.Fatalf("ItemErrors = %v, want none: the item was aborted", re.ItemErrors())
-	}
 }
 
-// TestRunErrorNoDrainErrorWhenItemsFinish: items that finish inside the grace period leave DrainError nil.
+// TestRunErrorNoDrainErrorWhenItemsFinish: items that finish inside the drain timeout leave DrainError nil.
 func TestRunErrorNoDrainErrorWhenItemsFinish(t *testing.T) {
-	c := NewConveyor(OptGracePeriod(testTimeout))
+	c := NewConveyor(OptDrainTimeout(testTimeout))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -345,26 +342,46 @@ func TestRunErrorNoDrainErrorWhenItemsFinish(t *testing.T) {
 	}
 }
 
-// TestAbortedItemReturningPlainCancelIsNotAFailure: an item the conveyor canceled that returns a bare
-// context.Canceled (e.g. from an interrupted driver call) is aborted, not failed.
-func TestAbortedItemReturningPlainCancelIsNotAFailure(t *testing.T) {
-	c := NewConveyor(OptGracePeriod(0))
-	cause := errors.New("stop")
-	ctx, cancel := context.WithCancelCause(context.Background())
-	defer cancel(nil)
+// TestAbortedItemReturningAnyErrorIsNotAFailure: an item the conveyor canceled is aborted, not failed, whatever it
+// returns: a bare context.Canceled (e.g. from an interrupted driver call) or an error of its own.
+func TestAbortedItemReturningAnyErrorIsNotAFailure(t *testing.T) {
+	for _, ret := range []error{context.Canceled, errors.New("driver: connection closed")} {
+		t.Run(ret.Error(), func(t *testing.T) {
+			boom := errors.New("boom")
+			c := NewConveyor()
+			s := c.AddStage(OptName("s")).SetLimit(2)
+			inS, waiting := make(chan struct{}), make(chan struct{})
+			returned := make(chan error, 1)
 
-	err := c.Run(ctx, func(ic context.Context) error {
-		cancel(cause)
-		<-ic.Done()
-		return context.Canceled
-	})
+			_, done := runAsync(c, func(ic context.Context) error {
+				switch itemNo(ic) {
+				case 1:
+					if err := s.MoveTo(ic); err != nil {
+						return err
+					}
+					signal(inS)
+					<-waiting
+					return boom // cancels item 2, the younger one
+				case 2:
+					<-inS
+					if err := s.MoveTo(ic); err != nil {
+						return err
+					}
+					signal(waiting)
+					<-ic.Done()
+					returned <- context.Cause(ic)
+					return ret
+				}
+				<-ic.Done()
+				return context.Cause(ic)
+			})
+			err := recvErr(t, "Run", done)
 
-	var se ShutdownError
-	if !errors.As(err, &se) {
-		t.Fatalf("Run = %v, want a ShutdownError", err)
-	}
-	if !errors.Is(err, cause) || len(se.ItemErrors()) != 0 {
-		t.Fatalf("Run = %v, ItemErrors = %v, want the context cause and no failures", err, se.ItemErrors())
+			assertShutdownCause(t, "item 2", recvErr(t, "item 2", returned), boom)
+			if ie := itemFailure(t, err); ie.Unwrap() != boom || ie.DrainError() != nil {
+				t.Fatalf("Run = %v, DrainError = %v, want %v and no drain error", err, ie.DrainError(), boom)
+			}
+		})
 	}
 }
 
@@ -639,5 +656,222 @@ func TestItemErrorUnitFanOutRetainedTaskFailsAfterMovingOn(t *testing.T) {
 	}
 	if u := itemFailure(t, err).Unit(); u != Unit(b) {
 		t.Fatalf("Unit = %v, want %v", u, b)
+	}
+}
+
+// drainErrOf reports the drain error the live run has recorded so far.
+func drainErrOf(c Conveyor) error {
+	r := implOf(c).currentRun.Load()
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.drainErr
+}
+
+// drainByTest returns a drain context option that is done when the test calls the returned func, with that cause.
+func drainByTest(t *testing.T) (Option, context.CancelCauseFunc) {
+	ctx, end := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { end(nil) })
+	return OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) { return ctx, nil }), end
+}
+
+// TestRunErrorDrainFailureBeforeDrainTimeout: the first event of the drain wins: an item failure before the drain times
+// out stays the DrainError after the drain times out and cancels the remaining item.
+func TestRunErrorDrainFailureBeforeDrainTimeout(t *testing.T) {
+	boom := errors.New("boom")
+	stop := errors.New("stop")
+	errDrain := errors.New("drain timed out")
+	opt, endDrain := drainByTest(t)
+	c := NewConveyor(opt)
+	s := c.AddStage(OptName("s")).SetLimit(2)
+	inS, secondInS, fail := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	olderCause := make(chan error, 1)
+
+	cancel, done := runAsync(c, func(ic context.Context) error {
+		switch itemNo(ic) {
+		case 1:
+			if err := s.MoveTo(ic); err != nil {
+				return err
+			}
+			signal(inS)
+			<-ic.Done() // only the drain timeout cancels it: it is older than the failed item
+			olderCause <- context.Cause(ic)
+			return context.Cause(ic)
+		case 2:
+			<-inS
+			if err := s.MoveTo(ic); err != nil {
+				return err
+			}
+			signal(secondInS)
+			<-fail
+			return boom
+		}
+		<-ic.Done()
+		return context.Cause(ic)
+	})
+	<-secondInS
+	cancel(stop)
+	waitFor(t, "shutdown to begin", func() bool { return shutdownBegun(c) })
+	close(fail)
+	waitFor(t, "the failure to be recorded", func() bool { return drainErrOf(c) != nil })
+	endDrain(errDrain)
+	assertShutdownCause(t, "older item", recvErr(t, "older item", olderCause), stop)
+	err := recvErr(t, "Run", done)
+
+	assertShutdownCause(t, "Run", err, stop)
+	var ie ItemError
+	if de := err.(RunError).DrainError(); !errors.As(de, &ie) || ie.Unwrap() != boom || ie.Unit() != Unit(s) {
+		t.Fatalf("DrainError = %v, want an ItemError with %v in %v", de, boom, s)
+	}
+}
+
+// TestRunErrorDrainTimeoutBeforeDrainFailure: the first event of the drain wins: once the drain timed out with an
+// item in flight, DrainError is its cause even if that item then fails for real (its own RetainFor canceled it
+// earlier, so the conveyor did not abort it).
+func TestRunErrorDrainTimeoutBeforeDrainFailure(t *testing.T) {
+	boom := errors.New("boom")
+	stop := errors.New("stop")
+	errDrain := errors.New("drain timed out")
+	opt, endDrain := drainByTest(t)
+	c := NewConveyor(opt)
+	ready, failRetain, canceled, proceed := make(chan struct{}), make(chan struct{}), make(chan struct{}),
+		make(chan struct{})
+
+	cancel, done := runAsync(c, func(ic context.Context) error {
+		if itemNo(ic) != 1 {
+			<-ic.Done()
+			return context.Cause(ic)
+		}
+		c.StartingStage().RetainFor(ic, func() error {
+			<-failRetain
+			return boom
+		})
+		signal(ready)
+		<-ic.Done()
+		signal(canceled)
+		<-proceed
+		return context.Cause(ic) // boom: a real failure
+	})
+	<-ready
+	cancel(stop)
+	waitFor(t, "shutdown to begin", func() bool { return shutdownBegun(c) })
+	close(failRetain)
+	<-canceled
+	endDrain(errDrain)
+	waitFor(t, "the drain timeout to be recorded", func() bool { return drainErrOf(c) != nil })
+	close(proceed)
+	err := recvErr(t, "Run", done)
+
+	assertShutdownCause(t, "Run", err, stop)
+	if de := err.(RunError).DrainError(); de != errDrain {
+		t.Fatalf("DrainError = %v, want %v", de, errDrain)
+	}
+}
+
+// TestRunErrorDrainFailureAfterItemTrigger: after an item failure began the shutdown, the failure of an older item
+// still in flight is the DrainError; the trigger is not repeated, and a younger item canceled by the conveyor is
+// aborted whatever it returns. Error() shows the drain.
+func TestRunErrorDrainFailureAfterItemTrigger(t *testing.T) {
+	boom := errors.New("boom")
+	second := errors.New("second")
+	c := NewConveyor()
+	s := c.AddStage(OptName("s")).SetLimit(3)
+	firstInS, secondInS, thirdInS := make(chan struct{}), make(chan struct{}), make(chan struct{})
+
+	_, done := runAsync(c, func(ic context.Context) error {
+		switch itemNo(ic) {
+		case 1:
+			if err := s.MoveTo(ic); err != nil {
+				return err
+			}
+			signal(firstInS)
+			// Fail once items 2 and 3 have left s: the trigger and the abort are recorded first.
+			<-thirdInS
+			if !awaitTrue(func() bool { return occupancyOf(c, s) == 1 }) {
+				return errors.New("items 2 and 3 never left s")
+			}
+			return second
+		case 2:
+			<-firstInS
+			if err := s.MoveTo(ic); err != nil {
+				return err
+			}
+			signal(secondInS)
+			<-thirdInS
+			return boom
+		case 3:
+			<-secondInS
+			if err := s.MoveTo(ic); err != nil {
+				return err
+			}
+			signal(thirdInS)
+			<-ic.Done()                         // canceled by item 2's failure
+			return errors.New("third: aborted") // an abort all the same
+		}
+		<-ic.Done()
+		return context.Cause(ic)
+	})
+	err := recvErr(t, "Run", done)
+
+	ie := itemFailure(t, err)
+	if ie.Unwrap() != boom {
+		t.Fatalf("Run = %v, want the trigger %v", err, boom)
+	}
+	var de ItemError
+	if !errors.As(ie.DrainError(), &de) || de.Unwrap() != second || de.Unit() != Unit(s) {
+		t.Fatalf("DrainError = %v, want an ItemError with %v in %v", ie.DrainError(), second, s)
+	}
+	if want := "boom (drain: second)"; err.Error() != want {
+		t.Fatalf("Error() = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestRunErrorDrainFailureBeforeJoin: an item failure after the trigger is the DrainError as soon as the item returns,
+// even if its own background work is still running and the drain times out while completion waits for it.
+func TestRunErrorDrainFailureBeforeJoin(t *testing.T) {
+	boom := errors.New("boom")
+	stop := errors.New("stop")
+	opt, endDrain := drainByTest(t)
+	c := NewConveyor(opt)
+	ready, release := make(chan struct{}), make(chan struct{})
+	var first atomic.Pointer[item]
+
+	cancel, done := runAsync(c, func(ic context.Context) error {
+		if itemNo(ic) != 1 {
+			<-ic.Done()
+			return context.Cause(ic)
+		}
+		first.Store(itemOf(ic))
+		c.StartingStage().RetainFor(ic, func() error {
+			<-release // ignores the cancellation: the completion of the item waits for it
+			return nil
+		})
+		signal(ready)
+		<-UntilShutdown(ic).Done()
+		return boom
+	})
+	<-ready
+	cancel(stop)
+	r := first.Load().run
+	waitFor(t, "the item to return", func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return first.Load().returned
+	})
+	endDrain(errors.New("drain timed out"))
+	waitFor(t, "the drain timeout to be seen", func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.drainErr != nil && r.itemsCtx.Err() != nil
+	})
+	close(release)
+	err := recvErr(t, "Run", done)
+
+	assertShutdownCause(t, "Run", err, stop)
+	var ie ItemError
+	if de := err.(RunError).DrainError(); !errors.As(de, &ie) || ie.Unwrap() != boom {
+		t.Fatalf("DrainError = %v, want an ItemError with %v", de, boom)
 	}
 }
