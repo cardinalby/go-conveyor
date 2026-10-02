@@ -12,7 +12,7 @@ import (
 // dropped rather than invoked with a dead context — for every source kind, not just the streaming ones. The wave
 // still resolves, so a joiner is never left hanging.
 func TestCanceledItemsQueuedWorkIsSkipped(t *testing.T) {
-	c := NewConveyor(optCancelItemsOnShutdown()) // cancel in-flight items as soon as shutdown starts
+	c := NewConveyor(OptGracePeriod(0)) // cancel in-flight items as soon as shutdown starts
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool")) // limit 1: the tasks run strictly one at a time
 

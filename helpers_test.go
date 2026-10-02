@@ -14,24 +14,6 @@ import (
 // dominates a child-heavy scenario by more than an order of magnitude.
 const testTimeout = 60 * time.Second
 
-// optCancelItemsOnShutdown is the OptShutdownContext spelling of "cancel every in-flight item as soon as shutdown
-// begins": a shutdown context that is already done. Tests that only need a hard shutdown use this instead of
-// spelling out a factory.
-func optCancelItemsOnShutdown() Option {
-	return OptShutdownContext(func(error) (context.Context, context.CancelFunc) {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		return ctx, cancel
-	})
-}
-
-// optShutdownGracePeriod is the OptShutdownContext spelling of "let in-flight items drain for d, then cancel them".
-func optShutdownGracePeriod(d time.Duration) Option {
-	return OptShutdownContext(func(error) (context.Context, context.CancelFunc) {
-		return context.WithTimeout(context.Background(), d)
-	})
-}
-
 // runUntil runs c until `want` items have been created, then cancels the run context and returns Run's error.
 // proc receives the item's number, so a test can vary behavior per item.
 //
@@ -57,7 +39,7 @@ func runUntil(t *testing.T, c Conveyor, want int64, proc func(ctx context.Contex
 		err := proc(ic, no)
 		if no == want {
 			// Stop creating items only after the last interesting one has done its work. Items still in flight
-			// are left to finish (no OptShutdownContext, so nothing bounds them), so their assertions still hold.
+			// are left to finish (no grace period option, so nothing bounds them), so their assertions still hold.
 			if err == nil {
 				cancel() // a failure stops the run by itself; canceling first would make ctx the first trigger
 			}
@@ -403,3 +385,46 @@ func queueOccupancy(c Conveyor, u Unit) int {
 // branchScope reports a branch's own scope id. Branch is an interface, so this reaches through to the implementation — which
 // only an in-package test can do, and which is the point: the scope is internal bookkeeping, not API.
 func branchScope(b Branch) int { return b.(*branch).series.id }
+
+// runAsync runs c on its own goroutine and returns the cancel of its Run context and a channel with Run's result.
+func runAsync(c Conveyor, proc ItemProcessor) (context.CancelCauseFunc, <-chan error) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		tctx, tcancel := context.WithTimeout(ctx, testTimeout)
+		defer tcancel()
+		done <- c.Run(tctx, proc)
+	}()
+	return cancel, done
+}
+
+// recvErr receives one error from ch, failing the test on timeout.
+func recvErr(t *testing.T, what string, ch <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(testTimeout):
+		t.Fatalf("timed out waiting for %s", what)
+		return nil
+	}
+}
+
+// shutdownBegun reports whether the live run has begun its shutdown.
+func shutdownBegun(c Conveyor) bool {
+	r := implOf(c).currentRun.Load()
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stopCreating
+}
+
+// signal closes ch; used by items to report that they reached a place.
+func signal(ch chan struct{}) { close(ch) }
+
+func itemNo(ctx context.Context) int64 {
+	no, _ := ItemNoFromContext(ctx)
+	return no
+}

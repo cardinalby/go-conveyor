@@ -44,11 +44,6 @@ type itemsLimitRequest struct {
 	Value int `json:"value"`
 }
 
-// nodeIDRequest is the body shape of setNoAbortPoint: just a node id (empty or topology.StartID for the start).
-type nodeIDRequest struct {
-	ID string `json:"id"`
-}
-
 // retainRequest is the body shape shared by retainItem / releaseItem: the item and the stage it holds.
 type retainRequest struct {
 	ItemNo int64  `json:"itemNo"`
@@ -117,8 +112,6 @@ func (h *handler) dispatch(req methodRequest) (any, error) {
 		return h.manager.State(), nil
 	case "setItemsLimit":
 		return h.applyItemsLimit(req.Body)
-	case "setNoAbortPoint":
-		return h.applyNoAbortPoint(req.Body)
 	case "setLimit":
 		return h.applyNodeValue(req.Body, h.manager.SetLimit)
 	case "setQueueSize":
@@ -170,17 +163,6 @@ func (h *handler) applyItemsLimit(body json.RawMessage) (any, error) {
 		return nil, err
 	}
 	if err := h.manager.SetItemsLimit(req.Value); err != nil {
-		return nil, err
-	}
-	return h.manager.State(), nil
-}
-
-func (h *handler) applyNoAbortPoint(body json.RawMessage) (any, error) {
-	var req nodeIDRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, err
-	}
-	if err := h.manager.SetNoAbortPoint(req.ID); err != nil {
 		return nil, err
 	}
 	return h.manager.State(), nil

@@ -90,13 +90,6 @@ export function LegendPanel({ open }: Props) {
                 </li>
               </ul>
             </li>
-            <li className="legend-item">
-              <span className="legend-label">
-                No-abort point (click an empty slot on the start, a top-level stage or fan-out to set it; click the
-                label to reset): on shutdown, items that have not entered it yet are aborted at once
-              </span>
-              <span className="no-abort-marker legend-no-abort">no abort</span>
-            </li>
             <li className="legend-item-heading">
               <span className="legend-label">Ctrl/⌘-click an item or a pool task:</span>
               <ul className="legend-sublist">

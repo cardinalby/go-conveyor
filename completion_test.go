@@ -137,7 +137,7 @@ func TestCompletionWithErrorStopsTheSpawningTree(t *testing.T) {
 // does not hide a real failure of its work — the unobserved wave error becomes the item's error, and so Run's.
 func TestCompletionShutdownErrorYieldsToUnobservedWaveError(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor(optCancelItemsOnShutdown())
+	c := NewConveyor(OptGracePeriod(0))
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
 
@@ -160,7 +160,7 @@ func TestCompletionShutdownErrorYieldsToUnobservedWaveError(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		cancel() // the shutdown context is already done: the item is canceled at once
+		cancel() // the grace period context is already done: the item is canceled at once
 		<-ic.Done()
 		<-taskDone
 		cause := context.Cause(ic)
@@ -187,7 +187,7 @@ func TestCompletionShutdownErrorYieldsToUnobservedWaveError(t *testing.T) {
 // The body stays open, the running task finishes, and the queued work is dropped with the cause recorded on the wave.
 func TestShutdownWhileBlockedInWaitDropsQueuedSpawns(t *testing.T) {
 	cause := errors.New("stop now")
-	c := NewConveyor(optCancelItemsOnShutdown())
+	c := NewConveyor(OptGracePeriod(0))
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool")) // limit 1: B queues behind A
 
@@ -246,7 +246,7 @@ func TestShutdownWhileBlockedInWaitDropsQueuedSpawns(t *testing.T) {
 // and the run's, not the shutdown cause it happened to follow.
 func TestCompletionAbandonmentDoesNotHideALaterTaskError(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor(optCancelItemsOnShutdown())
+	c := NewConveyor(OptGracePeriod(0))
 	fo := c.AddFanOut(OptName("fo"))
 	work := fo.AddPool(OptName("work"))
 	feed := fo.AddPool(OptName("feed"))

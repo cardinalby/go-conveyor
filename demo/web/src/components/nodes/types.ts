@@ -19,9 +19,6 @@ export interface TreeCallbacks {
   onEditBackpressure: (id: string, value: FanOutBackpressure) => void;
   onEditBranch: (branchId: string, field: BranchEditField, value: number) => void;
   onRenameNode: (id: string, name: string) => void;
-  /** Sets the no-abort point to a top-level node, or resets it to the start with null — see Pipeline.noAbortPoint.
-   * Works in both modes. */
-  onSetNoAbortPoint: (id: string | null) => void;
   onRenameBranch: (branchId: string, name: string) => void;
   /** A lane's own entrance is not a branch or a node of its own, so renaming it needs its own callback — the same
    * reason PipelineCanvas has onRenameStart for the conveyor's implicit start. */
@@ -64,8 +61,4 @@ export interface StartNodeData extends Common {
   delayMs: number;
   onEditDelay: (value: number) => void;
   onRename: (name: string) => void;
-  /** See ResolvedStart.noAbortPoint. */
-  noAbortPoint: boolean;
-  /** TreeCallbacks.onSetNoAbortPoint(null). */
-  onResetNoAbortPoint: () => void;
 }

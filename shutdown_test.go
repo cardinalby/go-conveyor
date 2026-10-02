@@ -39,7 +39,7 @@ func assertShutdownCause(t *testing.T, what string, err error, want error) {
 	}
 }
 
-// TestGracefulShutdownFinishesInFlightItems: with no OptShutdownContext, cancelling the Run context only stops
+// TestGracefulShutdownFinishesInFlightItems: with no OptGracePeriod, cancelling the Run context only stops
 // item creation — every item already in flight finishes its whole journey, background work included.
 func TestGracefulShutdownFinishesInFlightItems(t *testing.T) {
 	const perItem = 2
@@ -103,12 +103,12 @@ func TestGracefulShutdownFinishesInFlightItems(t *testing.T) {
 	}
 }
 
-// TestShutdownContextAlreadyDoneCancelsInFlight: a shutdown context that is already done cancels every in-flight
+// TestGracePeriodAlreadyDoneCancelsInFlight: a grace period context that is already done cancels every in-flight
 // item at once, so blocked node calls and ctx-respecting pool work return promptly with the run cause as shutdown
 // cause.
-func TestShutdownContextAlreadyDoneCancelsInFlight(t *testing.T) {
+func TestGracePeriodAlreadyDoneCancelsInFlight(t *testing.T) {
 	cause := errors.New("stop now")
-	c := NewConveyor(optCancelItemsOnShutdown())
+	c := NewConveyor(OptGracePeriod(0))
 	fo := c.AddFanOut(OptName("fo")).SetLimit(4)
 	pool := fo.AddPool(OptName("pool")).SetLimit(2)
 	commit := c.AddStage(OptName("commit")) // exclusive: the items behind block in MoveTo
@@ -172,11 +172,11 @@ func TestShutdownContextAlreadyDoneCancelsInFlight(t *testing.T) {
 	}
 }
 
-// TestShutdownGracePeriodLetsItemsDrain: with a timer-backed shutdown context, items that drain inside the grace
+// TestShutdownGracePeriodLetsItemsDrain: with a timer-backed grace period context, items that drain inside the grace
 // period are never canceled and complete their journey normally.
 func TestShutdownGracePeriodLetsItemsDrain(t *testing.T) {
 	cause := errors.New("time to stop")
-	c := NewConveyor(optShutdownGracePeriod(5 * time.Second)) // generous: the items below drain at once
+	c := NewConveyor(OptGracePeriod(5 * time.Second)) // generous: the items below drain at once
 	gate := c.AddStage(OptName("gate")).SetLimit(4)
 	commit := c.AddStage(OptName("commit"))
 
@@ -228,12 +228,12 @@ func TestShutdownGracePeriodLetsItemsDrain(t *testing.T) {
 	assertStrictlyIncreasing(t, got, "commit order after a graceful shutdown")
 }
 
-// TestShutdownGracePeriodOverrunCancelsItems: an item still in flight when the shutdown context expires has its
+// TestShutdownGracePeriodOverrunCancelsItems: an item still in flight when the grace period context expires has its
 // context canceled with a ShutdownError carrying the Run context's cause — not the expiry.
 func TestShutdownGracePeriodOverrunCancelsItems(t *testing.T) {
 	cause := errors.New("time to stop")
-	c := NewConveyor(optShutdownGracePeriod(20 * time.Millisecond)) // tiny: the item below overruns it
-	hold := c.AddStage(OptName("hold"))                             // exclusive: the item behind blocks in MoveTo
+	c := NewConveyor(OptGracePeriod(20 * time.Millisecond)) // tiny: the item below overruns it
+	hold := c.AddStage(OptName("hold"))                     // exclusive: the item behind blocks in MoveTo
 
 	var mu sync.Mutex
 	seen := map[int64]error{}
@@ -273,14 +273,14 @@ func TestShutdownGracePeriodOverrunCancelsItems(t *testing.T) {
 	}
 }
 
-// TestErrorShutdownIsBoundedByShutdownContext: an ItemProcessor error starts a shutdown without the Run context
-// being canceled, so the factory is the caller's only notice of it — it is asked, it is told the item error as the
-// cause, and the context it returns is what releases an earlier item that would otherwise never return.
-func TestErrorShutdownIsBoundedByShutdownContext(t *testing.T) {
+// TestErrorShutdownIsBoundedByGracePeriod: an ItemProcessor error starts a shutdown without the Run context
+// being canceled, so the grace period func is the caller's only notice of it — it is asked, it is told the item
+// error as the cause, and the context it returns is what releases an earlier item that would otherwise never return.
+func TestErrorShutdownIsBoundedByGracePeriod(t *testing.T) {
 	boom := errors.New("boom")
-	factoryCause := make(chan error, 1)
-	c := NewConveyor(OptShutdownContext(func(cause error) (context.Context, context.CancelFunc) {
-		factoryCause <- cause
+	graceCause := make(chan error, 1)
+	c := NewConveyor(OptGracePeriodFunc(func(cause error) (context.Context, context.CancelFunc) {
+		graceCause <- cause
 		shutdownCtx, cancel := context.WithCancel(context.Background())
 		cancel() // at once: item 1 below never returns on its own
 		return shutdownCtx, cancel
@@ -299,7 +299,7 @@ func TestErrorShutdownIsBoundedByShutdownContext(t *testing.T) {
 		switch no {
 		case 1:
 			blocked.Store(true)
-			<-ic.Done() // nothing but the shutdown context releases this item
+			<-ic.Done() // nothing but the grace period context releases this item
 			item1Err.Store(context.Cause(ic))
 			return context.Cause(ic)
 		case 2:
@@ -315,12 +315,12 @@ func TestErrorShutdownIsBoundedByShutdownContext(t *testing.T) {
 		t.Fatalf("Run error = %v, want %v", err, boom)
 	}
 	select {
-	case got := <-factoryCause:
+	case got := <-graceCause:
 		if got != boom {
-			t.Fatalf("factory cause = %v, want the item error %v", got, boom)
+			t.Fatalf("grace period func cause = %v, want the item error %v", got, boom)
 		}
 	default:
-		t.Fatal("the factory was never asked, so nothing bounded the error shutdown")
+		t.Fatal("the grace period func was never asked, so nothing bounded the error shutdown")
 	}
 	ie, ok := item1Err.Load().(error)
 	if !ok {
@@ -329,18 +329,18 @@ func TestErrorShutdownIsBoundedByShutdownContext(t *testing.T) {
 	assertShutdownCause(t, "item 1", ie, boom)
 }
 
-// TestShutdownContextCancelsItemsLater: a shutdown context the caller cancels itself makes the shutdown two-phase.
+// TestGracePeriodCancelsItemsLater: a grace period context the caller cancels itself makes the shutdown two-phase.
 // The items are left alone while it is live — even though the shutdown has begun — and canceled when it is done,
-// with the cause that started the shutdown rather than the shutdown context's own.
-func TestShutdownContextCancelsItemsLater(t *testing.T) {
+// with the cause that started the shutdown rather than the grace period context's own.
+func TestGracePeriodCancelsItemsLater(t *testing.T) {
 	cause := errors.New("time to stop")
 	forceCtx, forceNow := context.WithCancelCause(context.Background())
 	defer forceNow(nil)
 
-	factoryCause := make(chan error, 1)
+	graceCause := make(chan error, 1)
 	asked := make(chan struct{})
-	c := NewConveyor(OptShutdownContext(func(c error) (context.Context, context.CancelFunc) {
-		factoryCause <- c
+	c := NewConveyor(OptGracePeriodFunc(func(c error) (context.Context, context.CancelFunc) {
+		graceCause <- c
 		close(asked)
 		return forceCtx, nil // the caller owns it; no CancelFunc to hand over
 	}))
@@ -358,9 +358,9 @@ func TestShutdownContextCancelsItemsLater(t *testing.T) {
 			return nil
 		}
 		cancel(cause) // phase one: graceful — item 1 keeps running
-		<-asked       // the conveyor has taken the shutdown context
+		<-asked       // the conveyor has taken the grace period context
 		if ic.Err() != nil {
-			return errors.New("the item was canceled while the shutdown context was still live")
+			return errors.New("the item was canceled while the grace period context was still live")
 		}
 		forceNow(errors.New("kill now")) // phase two: forceful
 		<-ic.Done()
@@ -371,22 +371,22 @@ func TestShutdownContextCancelsItemsLater(t *testing.T) {
 	if !errors.Is(err, cause) {
 		t.Fatalf("Run error = %v, want %v", err, cause)
 	}
-	if got := <-factoryCause; got != cause {
-		t.Fatalf("factory cause = %v, want the Run context cause %v", got, cause)
+	if got := <-graceCause; got != cause {
+		t.Fatalf("grace period func cause = %v, want the Run context cause %v", got, cause)
 	}
 	ie, ok := item1Err.Load().(error)
 	if !ok {
-		t.Fatal("item 1 was never canceled by the shutdown context")
+		t.Fatal("item 1 was never canceled by the grace period context")
 	}
-	// The shutdown cause is the trigger, not the shutdown context's own cause ("kill now").
+	// The shutdown cause is the trigger, not the grace period context's own cause ("kill now").
 	assertShutdownCause(t, "item 1", ie, cause)
 }
 
-// TestShutdownContextNilMeansNoLimit: a factory that returns no context leaves the in-flight items alone, exactly
-// like configuring no factory at all.
-func TestShutdownContextNilMeansNoLimit(t *testing.T) {
+// TestGracePeriodNilMeansNoLimit: a grace period func that returns no context leaves the in-flight items alone, exactly
+// like configuring no grace period func at all.
+func TestGracePeriodNilMeansNoLimit(t *testing.T) {
 	asked := make(chan struct{})
-	c := NewConveyor(OptShutdownContext(func(error) (context.Context, context.CancelFunc) {
+	c := NewConveyor(OptGracePeriodFunc(func(error) (context.Context, context.CancelFunc) {
 		close(asked)
 		return nil, nil
 	}))
@@ -414,16 +414,16 @@ func TestShutdownContextNilMeansNoLimit(t *testing.T) {
 		t.Fatalf("Run error = %v, want the Run context cancellation", err)
 	}
 	if !committed.Load() {
-		t.Fatal("the item was canceled although the factory returned no shutdown context")
+		t.Fatal("the item was canceled although the grace period func returned no grace period context")
 	}
 }
 
-// TestShutdownContextCancelFuncCalledBeforeRunReturns: the conveyor releases the shutdown context it was handed —
+// TestGracePeriodCancelFuncCalledBeforeRunReturns: the conveyor releases the grace period context it was handed —
 // a timer-backed one must not outlive the run.
-func TestShutdownContextCancelFuncCalledBeforeRunReturns(t *testing.T) {
+func TestGracePeriodCancelFuncCalledBeforeRunReturns(t *testing.T) {
 	asked := make(chan struct{})
 	var released atomic.Bool
-	c := NewConveyor(OptShutdownContext(func(error) (context.Context, context.CancelFunc) {
+	c := NewConveyor(OptGracePeriodFunc(func(error) (context.Context, context.CancelFunc) {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), testTimeout) // outlives the run
 		close(asked)
 		return shutdownCtx, func() {
@@ -440,7 +440,7 @@ func TestShutdownContextCancelFuncCalledBeforeRunReturns(t *testing.T) {
 			return e
 		}
 		cancel()
-		<-asked // hold the run open until the conveyor has taken the shutdown context
+		<-asked // hold the run open until the conveyor has taken the grace period context
 		return nil
 	})
 
@@ -448,7 +448,7 @@ func TestShutdownContextCancelFuncCalledBeforeRunReturns(t *testing.T) {
 		t.Fatalf("Run error = %v, want the Run context cancellation", err)
 	}
 	if !released.Load() {
-		t.Fatal("the shutdown context's CancelFunc was not called before Run returned")
+		t.Fatal("the grace period context's CancelFunc was not called before Run returned")
 	}
 }
 
@@ -564,7 +564,7 @@ func TestFirstItemErrorWins(t *testing.T) {
 // ShutdownError a node call handed it does not make Run fail — Run still reports the Run context's cause.
 func TestShutdownErrorFromProcessorIsNotAFailure(t *testing.T) {
 	cause := errors.New("stop now")
-	c := NewConveyor(optCancelItemsOnShutdown())
+	c := NewConveyor(OptGracePeriod(0))
 	hold := c.AddStage(OptName("hold")) // exclusive: the item behind blocks in MoveTo
 
 	var wrapped atomic.Int64
@@ -658,12 +658,12 @@ func TestGracefulShutdownJoinsChildren(t *testing.T) {
 	}
 }
 
-// TestShutdownCancelsChildren: when the shutdown context is done at once, the in-flight children of a lane are
+// TestShutdownCancelsChildren: when the grace period context is done at once, the in-flight children of a lane are
 // canceled with the shutdown cause, they unwind, and Run waits for all of them.
 func TestShutdownCancelsChildren(t *testing.T) {
 	const children = 4
 	cause := errors.New("stop now")
-	c := NewConveyor(optCancelItemsOnShutdown())
+	c := NewConveyor(OptGracePeriod(0))
 	fo := c.AddFanOut(OptName("fo"))
 	lane := fo.AddLane(OptName("lane"))
 	inner := lane.AddStage(OptName("inner")).SetLimit(children)

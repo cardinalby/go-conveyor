@@ -173,8 +173,7 @@ function emitBody(
 /** Generates a minimal, illustrative Go snippet showing how to build a conveyor matching spec: one
  * AddStage/AddFanOut/AddPool/AddLane call per node/branch (mirroring demo/internal/topology/build.go's own
  * construction order, recursing into a lane's own interior nodes the same way build.go does), followed by a Run
- * skeleton with one MoveTo per node and a placeholder comment for each unit's own work. A no-abort point other than the
- * start (the default) adds one c.SetNoAbortPoint call after the declarations.
+ * skeleton with one MoveTo per node and a placeholder comment for each unit's own work.
  *
  * Two namings run in parallel here, and they are deliberately not the same string. A *variable* name is the
  * node/branch's custom name sanitized into a Go identifier and de-duplicated (see sanitizeGoIdent/uniqueIdent), or a
@@ -202,9 +201,6 @@ export function generateGoCode(pipeline: Pipeline): string {
     varById,
     labelById,
   );
-
-  const pointVar = pipeline.noAbortPoint ? varById.get(pipeline.noAbortPoint) : undefined;
-  if (pointVar) declLines.push(`c.SetNoAbortPoint(${pointVar})`);
 
   const bodyLines: string[] = [indent(1, `// <${pipeline.startName || DEFAULT_START_NAME} work>`), ""];
   emitBody(pipeline.nodes, varById, labelById, 1, bodyLines);

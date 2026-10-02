@@ -79,8 +79,6 @@ interface UrlPayload {
   startName?: string;
   itemsLimit: number;
   nodes: UrlNode[];
-  /** Index into `nodes` of the no-abort point (ids are not persisted). Absent means the start (the default). */
-  noAbortPoint?: number;
   mode: UrlMode;
   showCode: boolean;
   showLegend: boolean;
@@ -180,16 +178,6 @@ function urlToNode(raw: unknown): PipelineNode {
   return stage;
 }
 
-function noAbortPointToUrl(p: Pipeline): { noAbortPoint?: number } {
-  const i = p.noAbortPoint === null ? -1 : p.nodes.findIndex((n) => n.id === p.noAbortPoint);
-  return i >= 0 ? { noAbortPoint: i } : {};
-}
-
-/** The id of the top-level node at a stored index, or null (the start) for a missing or out-of-range one. */
-function urlToNoAbortPoint(raw: unknown, nodes: PipelineNode[]): string | null {
-  return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw < nodes.length ? nodes[raw].id : null;
-}
-
 export function encodeUrlState(state: UrlAppState): string {
   const payload: UrlPayload = {
     v: HASH_VERSION,
@@ -197,7 +185,6 @@ export function encodeUrlState(state: UrlAppState): string {
     ...(state.pipeline.startName ? { startName: state.pipeline.startName } : {}),
     itemsLimit: state.pipeline.itemsLimit,
     nodes: state.pipeline.nodes.map(nodeToUrl),
-    ...noAbortPointToUrl(state.pipeline),
     mode: state.mode,
     showCode: state.showCode,
     showLegend: state.showLegend,
@@ -214,17 +201,14 @@ export function decodeUrlState(hash: string): UrlAppState | null {
   try {
     const payload = JSON.parse(decodeURIComponent(raw)) as Partial<UrlPayload>;
     if (payload.v !== HASH_VERSION || !Array.isArray(payload.nodes)) return null;
-    const nodes = payload.nodes.map(urlToNode);
     return {
       pipeline: {
-        nodes,
+        nodes: payload.nodes.map(urlToNode),
         startDelayMs: clamp(Number(payload.startDelayMs), MIN_DELAY_MS, MAX_DELAY_MS),
         startName: typeof payload.startName === "string" ? payload.startName : "",
         // clamp() folds a missing field (NaN) down to MIN_ITEMS_LIMIT (0, unlimited) — a link saved before this
         // field existed comes back with the behavior it actually had.
         itemsLimit: clamp(Number(payload.itemsLimit), MIN_ITEMS_LIMIT, MAX_ITEMS_LIMIT),
-        // Optional, so no version bump: a link without it decodes to the start.
-        noAbortPoint: urlToNoAbortPoint(payload.noAbortPoint, nodes),
       },
       mode: payload.mode === "run" ? "run" : "build",
       showCode: payload.showCode === true,

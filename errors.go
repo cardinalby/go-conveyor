@@ -37,9 +37,9 @@ type RunError interface {
 	// Unwrap returns the trigger of the shutdown, never nil: the Run context's cancellation cause for a
 	// ShutdownError, the failed item's own error for an ItemError.
 	Unwrap() error
-	// DrainError is nil if all in-flight items finished on their own. If the shutdown context (see
-	// OptShutdownContext) was done first, it is that context's cause (e.g. context.DeadlineExceeded) and the
-	// remaining items were canceled.
+	// DrainError is nil if all in-flight items finished on their own. If the grace period (see OptGracePeriod)
+	// ended first, it is the cause of its context (e.g. context.DeadlineExceeded) and the remaining items were
+	// canceled.
 	DrainError() error
 	// ItemErrors returns the failures of other items during the shutdown, in completion order. It does not repeat
 	// the trigger and does not include items aborted by the conveyor. Errors that a canceled item returns
@@ -52,8 +52,9 @@ type RunError interface {
 // gives the context's cancellation cause, so errors.Is(err, ErrSignalReceived{}) works.
 //
 // It is also the cancellation cause of an item's context when the conveyor aborts the item: because the Run
-// context was canceled, an earlier item failed (Unwrap gives its ItemError), or the shutdown context is done.
-// Recover it with errors.As. errors.Is(err, context.Canceled) reaches the wrapped trigger.
+// context was canceled, an earlier item failed (Unwrap gives its ItemError) or was aborted, or the grace period is
+// over. And it is the cause of an UntilShutdown context once shutdown begins. Recover it with errors.As.
+// errors.Is(err, context.Canceled) reaches the wrapped trigger.
 type ShutdownError interface {
 	RunError
 	sealedShutdownError()

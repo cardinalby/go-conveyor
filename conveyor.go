@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Conveyor moves items through an ordered series of nodes, preserving their relative order. Create one with
@@ -52,13 +53,16 @@ type Conveyor interface {
 	//   - nil, if neither happened.
 	//
 	// Both are RunErrors. Failures of other items during the shutdown are not lost: see RunError.ItemErrors, and
-	// RunError.DrainError for the outcome of the OptShutdownContext grace period. Items aborted by the conveyor are
+	// RunError.DrainError for the outcome of the grace period (OptGracePeriod). Items aborted by the conveyor are
 	// not failures and are not reported. ErrConveyorAlreadyRunning is returned as is.
 	//
 	// An item counts as aborted if it returns a ShutdownError (e.g. from a node method or context.Cause(ctx)), or
-	// any error wrapping context.Canceled after the conveyor canceled it. The second is a guess: such an error
-	// from your own code is not reported either. To keep an error visible during a shutdown, do not wrap
-	// context.Canceled in it.
+	// any error wrapping context.Canceled once shutdown has begun (e.g. a read canceled through UntilShutdown) or
+	// after the conveyor canceled it. The second is a guess: such an error from your own code is not reported
+	// either. To keep an error visible during a shutdown, do not wrap context.Canceled in it.
+	//
+	// An item that fails or is aborted cancels all younger items, so no younger item gets past it. Use UntilShutdown
+	// to stop items at once when shutdown begins, before their side effects start.
 	//
 	// Build all nodes before calling Run; the topology is frozen from the first Run on. Run may be called again
 	// after it returns, but a concurrent second call returns ErrConveyorAlreadyRunning.
@@ -77,30 +81,6 @@ type Conveyor interface {
 	// ItemsLimit returns the current cap on items in flight across the whole conveyor, or 0 if unlimited (the
 	// default).
 	ItemsLimit() int
-
-	// SetNoAbortPoint marks node as the place where side effects start. When shutdown begins (the Run context is
-	// canceled, or an item fails), every item that has not entered node or a later node yet is aborted: canceled at
-	// once with a ShutdownError. Items that have entered it are not aborted, even if the point is moved later: they
-	// finish as usual, bounded by OptShutdownContext. Items after a failed item are still canceled, as always. An
-	// item waiting in node's waiting room, or blocked in MoveTo(node), has not entered it; an item that skipped node
-	// and entered a later node, or its waiting room, has passed it. It returns the conveyor for chaining.
-	//
-	//	write := c.AddStage() // side effects start here
-	//	commit := c.AddStage()
-	//	c.SetNoAbortPoint(write)
-	//
-	// The default is the starting stage: every item enters it first, so no item is aborted. Pass c.StartingStage()
-	// to restore it. Otherwise node must be a Stage or a FanOut added with c.AddStage or c.AddFanOut. It panics for
-	// nil, a pool, a lane, a node inside a lane, or a node of another conveyor.
-	//
-	// Safe to call at any time, from any goroutine, including on a running conveyor. Items that have already entered
-	// node or a later node are protected at once. Items created while the point was the starting stage have entered
-	// it, so they are not aborted. Once shutdown has begun, a call changes nothing for items in flight. Code that
-	// ignores its ctx is not interrupted.
-	SetNoAbortPoint(node Unit) Conveyor
-
-	// NoAbortPoint returns the node set with SetNoAbortPoint; the starting stage by default.
-	NoAbortPoint() Unit
 
 	// StartingStage returns the implicit stage every item starts in. The ItemProcessor code before the item's first
 	// MoveTo runs in it, one item at a time, and the next item is created only when it is free. It has no MoveTo
@@ -127,9 +107,9 @@ type conveyor struct {
 	// series is the root series; its AddStage / AddFanOut are promoted, satisfying that part of Conveyor.
 	*series
 
-	// shutdownCtxFactory is asked for the context that bounds a shutdown, once one begins (see
-	// OptShutdownContext). Nil means in-flight items are left to finish on their own.
-	shutdownCtxFactory ShutdownContextFactory
+	// gracePeriodFunc is asked for the context that bounds the grace period, once a shutdown begins (see
+	// OptGracePeriodFunc). Nil means in-flight items are left to finish on their own.
+	gracePeriodFunc GracePeriodFunc
 
 	// units is every capacity unit, in creation order; index 0 is the implicit start stage. Immutable after the
 	// first Run.
@@ -156,44 +136,43 @@ type conveyor struct {
 	// active; every read otherwise happens under run.mu (see run.hasItemsRoom).
 	itemsLimit atomic.Int64
 
-	// noAbortPoint is the unit of the node set with SetNoAbortPoint, or nil for the starting stage (the default). A
-	// root item that enters it or a later node is marked noAbort; when shutdown begins, the unmarked items are
-	// aborted (see run.abortUnprotectedLocked). Atomic for the lock-free getter. Stored under runMu, and also under
-	// run.mu while a run is active; the run reads it under run.mu.
-	noAbortPoint atomic.Pointer[unit]
-
 	// assignHook, when set by an in-package test before Run, observes every hand-out of a branch slot (see
 	// run.grabNext). Nil in production; read without a lock, so it must be set before Run and never changed during
 	// one.
 	assignHook func(branchIdx int, col *taskCollection, queue []*taskCollection)
-
-	// noAbortStoreHook, when set by an in-package test before SetNoAbortPoint, runs in it under runMu, before the
-	// store when no run was loaded: a test can try to start a run there. Nil in production.
-	noAbortStoreHook func()
 }
 
-// Option configures a Conveyor at creation. See NewConveyor and OptShutdownContext.
+// Option configures a Conveyor at creation. See NewConveyor, OptGracePeriod and OptGracePeriodFunc.
 type Option func(c *conveyor)
 
-// ShutdownContextFactory produces the context that bounds a shutdown. cause is the first item error, or the Run
-// context's cancellation cause, whichever began the shutdown. See OptShutdownContext.
-type ShutdownContextFactory func(cause error) (context.Context, context.CancelFunc)
+// GracePeriodFunc produces the context that bounds the grace period of a shutdown. cause is the first item error,
+// or the Run context's cancellation cause, whichever began the shutdown. See OptGracePeriodFunc.
+type GracePeriodFunc func(cause error) (context.Context, context.CancelFunc)
 
-// OptShutdownContext bounds how long items may keep running after a shutdown begins — triggered by the Run
-// context being canceled, or by an ItemProcessor error. Once shutdown starts, the factory is asked for a context;
-// when that context is done, every in-flight item's context is canceled.
+// OptGracePeriod lets in-flight items run for d after a shutdown begins (the Run context is canceled, or an
+// ItemProcessor fails), then cancels their contexts. d <= 0 cancels them at once.
+//
+// Without this option or OptGracePeriodFunc, items are left to finish on their own. Of the two options, the last
+// one wins.
+func OptGracePeriod(d time.Duration) Option {
+	return OptGracePeriodFunc(func(error) (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), d)
+	})
+}
+
+// OptGracePeriodFunc bounds how long items may keep running after a shutdown begins (the Run context is canceled,
+// or an ItemProcessor fails). Once shutdown starts, f is asked for a context; when that context is done, every
+// in-flight item's context is canceled.
 //
 //	return context.WithTimeout(context.Background(), 30*time.Second) // a grace period, then cancel
 //	return alreadyDoneCtx, nil                                       // cancel in-flight items at once
 //	return nil, nil                                                  // no limit: leave them to finish
 //
-// Without this option, items are left to finish on their own.
-//
-// Items before the no-abort point (SetNoAbortPoint) are aborted when shutdown begins, without waiting for this
-// context.
-func OptShutdownContext(factory ShutdownContextFactory) Option {
+// Without this option or OptGracePeriod, items are left to finish on their own. Of the two options, the last one
+// wins.
+func OptGracePeriodFunc(f GracePeriodFunc) Option {
 	return func(c *conveyor) {
-		c.shutdownCtxFactory = factory
+		c.gracePeriodFunc = f
 	}
 }
 
@@ -229,65 +208,6 @@ func (c *conveyor) SetItemsLimit(n int) Conveyor {
 }
 
 func (c *conveyor) ItemsLimit() int { return int(c.itemsLimit.Load()) }
-
-// SetNoAbortPoint sets the node before which items are aborted at shutdown (see the Conveyor interface).
-func (c *conveyor) SetNoAbortPoint(node Unit) Conveyor {
-	// Under runMu no run starts or stops (see tryRun) and no node is added, and under the run's mu the store and the
-	// marking are one step for its items, so a shutdown never sees the new point with the items past it still
-	// unmarked. Nothing is aborted here: once shutdown has begun, every live item is either marked or already
-	// aborted, and a move never clears a mark. Lock order: runMu, then run.mu.
-	c.runMu.Lock()
-	defer c.runMu.Unlock()
-	u := c.noAbortPointUnit(node)
-	r := c.currentRun.Load()
-	if r == nil {
-		if c.noAbortStoreHook != nil {
-			c.noAbortStoreHook()
-		}
-		c.noAbortPoint.Store(u)
-		return c
-	}
-	r.mu.Lock()
-	c.noAbortPoint.Store(u)
-	r.protectReachedLocked()
-	r.mu.Unlock()
-	return c
-}
-
-// noAbortPointUnit returns the unit to store for n: nil for the starting stage, else the unit of a Stage or FanOut
-// of the root series. It panics for anything else. The series is read from the owner, not from unit.scope, which is
-// set only at finalize.
-func (c *conveyor) noAbortPointUnit(n Unit) *unit {
-	if n == nil {
-		panic(fmt.Errorf("nil no-abort point: pass the starting stage to restore the default: %w", errInvalidUnit))
-	}
-	u := n.unit()
-	c.validateUnit(u)
-	var s *series
-	switch o := u.owner.(type) {
-	case startOwner:
-		return nil
-	case *stage:
-		s = o.series
-	case *fanOut:
-		s = o.series
-	default:
-		panic(fmt.Errorf("%s cannot be the no-abort point: only a stage or a fan-out can: %w", u, errInvalidUnit))
-	}
-	if s != c.series {
-		panic(fmt.Errorf("%s cannot be the no-abort point: it belongs to %s, not to the conveyor: %w",
-			u, s.start, errWrongScope))
-	}
-	return u
-}
-
-func (c *conveyor) NoAbortPoint() Unit {
-	u := c.noAbortPoint.Load()
-	if u == nil {
-		return c.StartingStage()
-	}
-	return u.owner.(Unit)
-}
 
 // startOwner names the implicit start stage in Stats and error messages.
 type startOwner struct{}

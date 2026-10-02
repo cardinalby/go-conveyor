@@ -1,7 +1,6 @@
 import { EditableTitle } from "../shared/EditableTitle";
 import { LabeledSlider } from "../shared/LabeledSlider";
 import { SlotStrip } from "../shared/SlotStrip";
-import { NoAbortMarker } from "../shared/NoAbortMarker";
 import { MAX_DELAY_MS, MIN_DELAY_MS } from "../../pipeline/defaults";
 
 const formatDelay = (ms: number) => `${(ms / 1000).toFixed(2)}s`;
@@ -25,12 +24,6 @@ interface Props {
   /** Attaches to the outer element so PipelineCanvas can measure a top-level node — see ../../hooks/useReportSize.
    * Absent for a lane's entrance, which contributes to its ancestor's own measurement instead. */
   shellRef?: React.Ref<HTMLDivElement>;
-  /** Shows the default no-abort point marker. Only the conveyor's own start can be it; never set for a lane's
-   * entrance. */
-  noAbortPoint?: boolean;
-  /** Set only for the conveyor's own start: with noAbortPoint false, shows an empty slot that resets the point to the
-   * start on click. */
-  onResetNoAbortPoint?: () => void;
 }
 
 /** The gate every item (or lane child) passes before its first move: always exactly one slot, a Delay dial for the
@@ -47,17 +40,10 @@ export function StartBox({
   onContextMenu,
   handles,
   shellRef,
-  noAbortPoint = false,
-  onResetNoAbortPoint,
 }: Props) {
   return (
     <div className="node-shell" ref={shellRef}>
-      <div
-        className={`node-box node-start nodrag nopan${noAbortPoint ? " node-no-abort" : ""}`}
-        onContextMenu={onContextMenu}
-      >
-        {noAbortPoint && <NoAbortMarker isDefault />}
-        {!noAbortPoint && onResetNoAbortPoint && <NoAbortMarker slot onClick={onResetNoAbortPoint} />}
+      <div className="node-box node-start nodrag nopan" onContextMenu={onContextMenu}>
         {handles}
         {onRename ? <EditableTitle value={label} onCommit={onRename} /> : <div className="node-name">{label}</div>}
         <LabeledSlider

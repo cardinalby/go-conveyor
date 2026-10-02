@@ -68,9 +68,10 @@ type item struct {
 	// all its slots are released. Between the two the item is over for its own code but its background work may live.
 	returned bool
 	finished bool
-	// noAbort is set on a root item once it enters the no-abort point or a later node, and never cleared: the item
-	// is not aborted when shutdown begins (see SetNoAbortPoint).
-	noAbort bool
+	// untilShutdown is the UntilShutdown context made from ctx itself, cached so repeated calls cost nothing, and
+	// its cancel.
+	untilShutdown       context.Context
+	cancelUntilShutdown context.CancelCauseFunc
 
 	// prev/next link the in-flight items of this scope in creation order (see run.scopeList). prev is the item's
 	// binding predecessor for the ordering gate; both are nil once the item is finished (unlinked).
@@ -150,27 +151,40 @@ func (it *item) poison(cause error) {
 	}
 }
 
-// asAbort maps the error an aborted item returns to the abort itself: if the conveyor canceled the item (its
-// context cause is a ShutdownError) and err is a plain context cancellation, e.g. from a driver interrupted mid-call,
-// the item was aborted, not failed. Any other cause (a failed task or RetainFor) leaves err as it is. Needs no lock.
+// asAbort maps the error an aborted item returns to the abort itself. err must wrap a plain context cancellation,
+// e.g. from a driver interrupted mid-call, and either the conveyor canceled the item (its context cause is a
+// ShutdownError), or the item is not canceled and shutdown has begun (a read canceled through UntilShutdown). Any other
+// cause (a failed task or RetainFor) leaves err as it is. Caller holds run.mu.
 func (it *item) asAbort(err error) error {
 	if err == nil || isShutdown(err) || !errors.Is(err, context.Canceled) {
 		return err
 	}
-	if cause := context.Cause(it.ctx); isShutdown(cause) {
+	cause := context.Cause(it.ctx)
+	if isShutdown(cause) {
 		return cause
+	}
+	if cause == nil && it.run.shutdownErr != nil {
+		return it.run.shutdownErr
 	}
 	return err
 }
 
 // cancelCause is why this item may not go on, or nil: its own context's cause first (the item's true status), else
-// the call context's (a deadline the caller added). Every node method judges cancellation with it, so a context with
-// the cancellation stripped (context.WithoutCancel) cannot act for a canceled item. Needs no lock.
+// the call context's (a deadline the caller added), else the shutdown error for an UntilShutdown context once
+// shutdown has begun, even before that context's Done channel is closed. Every node method judges cancellation with
+// it, so a context with the cancellation stripped (context.WithoutCancel) cannot act for a canceled item. Caller holds
+// run.mu.
 func (it *item) cancelCause(ctx context.Context) error {
 	if err := context.Cause(it.ctx); err != nil {
 		return err
 	}
-	return context.Cause(ctx)
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	if se := it.run.shutdownErr; se != nil && isUntilShutdown(ctx, it.run) {
+		return se
+	}
+	return nil
 }
 
 // hasLiveWaves reports whether any background work of this item is still outstanding. Caller holds run.mu.

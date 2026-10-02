@@ -228,7 +228,7 @@ func TestRunErrorLateFailureDoesNotReplaceTriggerForLaterItems(t *testing.T) {
 			if err := s.MoveTo(ic); err != nil {
 				return err
 			}
-			signal(secondInS) // past the no-abort point: only the boom cascade or the grace period can cancel it
+			signal(secondInS) // only the boom cascade or the grace period can cancel it
 			<-ic.Done()
 			kept <- context.Cause(ic)
 		}
@@ -253,7 +253,7 @@ func TestRunErrorItemSideCauseIsNotFilledByRun(t *testing.T) {
 	boom := errors.New("boom")
 	late := errors.New("late")
 	drainCause := errors.New("grace over")
-	c := NewConveyor(OptShutdownContext(func(error) (context.Context, context.CancelFunc) {
+	c := NewConveyor(OptGracePeriodFunc(func(error) (context.Context, context.CancelFunc) {
 		return context.WithTimeoutCause(context.Background(), 20*time.Millisecond, drainCause)
 	}))
 	s := c.AddStage(OptName("s"))
@@ -298,10 +298,10 @@ func TestRunErrorItemSideCauseIsNotFilledByRun(t *testing.T) {
 	}
 }
 
-// TestRunErrorDrainTimeout: when the shutdown context expires before the items finish, DrainError reports its cause.
+// TestRunErrorDrainTimeout: when the grace period context expires before the items finish, DrainError reports its cause.
 func TestRunErrorDrainTimeout(t *testing.T) {
 	drainCause := errors.New("grace over")
-	c := NewConveyor(OptShutdownContext(func(error) (context.Context, context.CancelFunc) {
+	c := NewConveyor(OptGracePeriodFunc(func(error) (context.Context, context.CancelFunc) {
 		return context.WithTimeoutCause(context.Background(), 20*time.Millisecond, drainCause)
 	}))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -327,7 +327,7 @@ func TestRunErrorDrainTimeout(t *testing.T) {
 
 // TestRunErrorNoDrainErrorWhenItemsFinish: items that finish inside the grace period leave DrainError nil.
 func TestRunErrorNoDrainErrorWhenItemsFinish(t *testing.T) {
-	c := NewConveyor(optShutdownGracePeriod(testTimeout))
+	c := NewConveyor(OptGracePeriod(testTimeout))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -348,7 +348,7 @@ func TestRunErrorNoDrainErrorWhenItemsFinish(t *testing.T) {
 // TestAbortedItemReturningPlainCancelIsNotAFailure: an item the conveyor canceled that returns a bare
 // context.Canceled (e.g. from an interrupted driver call) is aborted, not failed.
 func TestAbortedItemReturningPlainCancelIsNotAFailure(t *testing.T) {
-	c := NewConveyor(optCancelItemsOnShutdown())
+	c := NewConveyor(OptGracePeriod(0))
 	cause := errors.New("stop")
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)

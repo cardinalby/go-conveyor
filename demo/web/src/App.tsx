@@ -19,7 +19,6 @@ import {
   removeNode,
   rewriteBranchLists,
   rewriteNodeLists,
-  setNoAbortPoint,
 } from "./pipeline/mutations";
 import { clamp, MAX_ITEMS_LIMIT, MIN_ITEMS_LIMIT } from "./pipeline/defaults";
 import { useFailModifierClass } from "./hooks/useFailModifierClass";
@@ -290,18 +289,6 @@ function App() {
     [mode],
   );
 
-  // A click on a node's no-abort slot or tag (see shared/NoAbortMarker); null is the start. Live like the dials
-  // above: conveyor.Conveyor.SetNoAbortPoint is safe on a running conveyor at any time.
-  const handleSetNoAbortPoint = useCallback(
-    (id: string | null) => {
-      setPipeline((p) => setNoAbortPoint(p, id));
-      if (mode !== "run") return;
-      api.setNoAbortPoint(id);
-      setRunState(api.state());
-    },
-    [mode],
-  );
-
   // Click-to-rename on a node/branch title (see EditableTitle) — build-mode config only, like a node's name has
   // always been: go-conveyor bakes a unit's name in at Build time (OptName), so a live conveyor has no rename call
   // to make, unlike the numeric dials above. An empty commit clears back to the positional default (see
@@ -490,7 +477,6 @@ function App() {
           onRenameStart={handleRenameStart}
           onRenameBranch={handleRenameBranch}
           onRenameEntrance={handleRenameEntrance}
-          onSetNoAbortPoint={handleSetNoAbortPoint}
           itemPositions={itemPositions}
           onFailItem={handleFailItem}
           onFailTask={handleFailTask}

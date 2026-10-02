@@ -78,10 +78,10 @@ first `Run`, and idempotently from `newRun`.
 ## 3. Per-run state
 
 `conveyor` (the unexported implementation behind the `Conveyor` interface) is immutable topology shared across
-`Run` invocations — except the two atomic capacities, a fan-out node's atomic backpressure mode and the atomic
-`noAbortPoint` unit. All mutable state lives on `run`, allocated fresh per `Run`, so nothing leaks between
-invocations. `conveyor.currentRun` is an atomic pointer to the active run (nil outside a run); it backs `Stats` and
-lets `SetLimit` / `SetQueueSize` / `SetBackpressure` / `SetNoAbortPoint` reach a live run.
+`Run` invocations — except the two atomic capacities and a fan-out node's atomic backpressure mode. All mutable
+state lives on `run`, allocated fresh per `Run`, so nothing leaks between invocations. `conveyor.currentRun` is an
+atomic pointer to the active run (nil outside a run); it backs `Stats` and lets `SetLimit` / `SetQueueSize` /
+`SetBackpressure` reach a live run.
 
 Everything below `run.mu` is guarded by it:
 
@@ -89,7 +89,8 @@ Everything below `run.mu` is guarded by it:
 - `taskQueues[]` — per-branch queue of `*taskCollection`, ordered by item age and then submission (§7);
 - `scopes[]` — the in-flight item list of each scope (0 = the root series, one per branch);
 - `inFlight`, `liveWorkers` — windowed gauges;
-- the pool bookkeeping (`idle`, `spawning`, `stopCreating`, `nextItemNo`, `nextSeq`, `runErr`).
+- the pool bookkeeping (`idle`, `spawning`, `stopCreating`, `nextItemNo`, `nextSeq`);
+- the shutdown state (`trigger`, `shutdownErr`, `lateErrs`, `drainErr`).
 
 `run.cond` is **broadcast, never signaled**, on every mutation: waiters block on different conditions, so a
 targeted wake is not possible and all of them must re-check. `waitUntil` is the single blocking helper — it checks
@@ -528,7 +529,8 @@ cancellation is item-wide. Because `Schedule` on a canceled item returns the cau
 is dropped at the head, a failing tree terminates: running tasks finish, nothing new is accepted.
 
 **Cancellation is judged by the item, not by the context passed.** `item.cancelCause` reads the cancellation cause
-of the item's own context first, then the call context's, and every node method decides with it: the admission waits
+of the item's own context first, then the call context's, then — for an `UntilShutdown` context once shutdown has
+begun — `run.shutdownErr`. It runs under `mu`, and every node method decides with it: the admission waits
 and `Wave.Wait` (`waitUntil`), the `TryMoveTo` preamble (`actingItem` with `checkCancel`), `Schedule`, `Wait`, and
 `RetainFor`'s decision to run its callback (`Retain` keeps its hold regardless: a canceled call context does not stop the item from moving on with its own). A context with cancellation stripped (`context.WithoutCancel`) therefore
 cannot move, schedule, wait or retain for a canceled item, which is what keeps a canceled item from committing past
@@ -545,37 +547,47 @@ exhausted), then computes the effective error: the processor's own, else the fir
 observed. Then:
 
 - a **child** reports it to `parentWave.workDone`, which cancels the parent and surfaces there;
-- a **root item's** real error triggers error-shutdown: record it as `runErr`, cancel every *later* item with a
-  `ShutdownError` (earlier ones are left to finish), and `markShutdownLocked`.
+- a **root item's** real error triggers error-shutdown: `markShutdownLocked`, record it as the trigger (or in
+  `lateErrs`), and cancel every *later* item with `shutdownErr` (earlier ones are left to finish);
+- a **root item's** abort (the effective error is a `ShutdownError`) while shutdown is in progress is the **abort
+  cascade**: every later item is canceled with `shutdownErr` too. Returning nil never cascades, and a child's abort
+  does not cascade by itself (it poisons its parent, as any wave error does).
+
+Both cascades run under `mu` before `finishItem`. A younger item can pass the aborted one only after it is unlinked,
+so by then it is canceled: no younger item enters a node the aborted one did not reach, which leaves no gap.
 
 Slots are released and the context canceled before a child's outcome is reported, so a parent joining the wave sees
 the branch already released.
 
-**Shutdown** has two triggers — the `Run` context being canceled, or an item error — and both close `shutdownCh`.
-`watchShutdown` then asks the `ShutdownContextFactory` (`OptShutdownContext`) for the context that bounds the
-in-flight items, passing the shutdown cause, and cancels them once that context is done — no factory, or a nil
-context from it, leaves them to finish. The factory is asked at most once per run, and not at all if the run drains
-just as the shutdown is noticed; its `CancelFunc` runs before `Run` returns, so a timer-backed context is released
-promptly. Cancellation goes through the common
-parent `itemsCtx`, so items blocked in a node method return promptly; code inside an ItemProcessor that ignores its
-context is not forcibly interrupted. Items already canceled individually keep their more specific cause, since the
-first cancellation of a context wins.
+**Shutdown** has two triggers — the `Run` context being canceled, or an item error. Both go through
+`markShutdownLocked` (under `mu`): it sets `stopCreating`, records the first `trigger` with
+`shutdownErr = &shutdownError{cause: trigger}`, cancels `run.shutdownCtx` with it, and closes `shutdownCh`.
+`watchShutdown` then asks the `GracePeriodFunc` (`OptGracePeriodFunc`; `OptGracePeriod(d)` is a func returning
+`context.WithTimeout(d)`) for the context that bounds the grace period, passing the shutdown cause, and cancels the
+in-flight items once that context is done — no func, or a nil context from it, leaves them to finish. The func is
+asked at most once per run, and not at all if the run drains just as the shutdown is noticed; its `CancelFunc` runs
+before `Run` returns, so a timer-backed context is released promptly. Cancellation goes through the common parent
+`itemsCtx`, so items blocked in a node method return promptly; code inside an ItemProcessor that ignores its context
+is not forcibly interrupted. Items already canceled individually keep their more specific cause, since the first
+cancellation of a context wins.
 
-**No-abort point.** A root item gets `item.noAbort` (`markNoAbortLocked`, wherever `reachedRank` grows: `occupy`
-and `takeQueue`) once `reachedRank >= point.rank`: it entered the point or a later node, or a later node's waiting
-room. The waiting room must count: younger items may enter the point while an older one waits there. The default,
-the starting stage, is rank 0, so every item gets it at birth. The mark is never
-cleared. `SetNoAbortPoint` stores the point under `mu` of a live run and calls `protectReachedLocked`, which marks
-the live items that have already reached the new point. When shutdown begins (both triggers, from
-`markShutdownLocked`), `abortUnprotectedLocked` walks the root scope from the tail while `!noAbort` and cancels each
-item with a `ShutdownError`.
+**`UntilShutdown(ctx)`** resolves the item from ctx (a lane child's or a pool task's context resolves to its child
+item or its owner) and returns `WithValue(WithCancelCause(ctx), untilShutdownCtxKey, mark)`. Values and the item's
+cancellation are inherited. Its cancel is called with `shutdownErr`:
 
-The marked items are always a prefix of the list (the oldest items): `reachedRank` is non-increasing with item age,
-because a younger item enters `u` only if `prev.maxRank >= u.rank`, and `reachedRank >= maxRank` (invariant 2); the
-setter's walk marks a prefix, and a union of prefixes is a prefix. So both walks stop at the first marked item,
-costing O(changed items), and older items finish while younger ones are aborted, as in error-shutdown: no aborted
-item can be passed by a younger one that commits. After shutdown begins every live item is marked or aborted, so a
-later `SetNoAbortPoint` aborts nothing. Lane children go with their parent's context.
+- at once, under `mu`, if shutdown has begun (born done);
+- else by a `context.AfterFunc` on `run.shutdownCtx`. A second `AfterFunc` on the derived context stops the first
+  once it is done, so the watch lives no longer than ctx; `Run` cancels `shutdownCtx` on return as a backstop.
+
+The context made from the item's own ctx is cached on the item (`item.untilShutdown`), so a call in a loop costs one
+registration per item; a call with any other ctx makes a new one, released with ctx. Its `Done` is closed by a
+goroutine, so it may lag the shutdown. Node methods do not rely on it: `cancelCause` checks `shutdownErr` under `mu`
+for any context carrying the mark, in the same lock hold as the entry, so a move with it never succeeds once
+`markShutdownLocked` has run, and a waiter woken by its broadcast fails.
+
+**Abort classification** (`item.asAbort`, under `mu`). An error that wraps `context.Canceled` is mapped to an abort
+when the item's own context cause is a `ShutdownError`, or when the item's context is not canceled and shutdown has
+begun (e.g. a read canceled through `UntilShutdown`). Any other item cause (a failed task) keeps the error.
 
 **`ShutdownError`** is a sealed interface, so an ItemProcessor cannot fabricate a value that `completeItem` would
 mistake for a shutdown abort — `isShutdown` can therefore trust `errors.As`.
@@ -676,7 +688,7 @@ Break any of these and the model stops holding:
    source releases all run outside the lock. `dropCollection` therefore hands abandoned sources to their own
    goroutine.
 7. **An error is never lost.** A wave whose error nobody acknowledged fails its item at completion; a root item's
-   real error becomes `runErr`.
+   real error becomes the trigger, or is listed in `lateErrs`.
 8. **No slot outlives its item, and no item sits somewhere holding nothing.** The two halves of the retain
    handover, and of the upstream hold: a held token is freed by a discharge (the mode's start milestone, or a body
    sealed with no root submission) or by `finishItem`, whichever comes first, and every discharge goes through
@@ -684,6 +696,8 @@ Break any of these and the model stops holding:
 9. **A body is idle whenever it is observed idle.** A spawn is only accepted from running work of the same wave, so
    an idle wave cannot have work still to come; `Wait` and the leave may therefore decide on `idle()` alone. A sealed
    idle wave is finished and refuses additions.
+10. **No root item gets past a failed or aborted older one.** That item cancels every younger one under `mu` before
+    it is unlinked, and a younger item cannot pass it before then (§10).
 
 ## 14. Why one slot per task is deadlock-free
 

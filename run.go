@@ -45,10 +45,17 @@ type run struct {
 	// trigger is why the shutdown began, set once by the first event: the Run context's cancellation cause, or the
 	// *itemError of the first failed item. It is Run's result (see result) and the cause of the ShutdownError that
 	// aborted items see.
-	trigger  error
-	lateErrs []error        // *itemError of the items that failed after the trigger
-	drainErr error          // cause of the shutdown context, if it was done before the items finished
-	workers  sync.WaitGroup // all root-item worker goroutines
+	trigger error
+	// shutdownErr is the ShutdownError with the trigger as cause, set with it. Its presence is the "shutdown has begun"
+	// flag that UntilShutdown contexts and the abort rules check under mu.
+	shutdownErr *shutdownError
+	// shutdownCtx is canceled with shutdownErr in the same step that sets it, and when Run returns. UntilShutdown
+	// contexts watch it.
+	shutdownCtx    context.Context
+	cancelShutdown context.CancelCauseFunc
+	lateErrs       []error        // *itemError of the items that failed after the trigger
+	drainErr       error          // cause of the grace period context, if it was done before the items finished
+	workers        sync.WaitGroup // all root-item worker goroutines
 
 	// shutdownCh is closed once, when shutdown begins from either trigger (caller-context cancellation or an
 	// item error). watchShutdown waits on it to bound how long the in-flight items may keep running.
@@ -60,7 +67,8 @@ type run struct {
 // the context it receives. It need not enter every node and may return early.
 //
 // Returning an error shuts the conveyor down: no new items are created, later items are canceled, and earlier ones
-// are allowed to finish, except those before the no-abort point (see Conveyor.SetNoAbortPoint).
+// are allowed to finish. An item aborted during the shutdown cancels all younger items too. Use UntilShutdown for the
+// part of the path that should stop at once when shutdown begins.
 //
 // Cancellation is judged by the item's own context. Once it is canceled (a failed task or RetainFor, a shutdown), every
 // node method returns the cause, even when called with a context that hides the cancellation
@@ -75,7 +83,8 @@ func (c *conveyor) Run(ctx context.Context, itemProcessor ItemProcessor) error {
 		return err
 	}
 	defer c.stopRun()
-	defer r.cancelItems(nil) // release any item contexts still lingering when Run returns
+	defer r.cancelItems(nil)    // release any item contexts still lingering when Run returns
+	defer r.cancelShutdown(nil) // and the UntilShutdown watches
 
 	// Watch the caller's context; its cancellation begins a graceful shutdown.
 	stopWatch := make(chan struct{})
@@ -113,8 +122,7 @@ func (r *run) result(ctx context.Context) error {
 	return &shutdownError{cause: cause, drain: r.drainErr, items: slices.Clone(r.lateErrs)}
 }
 
-// tryRun creates the run and publishes it as currentRun, under runMu: SetNoAbortPoint relies on no run starting
-// while it holds runMu.
+// tryRun creates the run and publishes it as currentRun, under runMu.
 func (c *conveyor) tryRun(itemProcessor ItemProcessor) (*run, error) {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
@@ -126,6 +134,7 @@ func (c *conveyor) tryRun(itemProcessor ItemProcessor) (*run, error) {
 	r := c.newRun()
 	r.proc = itemProcessor
 	r.itemsCtx, r.cancelItems = context.WithCancelCause(context.Background())
+	r.shutdownCtx, r.cancelShutdown = context.WithCancelCause(context.Background())
 	c.currentRun.Store(r)
 	return r, nil
 }
@@ -139,10 +148,10 @@ func (c *conveyor) stopRun() {
 
 // watchShutdown waits for shutdown to begin — from either trigger: the caller cancels ctx, or an item error
 // closes shutdownCh — and then bounds how long the in-flight items may keep running: it asks the configured
-// ShutdownContextFactory for the shutdown context (see OptShutdownContext) and cancels the items once that context
-// is done. No factory, or a nil context from it, leaves the items to finish on their own.
+// GracePeriodFunc for the grace period context (see OptGracePeriodFunc) and cancels the items once that context is
+// done. No func, or a nil context from it, leaves the items to finish on their own.
 //
-// It exits early (without touching in-flight items, and without asking the factory) if the run drains before any
+// It exits early (without touching in-flight items, and without asking the func) if the run drains before any
 // shutdown, which the closing of stopWatch signals.
 func (r *run) watchShutdown(ctx context.Context, stopWatch <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
@@ -156,31 +165,31 @@ func (r *run) watchShutdown(ctx context.Context, stopWatch <-chan struct{}, done
 		// shutdown already begun by an item error
 	}
 
-	factory := r.conveyor.shutdownCtxFactory
-	if factory == nil {
+	grace := r.conveyor.gracePeriodFunc
+	if grace == nil {
 		return // no limit: in-flight items are left to finish
 	}
-	shutdownCtx, cancel := factory(r.shutdownCause())
+	graceCtx, cancel := grace(r.shutdownCause())
 	if cancel != nil {
-		// Release the shutdown context (a timer, typically) as soon as it is out of use: the watcher outlives the
+		// Release the grace period context (a timer, typically) as soon as it is out of use: the watcher outlives the
 		// items it bounds by nothing, and Run joins it before returning.
 		defer cancel()
 	}
-	if shutdownCtx == nil {
+	if graceCtx == nil {
 		return // the caller declined a limit for this shutdown
 	}
 	select {
-	case <-shutdownCtx.Done():
+	case <-graceCtx.Done():
 		r.mu.Lock()
-		r.drainErr = context.Cause(shutdownCtx)
+		r.drainErr = context.Cause(graceCtx)
 		r.mu.Unlock()
-		r.cancelInFlight() // the items outlived the shutdown context
+		r.cancelInFlight() // the items outlived the grace period
 	case <-stopWatch:
 	}
 }
 
 // beginShutdown stops new items from being created and wakes all waiters so idle workers exit and blocked node
-// calls re-evaluate. In-flight items are otherwise left running, except those before the no-abort point.
+// calls re-evaluate. In-flight items are otherwise left running.
 func (r *run) beginShutdown(cause error) {
 	r.mu.Lock()
 	r.markShutdownLocked(cause)
@@ -188,56 +197,19 @@ func (r *run) beginShutdown(cause error) {
 	r.mu.Unlock()
 }
 
-// markShutdownLocked records that shutdown has begun: it stops new items from being created, aborts the items
-// before the no-abort point, and signals the watcher (which applies the shutdown context). cause becomes the
-// trigger unless an earlier one is kept. Idempotent. The caller holds r.mu and must broadcast.
+// markShutdownLocked records that shutdown has begun: it stops new items from being created, cancels the
+// UntilShutdown contexts, and signals the watcher (which applies the grace period). cause becomes the trigger unless
+// an earlier one is kept. Idempotent. The caller holds r.mu and must broadcast.
 func (r *run) markShutdownLocked(cause error) {
 	r.stopCreating = true
 	if r.trigger == nil {
 		r.trigger = cause
+		r.shutdownErr = &shutdownError{cause: cause}
+		// Under mu: node methods check shutdownErr in the same lock hold as an entry, so an UntilShutdown context
+		// never enters a node after this point, even before its Done channel is closed.
+		r.cancelShutdown(r.shutdownErr)
 	}
-	r.abortUnprotectedLocked(r.trigger)
 	r.shutdownOnce.Do(func() { close(r.shutdownCh) })
-}
-
-// abortUnprotectedLocked cancels with a ShutdownError every root item that is not marked noAbort (see
-// SetNoAbortPoint). The marked items are always the oldest ones (see protectReachedLocked), so the walk from the tail
-// stops at the first marked item, costing O(aborted items). Lane children go with their parents' contexts. Caller
-// holds mu and must broadcast.
-func (r *run) abortUnprotectedLocked(cause error) {
-	for it := r.scopes[0].tail; it != nil && !it.noAbort; it = it.prev {
-		it.cancel(&shutdownError{cause: cause})
-	}
-}
-
-// noAbortRankLocked is the rank of the no-abort point: 0, the starting stage, by default. Caller holds mu.
-func (r *run) noAbortRankLocked() int {
-	if p := r.conveyor.noAbortPoint.Load(); p != nil {
-		return p.rank
-	}
-	return 0
-}
-
-// markNoAbortLocked marks a root item noAbort once its reachedRank reaches the no-abort point: it has entered the
-// point or a later node, or the waiting room of a later node (younger items may then enter the point, so it must
-// count as past it to keep the marked items a prefix). Called wherever reachedRank grows. Caller holds mu.
-func (r *run) markNoAbortLocked(it *item) {
-	if it.scope == 0 && !it.noAbort && it.reachedRank >= r.noAbortRankLocked() {
-		it.noAbort = true
-	}
-}
-
-// protectReachedLocked marks noAbort every live root item that has entered the no-abort point or a later node, after
-// the point was moved. By invariant 2 reachedRank is non-increasing with item age, and marks are never cleared, so
-// the marked items stay a prefix of the root list: the walk from the tail stops at the first marked item. An aborted
-// item is not marked: its abort can't be undone. Caller holds mu.
-func (r *run) protectReachedLocked() {
-	rank := r.noAbortRankLocked()
-	for it := r.scopes[0].tail; it != nil && !it.noAbort; it = it.prev {
-		if it.reachedRank >= rank && it.ctx.Err() == nil {
-			it.noAbort = true
-		}
-	}
 }
 
 // cancelInFlight cancels every in-flight item's context with a ShutdownError by canceling their common parent, so
@@ -247,16 +219,16 @@ func (r *run) protectReachedLocked() {
 // completeItem) keep their more specific cause, since the first cancellation of a context wins.
 func (r *run) cancelInFlight() {
 	r.mu.Lock()
-	trigger := r.trigger
+	cause := r.shutdownErr
 	r.mu.Unlock()
-	r.cancelItems(&shutdownError{cause: trigger})
+	r.cancelItems(cause)
 	r.mu.Lock()
 	r.cond.Broadcast()
 	r.mu.Unlock()
 }
 
-// shutdownCause is why the shutdown began, as the ShutdownContextFactory is told: the first failed item's own
-// error, or the Run context's cancellation cause. Deliberately not the shutdown context's own cause: an expired
+// shutdownCause is why the shutdown began, as the GracePeriodFunc is told: the first failed item's own error, or
+// the Run context's cancellation cause. Deliberately not the grace period context's own cause: an expired
 // grace period says nothing an item does not already know, while the trigger does (it is reported by
 // RunError.DrainError instead).
 func (r *run) shutdownCause() error {
@@ -266,6 +238,13 @@ func (r *run) shutdownCause() error {
 		return ie.err
 	}
 	return r.trigger
+}
+
+// cancelLater cancels every root item younger than it with the shutdown error. Caller holds mu and must broadcast.
+func (r *run) cancelLater(it *item) {
+	for later := it.next; later != nil; later = later.next {
+		later.cancel(r.shutdownErr)
+	}
 }
 
 // itemUnit is the node a root item occupies or waits in front of now, for ItemError.Unit. Caller holds mu.
@@ -352,8 +331,9 @@ func (r *run) acquireItem(arrived bool) *item {
 // (see Wave). Where it goes depends on the kind of item:
 //   - a child reports it to the wave that created it, which cancels its parent (fail-fast) and surfaces there;
 //   - a root item's real (non-shutdown) error triggers error-shutdown: record the first error, stop creating, and
-//     cancel every later item so they abort while earlier items keep finishing (those before the no-abort point are
-//     aborted too, see markShutdownLocked).
+//     cancel every later item so they abort while earlier items keep finishing;
+//   - a root item's abort during a shutdown cancels every later item too (the abort cascade), so no later item
+//     gets past it.
 func (r *run) completeItem(it *item, procErr error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -394,13 +374,14 @@ func (r *run) completeItem(it *item, procErr error) {
 			r.lateErrs = append(r.lateErrs, ie) // the shutdown began earlier; this failure is reported beside it
 		}
 		// Cancel every later item immediately (error semantics), with the trigger as the shutdown cause: this error,
-		// or the earlier event that began the shutdown. Earlier items are left to finish, bounded by the shutdown
-		// context via the watcher that markShutdownLocked wakes, except those before the no-abort point, which
-		// markShutdownLocked aborts.
+		// or the earlier event that began the shutdown. Earlier items are left to finish, bounded by the grace period
+		// via the watcher that markShutdownLocked wakes.
 		r.markShutdownLocked(ie)
-		for later := it.next; later != nil; later = later.next {
-			later.cancel(&shutdownError{cause: r.trigger})
-		}
+		r.cancelLater(it)
+	} else if it.parentWave == nil && isShutdownErr && r.shutdownErr != nil {
+		// The abort cascade: a younger item must not finish past an aborted one. Before finishItem, so no younger
+		// item can pass it through the ordering gate first.
+		r.cancelLater(it)
 	}
 	r.finishItem(it)
 	if it.cancel != nil {

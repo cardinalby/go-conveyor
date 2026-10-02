@@ -22,8 +22,6 @@ export const StartNodeView = memo(function StartNodeView(props: NodeProps) {
       delayMs={d.delayMs}
       onEditDelay={d.onEditDelay}
       shellRef={ref}
-      noAbortPoint={d.noAbortPoint}
-      onResetNoAbortPoint={d.onResetNoAbortPoint}
       onContextMenu={(e) => {
         e.preventDefault();
         d.onContextMenu({ kind: "start" }, e);

@@ -15,7 +15,16 @@ const (
 	// holds still carries its scheduling item — so the marker is what turns an attempted move into a clear panic
 	// instead of silently moving that item from a task goroutine.
 	poolWorkCtxKey
+	// untilShutdownCtxKey marks a context made by UntilShutdown (see untilShutdownMark).
+	untilShutdownCtxKey
 )
+
+// untilShutdownMark is the value under untilShutdownCtxKey: the run whose shutdown ends the context, and the
+// context's Done channel, which tells the marked context itself from a derivation that drops its cancellation.
+type untilShutdownMark struct {
+	r    *run
+	done <-chan struct{}
+}
 
 // poolWorkMarker identifies the collection whose work holds the context. Through it the runtime reaches the pool
 // (to name it when the work tries to move), and the wave and owning item the work is charged to.
@@ -42,6 +51,71 @@ func ItemNoFromContext(ctx context.Context) (no int64, ok bool) {
 		return it.no, true
 	}
 	return 0, false
+}
+
+// UntilShutdown returns a context derived from ctx, an item's context, that is also done once shutdown of the run
+// begins: the Run context is canceled, or an item fails. Its cause is then a ShutdownError. If shutdown has already
+// begun, the context is born done. Node methods called with it fail after shutdown has begun.
+//
+// Use it for the part of the path that may stop at once, such as reading the input and moving into the first node
+// with side effects; use ctx after that:
+//
+//	pre := conveyor.UntilShutdown(ctx)
+//	msg, err := reader.Fetch(pre)
+//	if err != nil {
+//		return err // an abort, not a failure, once shutdown has begun
+//	}
+//	if err := write.MoveTo(pre); err != nil {
+//		return err
+//	}
+//	// from here on, use ctx
+//
+// An error wrapping context.Canceled returned after shutdown has begun counts as an abort (see Conveyor.Run). An
+// item may also go on with ctx after its UntilShutdown context is done, e.g. to finish a partial batch.
+//
+// A ctx that does not belong to a conveyor item is returned unchanged.
+func UntilShutdown(ctx context.Context) context.Context {
+	it, ok := ctx.Value(itemCtxKey).(*item)
+	if !ok || it == nil {
+		return ctx
+	}
+	r := it.run
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	m, ok := ctx.Value(untilShutdownCtxKey).(untilShutdownMark)
+	if ok && m.r == r && m.done == ctx.Done() && (r.shutdownErr == nil || ctx.Err() != nil) {
+		return ctx // already one
+	}
+	if ctx != it.ctx {
+		out, _ := r.newUntilShutdown(ctx)
+		return out
+	}
+	if it.untilShutdown == nil {
+		it.untilShutdown, it.cancelUntilShutdown = r.newUntilShutdown(ctx)
+	} else if r.shutdownErr != nil {
+		it.cancelUntilShutdown(r.shutdownErr) // done now, not only once its watch has run
+	}
+	return it.untilShutdown
+}
+
+// newUntilShutdown derives the UntilShutdown context of ctx. The watch on shutdownCtx is stopped once the context is
+// done, so it lives no longer than ctx (and at most until Run returns). Caller holds mu.
+func (r *run) newUntilShutdown(ctx context.Context) (context.Context, context.CancelCauseFunc) {
+	d, cancel := context.WithCancelCause(ctx)
+	out := context.WithValue(d, untilShutdownCtxKey, untilShutdownMark{r: r, done: d.Done()})
+	if r.shutdownErr != nil {
+		cancel(r.shutdownErr)
+		return out, cancel
+	}
+	stop := context.AfterFunc(r.shutdownCtx, func() { cancel(context.Cause(r.shutdownCtx)) })
+	context.AfterFunc(d, func() { stop() })
+	return out, cancel
+}
+
+// isUntilShutdown reports whether ctx is, or derives from, an UntilShutdown context of run r.
+func isUntilShutdown(ctx context.Context, r *run) bool {
+	m, ok := ctx.Value(untilShutdownCtxKey).(untilShutdownMark)
+	return ok && m.r == r
 }
 
 // itemFromContext resolves the item a node method is being called for. It returns ErrForeignContext if the context

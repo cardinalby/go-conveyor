@@ -2,7 +2,6 @@ import { callWasmMethod, ready } from "./wasmHandler";
 import type { Spec } from "../types/topology";
 import type { RunState } from "../types/state";
 import type { FanOutBackpressure } from "../types/pipeline";
-import { START_ID } from "../types/topology";
 
 interface NodeValueRequest {
   id: string;
@@ -18,11 +17,6 @@ interface NodeStringRequest {
 // Body shape of setItemsLimit (see wasmapi.itemsLimitRequest) — global, so unlike NodeValueRequest it names no node.
 interface ItemsLimitRequest {
   value: number;
-}
-
-// Body shape of setNoAbortPoint (see wasmapi.nodeIDRequest).
-interface NodeIDRequest {
-  id: string;
 }
 
 // Shared body shape of failItem / failTask (see wasmapi.failureRequest): laneId is read by failTask only, since
@@ -55,10 +49,6 @@ export const api = {
   /** Adjusts the running conveyor's global items-in-flight cap — see runtime.Manager.SetItemsLimit. */
   setItemsLimit(value: number): RunState {
     return callWasmMethod<RunState>("setItemsLimit", { value } satisfies ItemsLimitRequest);
-  },
-  /** Moves the running conveyor's no-abort point; null is the start — see runtime.Manager.SetNoAbortPoint. */
-  setNoAbortPoint(id: string | null): RunState {
-    return callWasmMethod<RunState>("setNoAbortPoint", { id: id ?? START_ID } satisfies NodeIDRequest);
   },
   setLimit(id: string, value: number): RunState {
     return callWasmMethod<RunState>("setLimit", { id, value } satisfies NodeValueRequest);
