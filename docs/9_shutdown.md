@@ -1,6 +1,7 @@
 # Shutdown
 
-Shutdown begins when the context passed to `Run` is canceled, or when an item returns an error. It has three steps:
+Shutdown begins when the context passed to `Run` is canceled, or when an item fails: it returns an error, or a task
+error it never joined (see [Errors](4_fan-out.md#errors)). It has three steps:
 1. **Shutdown begins**: no new items are started, and contexts from [`UntilShutdown`](#untilshutdown) are canceled.
 2. **Drain**: items already in the pipeline finish.
 3. **Drain times out** (only with [`OptDrainTimeout` / `OptDrainContextFunc`](#drain-timeout)): the contexts of the remaining items are canceled.
@@ -40,22 +41,22 @@ Both are `RunError`s. `DrainError()` tells how the items in flight when shutdown
   the remaining items were canceled.
 
 `DrainError()` is only the first problem and never repeats what began the shutdown. To see every failure, log it where
-it happens: in the ItemProcessor, a task, a lane callback, or a `RetainFor` callback.
+it happens: in the ItemProcessor, a task, a lane callback, or a `RetainFor` task.
 
 Items aborted by the conveyor are not failures and are not reported. An item is aborted when:
-- its error is or wraps a `ShutdownError`: from a node method, or `context.Cause(pre)` of an
-  [`UntilShutdown`](#untilshutdown) context;
+- its error is or wraps a `ShutdownError`: from a node method, or from `ShutdownCause(pre, err)` for a call made
+  with an [`UntilShutdown`](#untilshutdown) context;
 - the conveyor canceled it (younger than a dropped item, or the drain timed out). Then any error it returns is an
   abort.
 
 Any other error is a failure, also one that wraps `context.Canceled`. A driver call interrupted by an `UntilShutdown`
-context returns such an error: return `context.Cause(pre)` instead to abort (see the example below).
+context returns such an error: return `conveyor.ShutdownCause(pre, err)` instead to abort (see the example below).
 
 Items see a `ShutdownError` as the cause of their context. It unwraps to the reason: the `Run` context's cause, or
 the `ItemError` of the item that failed first. `DrainError()` is always nil there.
 
 Any error the ItemProcessor returns, an abort too, cancels the item's context, and with it the item's tasks and
-`RetainFor` work that still run. Only a nil return lets them finish.
+`RetainFor` tasks that still run. Only a nil return lets them finish.
 
 An item that fails or is aborted cancels all younger items. So a younger item never enters a node that an older
 dropped item did not enter. This matters for cumulative commits like Kafka offsets: do the commit in its own stage,
@@ -74,10 +75,7 @@ c.Run(ctx, func(ctx context.Context) error {
     pre := conveyor.UntilShutdown(ctx) // dropped if shutdown begins before write
     msg, err := reader.Fetch(pre)
     if err != nil {
-        if pre.Err() != nil {
-            return context.Cause(pre) // a ShutdownError: an abort, not a failure
-        }
-        return err
+        return conveyor.ShutdownCause(pre, err) // a ShutdownError if pre stopped it: an abort, not a failure
     }
     if err := write.MoveTo(pre); err != nil { // last call with pre
         return err // a ShutdownError once shutdown has begun
@@ -97,8 +95,10 @@ Use `pre` while dropping the item is still safe: nothing is done yet that must b
 `ctx` at the first step that must finish. `MoveTo(pre)` only affects the wait to enter the node (queue,
 backpressure). Never use `pre` for the side effect itself.
 
-After a failed call with `pre`, check `pre.Err()` and return `context.Cause(pre)`. The call's own error wraps
-`context.Canceled`: returned as is, it is a failure, not an abort.
+Pass the error of a call made with `pre` through
+[`conveyor.ShutdownCause(pre, err)`](https://pkg.go.dev/github.com/cardinalby/go-conveyor#ShutdownCause). If `pre`
+stopped the call, the call's own error wraps `context.Canceled`: returned as is, it is a failure, not an abort.
+`ShutdownCause` replaces it with the `ShutdownError`; any other error is returned as is.
 
 Use `pre` only before the stage where side effects start, not inside it. An item dropped there is aborted and cancels
 all younger items, also those in the same stage (with `SetLimit(n > 1)`) that already started their side effects.
@@ -148,14 +148,29 @@ done. So `UntilShutdown(context.WithValue(ctx, k, v))` in a loop of a long-runni
 
 ### Tasks and lane children
 
-Any error a pool task or a lane child returns fails its item at once: the item's context and its sibling tasks are
-canceled. This includes the error of a call interrupted by an `UntilShutdown` context. Return the error only if
-dropping the whole item is fine. If sibling work must finish, return nil on shutdown and tell the item through the
-task's result:
+A task error does not fail the item at once. It cancels the other tasks of the same fan-out body, and the join
+(`MoveTo` out of the fan-out, `FanOut.Wait`, `TaskGroup.Wait`) returns it as a `TaskError`. The item fails only if the
+processor returns it, or never joins the tasks. See [Errors](4_fan-out.md#errors).
+
+During a shutdown, the error of a pool task, a lane child or a `RetainFor` task is classified like this:
+
+- **The conveyor canceled the item** (it is younger than a dropped item, or the drain timed out): the tasks see the
+  cancellation, and any error they return is an abort. The join returns the `ShutdownError`, never a `TaskError`.
+- **A task returns a `ShutdownError`**, e.g. `ShutdownCause(pre, err)` for a call made with an `UntilShutdown`
+  context: an abort of that task. The other tasks of the body go on, and the join returns the `ShutdownError` once they have stopped.
+- **A task returns any other error**, also one that wraps `context.Canceled`: a failure. The other tasks of the body
+  are canceled, and the join returns a `TaskError`.
+
+The processor that returns the join's error aborts the item for a `ShutdownError` and fails it for a `TaskError`.
+
+A failure is reported as for any item: it is the trigger of the shutdown, or `RunError.DrainError()` if shutdown has
+already begun. An abort is never a failure and never appears in `DrainError()`. The same holds for an error of tasks
+the processor never joined: when the processor returns, a `TaskError` fails the item and a `ShutdownError` aborts it.
+
+So a task that should stop on shutdown without stopping its siblings returns `ShutdownCause(pre, err)`:
 
 ```go
 c.Run(ctx, func(ctx context.Context) error {
-    var stopped error // set by the task, read after Wait
     err := fo.Schedule(ctx,
         writes.NewTask(func(ctx context.Context) error {
             return db.Write(ctx, msg) // must finish
@@ -164,11 +179,7 @@ c.Run(ctx, func(ctx context.Context) error {
             pre := conveyor.UntilShutdown(ctx)
             for _, page := range pages {
                 if err := fetchPage(pre, page); err != nil {
-                    if ctx.Err() == nil && pre.Err() != nil {
-                        stopped = context.Cause(pre) // shutdown: stop, don't cancel the write
-                        return nil
-                    }
-                    return err
+                    return conveyor.ShutdownCause(pre, err) // on shutdown an abort: stop, don't cancel the write
                 }
             }
             return nil
@@ -180,19 +191,16 @@ c.Run(ctx, func(ctx context.Context) error {
     if err := fo.MoveTo(ctx); err != nil {
         return err
     }
-    if err := fo.Wait(ctx); err != nil {
-        return err
+    // leaving fo waits for the write too
+    if err := commit.MoveTo(ctx); err != nil {
+        return err // a ShutdownError: skip the commit, the item is aborted
     }
-    if stopped != nil {
-        return stopped // a ShutdownError: skip the commit, the item is aborted
-    }
-    return commit.MoveTo(ctx)
+    return broker.Commit(ctx, msg)
 })
 ```
 
-`ctx.Err()` is checked first, as in the partial batch: it tells an abort of the item from a shutdown. A task that
-returns nil counts as a success, so `Wait` returns nil. If the item decides to commit when all its tasks are done,
-the task must report that it stopped early.
+Returning the plain error of `fetchPage(pre, page)` instead would be a real failure: it cancels the write, and the
+join returns a `TaskError`.
 
 ## Drain timeout
 

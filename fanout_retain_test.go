@@ -9,7 +9,7 @@ import (
 )
 
 // TestRetainLetsTheItemMoveOnWithoutWaiting: a retained fan-out no longer holds the item back, so it passes the nodes
-// after it while its work is still running, and the wave it was handed is what finally waits.
+// after it while its work is still running, and the task group it was handed is what finally waits.
 func TestFanOutRetainLetsTheItemMoveOnWithoutWaiting(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -139,12 +139,12 @@ func TestFanOutRetainedWorkStillBoundedByTheLimit(t *testing.T) {
 		})); err != nil {
 			return err
 		}
-		wave := fo.Retain(ctx)
+		taskGroup := fo.Retain(ctx)
 		w.scheduled()
 		if err := commit.MoveTo(ctx); err != nil {
 			return err
 		}
-		return wave.Wait(ctx)
+		return taskGroup.Wait(ctx)
 	})
 
 	if peak := wg.peakValue(); peak > limit {
@@ -152,8 +152,8 @@ func TestFanOutRetainedWorkStillBoundedByTheLimit(t *testing.T) {
 	}
 }
 
-// TestRetainedErrorNobodyJoinedFailsTheItem: a retained wave is the caller's to join, and if nobody ever looks at it
-// its failure still reaches the run — delayed, never lost.
+// TestRetainedErrorNobodyJoinedFailsTheItem: a retained task group is the caller's to join, and if nobody ever looks at
+// it its failure still reaches the run — delayed, never lost.
 func TestFanOutRetainedErrorNobodyJoinedFailsTheItem(t *testing.T) {
 	boom := errors.New("retained boom")
 	c := NewConveyor()
@@ -177,8 +177,8 @@ func TestFanOutRetainedErrorNobodyJoinedFailsTheItem(t *testing.T) {
 }
 
 // TestRetainAfterWorkAlreadyFinished: the task may finish before the ItemProcessor gets around to calling Retain —
-// nothing about a wave settling depends on Retain ever being called (see run.joinPending, which waits for it just
-// the same). Retaining such a fan-out must still succeed, handing back a wave that is already finished.
+// nothing about a task group settling depends on Retain ever being called (see run.joinPending, which waits for it just
+// the same). Retaining such a fan-out must still succeed, handing back a task group that is already finished.
 func TestFanOutRetainAfterWorkAlreadyFinished(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -199,8 +199,8 @@ func TestFanOutRetainAfterWorkAlreadyFinished(t *testing.T) {
 		// MoveTo does not return until the task's slot on the pool is taken (see run.startWork), so once the task
 		// itself has run — confirmed by the channel receive, a real happens-before edge, not a poll that could catch
 		// it either side of that instant — the slot going back to 0 can only mean runWork already released it and
-		// settled the wave under the same lock hold (see run.runWork). That is what guarantees the work, and the
-		// wave, are already done by the time Retain is called below.
+		// settled the task group under the same lock hold (see run.runWork). That is what guarantees the work, and the
+		// task group, are already done by the time Retain is called below.
 		<-taskRan
 		waitFor(t, "the task to finish", func() bool { return occupancyOf(c, pool) == 0 })
 
@@ -208,10 +208,10 @@ func TestFanOutRetainAfterWorkAlreadyFinished(t *testing.T) {
 		select {
 		case <-w.Finished():
 		default:
-			t.Fatalf("expected the handed-over wave to already be finished")
+			t.Fatalf("expected the handed-over task group to already be finished")
 		}
-		if err := w.Err(); err != nil {
-			t.Fatalf("wave err = %v, want nil", err)
+		if err := groupErr(w); err != nil {
+			t.Fatalf("task group err = %v, want nil", err)
 		}
 		if err := commit.MoveTo(ctx); err != nil {
 			return err
@@ -233,7 +233,7 @@ func TestFanOutRetainWithoutWorkPanics(t *testing.T) {
 		if err := fo.MoveTo(ctx); err != nil {
 			t.Fatalf("move failed: %v", err)
 		}
-		_ = fo.Retain(ctx) // legal: an empty submission still has a wave to hand over
+		_ = fo.Retain(ctx) // legal: an empty submission still has a task group to hand over
 		_ = fo.Retain(ctx) // misuse: it has already been handed over
 	})
 }
@@ -311,7 +311,7 @@ func TestFanOutRetainOfAnEarlierFanOutPanics(t *testing.T) {
 		if occ := occupancyOf(c, first); occ != 1 {
 			t.Errorf("first occupancy = %d, want 1 — the retained work still holds its slot", occ)
 		}
-		// first is occupied — by the retained work — but its pending wave is gone.
+		// first is occupied — by the retained work — but its pending task group is gone.
 		assertPanics(t, errNothingToRetain, func() { _ = first.Retain(ctx) })
 		checked.Store(true)
 		close(release)

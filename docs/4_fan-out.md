@@ -54,7 +54,7 @@ c.Run(ctx, func(ctx context.Context) error {
     }
 
     // (4) leave: the tasks are this node's body, so the item can't move on before all of them have finished
-    // - waits for the tasks and returns an error if any of them failed
+    // - waits for the tasks and returns a TaskError if any of them failed (see Errors below)
     // - then waits until it can enter commit
     if err := commit.MoveTo(ctx); err != nil {
         return err
@@ -78,11 +78,50 @@ the slow **db2Write** pool is still processing tasks from the previous item.
 - Even if the next item completes its tasks first, it cannot move to **commit** stage before the previous item does
 
 Use [Pool.NewTask](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Pool.NewTask),
-[Pool.NewTasks](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Pool.NewTasks),
-[Pool.NewTasksGen](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Pool.NewTasksGen),
-[Pool.NewTasksChan](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Pool.NewTasksChan)
+[Pool.NewTasks](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Pool.NewTasks)
 to create tasks for a branch (a [Lane](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Lane) has the
-same four constructors). A `Task` is single-use; pass any number of them to one `Schedule` call.
+same constructors). A `Task` is single-use; pass any number of them to one `Schedule` call.
+
+## Errors
+
+A task error does not cancel the item. It fails the item's **body** at the fan-out (the tasks the item scheduled
+there, follow-ups included), like `errgroup.WithContext`:
+- the other tasks of the body see their `ctx` canceled
+- queued tasks of the body are dropped
+- `Schedule` into the body returns the error
+
+A **join** waits until the tasks have stopped and returns the first error as a
+[TaskError](https://pkg.go.dev/github.com/cardinalby/go-conveyor#TaskError). Joins are: the `MoveTo` / `TryMoveTo`
+that leaves the fan-out, `FanOut.Wait`, and `TaskGroup.Wait` after `Retain`. `Unwrap` gives the task's own error,
+`Unit` the pool or lane it ran on; the text is `"<branch> task: <err>"`.
+
+Then the processor decides:
+- return the error (or any error): the item fails, and the conveyor shuts down (see [Shutdown](9_shutdown.md))
+- handle it and go on: the item continues as usual
+
+For example, send a bad message to a dead-letter queue and still commit it:
+
+```go
+if err := commit.MoveTo(ctx); err != nil {
+    var te conveyor.TaskError
+    if !errors.As(err, &te) {
+        return err // shutdown, own deadline, misuse: not joined
+    }
+    if err := deadLetter(msg, te.Unwrap()); err != nil {
+        return err
+    }
+    if err := commit.MoveTo(ctx); err != nil { // the body is joined, the item is alive: move on
+        return err
+    }
+}
+```
+
+- A failed leave closes the body but keeps the item in the fan-out, so the second `MoveTo` moves on.
+- If the item or the call `ctx` is canceled before the tasks stop, the call returns that cause and nothing is joined.
+  When the conveyor cancels the item, the join returns the `ShutdownError`, never a `TaskError`.
+- An error of tasks the processor never joined (a retained `TaskGroup` it never waits for) fails the item when the
+  processor returns.
+- The item's slots are freed only after all its tasks have stopped, whatever the outcome.
 
 
 ## Usage patterns
@@ -98,9 +137,11 @@ next item to enter—as soon as this item is admitted.
 ### Rounds: `Wait`, then schedule again
 
 [FanOut.Wait](https://pkg.go.dev/github.com/cardinalby/go-conveyor#FanOut.Wait) blocks until everything scheduled
-so far in this fan-out has finished (including follow-ups the tasks scheduled) and returns the first error.
+so far in this fan-out has finished (including follow-ups the tasks scheduled) and returns the first error as a
+`TaskError`.
 
-The item keeps its slot and may `Schedule` again, so the results of one round can decide the next.
+The item keeps its slot and may `Schedule` again, so the results of one round can decide the next. After a failed
+round the body takes no more tasks: leave the fan-out, or return the error.
 `Wait` on an empty body returns at once.
 
 <details>
@@ -169,8 +210,8 @@ Work is not always known up front: crawling, directory listing, paginated APIs. 
 fan-out's pools may call `Schedule` **with its own context** to add follow-up work to the same body.
 It must schedule before returning and must not call `Wait`.
 
-A failing task cancels the item, so a failing tree terminates: queued work is dropped and new `Schedule` calls
-return the cause.
+A failing task cancels the body's context, so a failing tree terminates: running tasks see `ctx` canceled, queued
+work is dropped and new `Schedule` calls return the error.
 
 <details>
 <summary>Example</summary>
@@ -232,10 +273,10 @@ and there are two kinds of them:
 ## FanOut.Retain()
 
 If you don't need to wait for the fan-out's tasks when leaving it, retain the body and wait for the returned
-[Wave](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Wave) later. It is the fan-out counterpart of
-[Stage.RetainFor](https://pkg.go.dev/github.com/cardinalby/go-conveyor#RetainableStage.RetainFor): a stage takes a callback
+[TaskGroup](https://pkg.go.dev/github.com/cardinalby/go-conveyor#TaskGroup) later. It is the fan-out counterpart of
+[Stage.RetainFor](https://pkg.go.dev/github.com/cardinalby/go-conveyor#RetainableStage.RetainFor): a stage takes a task
 because its work runs inline; a fan-out already has its work scheduled. Where the item stands while it waits is your choice:
-`Wave.Wait` after `commit.MoveTo` holds the **commit** slot, before it holds the **report** slot.
+`TaskGroup.Wait` after `commit.MoveTo` holds the **commit** slot, before it holds the **report** slot.
 
 <details>
 <summary>Example</summary>
@@ -247,7 +288,7 @@ if err := crawl.Schedule(ctx, roots...); err != nil {
 if err := crawl.MoveTo(ctx); err != nil {
     return err
 }
-wave := crawl.Retain(ctx) // the tree keeps growing in the background; the crawl slot follows it
+group := crawl.Retain(ctx) // the tree keeps growing in the background; the crawl slot follows it
 
 if err := report.MoveTo(ctx); err != nil { // does NOT wait for the tasks
     return err
@@ -257,7 +298,7 @@ if err := report.MoveTo(ctx); err != nil { // does NOT wait for the tasks
 if err := commit.MoveTo(ctx); err != nil {
     return err
 }
-if err := wave.Wait(ctx); err != nil { // the whole tree is done; an error reads "crawl work: <err>"
+if err := group.Wait(ctx); err != nil { // the whole tree is done; a TaskError reads "<pool> task: <err>"
     return err
 }
 // commit
@@ -268,14 +309,13 @@ if err := wave.Wait(ctx); err != nil { // the whole tree is done; an error reads
   moved on, so `SetLimit` keeps bounding how many items have work outstanding.
 - Retaining does not release the previous stage early under `Balanced` or `Strict`
   (see [SetBackpressure](#setbackpressure-when-the-previous-stage-is-released)).
-- The retained tasks may still `Schedule` follow-ups into the wave. After `Retain` the ItemProcessor may not
+- The retained tasks may still `Schedule` follow-ups into the task group. After `Retain` the ItemProcessor may not
   `Schedule` or `Wait` at this fan-out again (that panics).
-- Only the item that created the wave may `Wait` on it. An error on a wave nobody waits for is not lost: it fails the
-  item when it completes.
-- A failing task cancels the item, so a `Wave.Wait` in progress wakes at once. If the tree is still winding down,
-  `Wait` returns the cancellation cause; wait for `Finished` and read `Err`, or call `Wait` again after `Finished`.
-- After the ItemProcessor stops adding work (leaves, retains, or returns), `Wave.Started` closes once every task it
-  scheduled has been handed out (streaming sources drained). Follow-ups scheduled by tasks do not count.
+- Only the item that created the task group may `Wait` on it. An error of a task group the item never waits for is not
+  lost: it fails the item when the processor returns.
+- A failing task stops the rest of the tree, not the item. `TaskGroup.Wait` returns once every task has stopped, with
+  the first error as a `TaskError` (see [Errors](#errors)).
+- `TaskGroup.Finished` closes at the same moment, for use in a `select`.
 
 ## SetBackpressure: when the previous stage is released
 

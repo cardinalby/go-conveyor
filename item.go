@@ -9,7 +9,7 @@ import (
 //
 //   - a root item — one ItemProcessor call, moving through the conveyor's own nodes (scope 0);
 //   - a child item — one piece of work on a Lane, moving through the lane's interior nodes (the lane's scope).
-//     Its work is charged to the wave that created it, and it shares its parent's cancellation.
+//     Its work is charged to the task group that created it, and it shares that task group's cancellation.
 //
 // All fields are guarded by run.mu (see state.go for the transitions that mutate them), except no/scope/ctx which
 // are set once at creation and then read-only.
@@ -31,10 +31,12 @@ type item struct {
 	scope int
 
 	// ctx is the context passed to this item's processor (it carries this item handle). A root item's context
-	// derives from run.itemsCtx and owns cancel; a child's derives from its parent's item context and has no cancel
-	// of its own — cancellation is item-wide, so a child's failure escalates to its parent instead (see poison).
+	// derives from run.itemsCtx and owns cancel; a child's derives from the context of the fan-out body that created
+	// it and has no cancel of its own: its failure cancels that body instead (see run.itemFailed).
 	ctx    context.Context
 	cancel context.CancelCauseFunc // nil for a child item
+	// lane is the branch a child item runs on (nil for a root item), named in its TaskError.
+	lane *branch
 
 	// occupied[k] is how many slots this item currently holds in unit k (by index). An item may hold several units
 	// at once (a node plus the queue it came through, briefly), and a pool's unit may be held with several slots by
@@ -61,12 +63,15 @@ type item struct {
 	// reachedRank is the highest rank this item has actually occupied, whether or not it has been published yet. It
 	// says where the item *is*, while maxRank says what the items behind it are allowed to see — the two differ only
 	// between a fan-out's admission and its first Schedule. Background work uses it to decide whether the item has
-	// moved on (see wave.releaseRetained).
+	// moved on (see taskGroup.releaseRetained).
 	reachedRank int
-	// returned is set once the item's processor has returned, before completion waits for its waves; finished once
-	// all its slots are released. Between the two the item is over for its own code but its background work may live.
+	// returned is set once the item's processor has returned, before completion waits for its task groups; finished
+	// once all its slots are released. Between the two the item is over for its own code but its background work may
+	// live.
 	returned bool
 	finished bool
+	// failReported is set once the item's failure has been reported (run.itemFailed), so it is reported once.
+	failReported bool
 	// untilShutdown is the UntilShutdown context made from ctx itself, cached so repeated calls cost nothing, and
 	// its cancel.
 	untilShutdown       context.Context
@@ -76,16 +81,16 @@ type item struct {
 	// binding predecessor for the ordering gate; both are nil once the item is finished (unlinked).
 	prev, next *item
 
-	// waves are the background-work handles this item created (a fan-out body, RetainFor). They are joined when
-	// the item completes, and an error none of them had observed fails the item.
-	waves []*wave
+	// taskGroups are the background-work handles this item created (a fan-out body, RetainFor). They are joined when
+	// the item completes, and the error of one the processor never joined fails the item.
+	taskGroups []*taskGroup
 	// pending is the item's open body: the work scheduled at the fan-out it currently occupies and has not retained,
 	// which the item must see finish before it may leave (see run.joinPending). nil when the item is not in a
 	// fan-out, or has handed its work over with FanOut.Retain — that is, whenever no entry of body is bodyOpen.
-	pending *wave
+	pending *taskGroup
 
 	// stageHolds are the slots kept by Retain (on a stage, the starting stage or a lane) whose release has not been
-	// called yet. Unlike waves they are not joined: finishItem drops whatever is left.
+	// called yet. Unlike task groups they are not joined: finishItem drops whatever is left.
 	stageHolds []*stageHold
 
 	// holds are the releases deferred by this item's admissions to Balanced/Strict fan-outs, one per such admission
@@ -99,9 +104,9 @@ type item struct {
 	// (see run.dropDormant). It takes no capacity, stands in no queue, and no source of it is pulled before entry.
 	dormant map[int]*dormantWork
 
-	// parentWave is the wave whose work created this child item (nil for a root item). The child's outcome is
+	// parentGroup is the task group whose work created this child item (nil for a root item). The child's outcome is
 	// reported to it.
-	parentWave *wave
+	parentGroup *taskGroup
 }
 
 // dormantWork is what an item prepared for one fan-out before entering it: its claimed tasks, in submission order,
@@ -111,19 +116,10 @@ type dormantWork struct {
 	tasks []Task
 }
 
-// sources returns the prepared sources, for release once the work will never run (see releaseSources).
-func (d *dormantWork) sources() []taskSource {
-	out := make([]taskSource, 0, len(d.tasks))
-	for _, t := range d.tasks {
-		out = append(out, t.src)
-	}
-	return out
-}
-
 // bodyState is where an item stands with its body at one fan-out — the work it may add there through its own path
 // (the ItemProcessor, or a lane child's callback at an interior fan-out). Recorded per item and fan-out (item.body),
 // it drives what the item may still do at that node. It is independent of occupancy: an item may still occupy the
-// node with a closed body (a retained wave in flight, a failed leave), or may have moved on.
+// node with a closed body (a retained task group in flight, a failed leave), or may have moved on.
 type bodyState uint8
 
 const (
@@ -137,22 +133,9 @@ const (
 	bodyRetained
 )
 
-// poison cancels this item's context with cause (fail-fast). A child has no context of its own to cancel, so it
-// escalates to its parent: cancellation is item-wide, and a child's failure fails its parent anyway. Caller holds
-// run.mu.
-func (it *item) poison(cause error) {
-	if it.cancel != nil {
-		it.cancel(cause)
-		return
-	}
-	if it.parentWave != nil && it.parentWave.it != nil {
-		it.parentWave.it.poison(cause)
-	}
-}
-
 // asAbort maps the error of an item the conveyor canceled (its context cause is a ShutdownError) to that cause:
 // whatever it returns then, e.g. a driver error from a call interrupted mid-way, follows from the cancellation. Any
-// other cause (a failed task or RetainFor) leaves err as it is. Needs no lock.
+// other cause (the processor's own error, a lane child's failed body) leaves err as it is. Needs no lock.
 func (it *item) asAbort(err error) error {
 	if err == nil || isShutdown(err) {
 		return err
@@ -181,9 +164,9 @@ func (it *item) cancelCause(ctx context.Context) error {
 	return nil
 }
 
-// hasLiveWaves reports whether any background work of this item is still outstanding. Caller holds run.mu.
-func (it *item) hasLiveWaves() bool {
-	for _, w := range it.waves {
+// hasLiveTaskGroups reports whether any background work of this item is still outstanding. Caller holds run.mu.
+func (it *item) hasLiveTaskGroups() bool {
+	for _, w := range it.taskGroups {
 		if !w.finishedSet {
 			return true
 		}
@@ -191,21 +174,21 @@ func (it *item) hasLiveWaves() bool {
 	return false
 }
 
-// firstUnackedWaveErr returns the first error from a wave whose outcome nobody observed (no Wait, no Err call after
-// it finished). Caller holds run.mu, after every wave has finished.
-func (it *item) firstUnackedWaveErr() error {
-	for _, w := range it.waves {
-		if !w.acked && w.err != nil {
+// firstUnjoinedErr returns the first error recorded on a task group the processor has not joined (see
+// taskGroup.joined): a TaskError, or an abort. Caller holds run.mu.
+func (it *item) firstUnjoinedErr() error {
+	for _, w := range it.taskGroups {
+		if !w.joined && w.err != nil {
 			return w.err
 		}
 	}
 	return nil
 }
 
-// sealBody ends the item's own path into its open body w: the wave is sealed (finishing now if idle), it is no longer
-// pending, and the body state at its node becomes state (bodyClosed on leave/completion, bodyRetained on Retain).
-// Only the wave's own running work may add to it from here on. Caller holds run.mu and must broadcast.
-func (it *item) sealBody(w *wave, state bodyState) {
+// sealBody ends the item's own path into its open body w: the task group is sealed (finishing now if idle), it is no
+// longer pending, and the body state at its node becomes state (bodyClosed on leave/completion, bodyRetained on
+// Retain). Only the task group's own running work may add to it from here on. Caller holds run.mu and must broadcast.
+func (it *item) sealBody(w *taskGroup, state bodyState) {
 	it.pending = nil
 	it.body[w.atNode.index] = state
 	w.seal()
@@ -231,16 +214,16 @@ type stageHold struct {
 	unit int // the index of the held unit
 }
 
-// isRetaining reports whether unit j is kept for this item after it moves on: by a live wave (a RetainFor's stage or
-// a FanOut.Retain's node) or by a Retain not yet released. Such a slot must not be taken away when the item moves on;
-// it is freed when the work returns or the hold is released. Caller holds run.mu.
+// isRetaining reports whether unit j is kept for this item after it moves on: by a live task group (a RetainFor's stage
+// or a FanOut.Retain's node) or by a Retain not yet released. Such a slot must not be taken away when the item moves
+// on; it is freed when the work returns or the hold is released. Caller holds run.mu.
 func (it *item) isRetaining(j int) bool {
 	for _, h := range it.stageHolds {
 		if h.unit == j {
 			return true
 		}
 	}
-	for _, w := range it.waves {
+	for _, w := range it.taskGroups {
 		if !w.finishedSet && w.retainUnit != nil && w.retainUnit.index == j {
 			return true
 		}

@@ -25,16 +25,11 @@ import (
 // submission scheduled there. A branch queue holds collections in item order (see insertCollection); work is pulled
 // from the head collection one freed slot at a time, so a free slot never goes to a younger item's work while an
 // older item has work queued. Consumed sources are nil'd as the collection advances, and an exhausted collection is
-// removed from the queue immediately. Guarded by run.mu; the one exception is an async pull, which owns the current
-// source exclusively while pulling is set.
+// removed from the queue immediately. Guarded by run.mu.
 type taskCollection struct {
-	it     *item // the item that scheduled this work
-	wave   *wave // the wave the work is charged to
+	it     *item      // the item that scheduled this work
+	group  *taskGroup // the task group the work is charged to
 	branch *branch
-	// root marks a collection scheduled through the item's own path (its ItemProcessor, or a lane child's callback
-	// at an interior fan-out of its lane), as opposed to one spawned by the wave's own running work. Only root
-	// collections count toward the wave's Started channel (see wave.rootUnexhausted).
-	root bool
 	// hold is set on the collections of an item's entering submission at a Balanced/Strict fan-out — its first root
 	// Schedule there — and points at the upstream hold that submission must end (see upstreamHold). nil otherwise.
 	hold *upstreamHold
@@ -42,9 +37,6 @@ type taskCollection struct {
 	// sources in submission order; entries before srcIdx are consumed and nil'd.
 	sources []taskSource
 	srcIdx  int
-	// pulling marks an async pull in flight (running user code outside mu). While set, the collection stays at
-	// the queue head untouched and no other worker may pull from it — pulls are single-flight per source.
-	pulling bool
 
 	// workCtx is the context handed to this collection's work when the lane has no interior nodes: the scheduling
 	// item's context, marked as non-movable. Built once and shared by every piece of work here, so non-travelling
@@ -55,7 +47,7 @@ type taskCollection struct {
 // nonMovableCtx returns (and caches) the context for work that cannot travel. Caller holds run.mu.
 func (col *taskCollection) nonMovableCtx() context.Context {
 	if col.workCtx == nil {
-		col.workCtx = withPoolWork(col.it.ctx, col)
+		col.workCtx = withPoolWork(col.group.ctx, col)
 	}
 	return col.workCtx
 }
@@ -66,31 +58,8 @@ func (col *taskCollection) exhaustedNow() bool { return col.srcIdx >= len(col.so
 // curSource returns the source to pull from next. Caller ensures the collection is not exhausted.
 func (col *taskCollection) curSource() taskSource { return col.sources[col.srcIdx] }
 
-// detachSources takes the sources that have not been consumed away from the collection and returns them, for work that
-// will never run. The caller must release them (see releaseSources) OUTSIDE run.mu.
-//
-// Only the current source can be holding anything — the ones before it are consumed and nil'd, the ones after it were
-// never pulled from — but handing back the whole tail costs nothing and needs no reasoning about which is which.
-// Caller holds run.mu.
-func (col *taskCollection) detachSources() []taskSource {
-	rest := col.sources[col.srcIdx:]
-	col.sources = nil
-	col.srcIdx = 0
-	return rest
-}
-
-// releaseSources lets go of sources whose work will never run. It must NOT be called under run.mu: stopping a
-// suspended generator resumes it so it can unwind, which runs the user's deferred code.
-func releaseSources(sources []taskSource) {
-	for _, s := range sources {
-		if s != nil {
-			s.release()
-		}
-	}
-}
-
-// trim drops leading sources known to be exhausted, releasing them for GC. Sync sources report exhaustion
-// eagerly (right after their last pull); async ones only after a pull has returned nothing.
+// trim drops leading sources known to be exhausted, releasing them for GC. Sources report exhaustion eagerly (right
+// after their last pull).
 func (col *taskCollection) trim() {
 	for col.srcIdx < len(col.sources) && col.sources[col.srcIdx].exhausted() {
 		col.sources[col.srcIdx] = nil
@@ -98,7 +67,7 @@ func (col *taskCollection) trim() {
 	}
 }
 
-// grabbed is one piece of lane work that has been accounted for and is ready to run: the slot is taken, the wave
+// grabbed is one piece of lane work that has been accounted for and is ready to run: the slot is taken, the task group
 // knows about it, and (on a lane with interior nodes) the child item exists and is linked.
 type grabbed struct {
 	col *taskCollection
@@ -147,13 +116,14 @@ func (r *run) newRootItem() *item {
 }
 
 // newChildItem creates a child item for work on a lane that has interior nodes, occupying the lane's start gate,
-// and links it into the lane's scope. It inherits its parent's number and context — cancellation is item-wide, so
-// a child owns no cancel of its own (see item.poison). Caller holds mu.
+// and links it into the lane's scope. It inherits its parent's number, and its context derives from its body's: a
+// child owns no cancel of its own, its failure cancels the body (see run.itemFailed). Caller holds mu.
 func (r *run) newChildItem(col *taskCollection) *item {
 	l := col.branch
 	it := r.newItem(col.it.no, l.series.id)
-	it.parentWave = col.wave
-	it.ctx = withItem(col.it.ctx, it)
+	it.parentGroup = col.group
+	it.lane = l
+	it.ctx = withItem(col.group.ctx, it)
 	r.occupy(it, l.start, true) // the lane's start gate: rank 0 of the lane's scope
 	return it
 }
@@ -364,8 +334,7 @@ func (r *run) tryEnterUnit(it *item, target *unit, publish bool) (bool, error) {
 		return false, nil
 	}
 	if w := it.pending; w != nil {
-		// Leaving an idle body costs no wait. Its error cannot normally surface here — a failing task poisons the
-		// item, which the caller's preamble already declined — so this is a backstop.
+		// Leaving an idle body costs no wait, and joins it: a failed body is reported, and the item stays.
 		if err := r.closeBody(it, w); err != nil {
 			return false, err
 		}
@@ -394,9 +363,8 @@ func (r *run) joinPending(ctx context.Context, it *item) error {
 				// never returns nil for a canceled item.
 				return err
 			}
-			// Idle after all. A failing task poisons its own item, and the poison is what waitUntil answers with
-			// first — so the body's own error, if any, is the truer message ("this node's work failed"). workDone
-			// poisons and settles under one lock hold, so an idle body decides. A clean one leaves the cause.
+			// Idle after all: the body's own outcome is settled, so it is joined and its error, if any, is the answer.
+			// A clean one leaves the cause.
 			if bodyErr := r.closeBody(it, w); bodyErr != nil {
 				return bodyErr
 			}
@@ -406,31 +374,14 @@ func (r *run) joinPending(ctx context.Context, it *item) error {
 	return r.closeBody(it, w)
 }
 
-// closeBody closes the item's idle open body w as the item leaves: the wave is sealed and so finishes, its outcome
-// counts as observed (the item is about to be told about it), and the body state becomes closed. It returns the
-// node-qualified error if the work failed. Caller holds mu.
-func (r *run) closeBody(it *item, w *wave) error {
+// closeBody closes the item's idle open body w as the item leaves: the task group is sealed and so finishes, it is
+// joined (the item is about to be told its outcome), and the body state becomes closed. It returns the body's outcome:
+// nil, a TaskError, or an abort. Caller holds mu.
+func (r *run) closeBody(it *item, w *taskGroup) error {
 	it.sealBody(w, bodyClosed)
-	w.acked = true
+	w.joined = true
 	r.cond.Broadcast()
-	if w.err != nil {
-		return joinedErr(w)
-	}
-	return nil
-}
-
-// joinedErr names the node whose work failed — the fan-out of a body, or the stage of a RetainFor — so the error reads
-// for the node the work belongs to rather than for the node the item stood at when it heard about it. A wave with
-// neither (the finished wave a canceled RetainFor hands back) reports its error as is.
-func joinedErr(w *wave) error {
-	u := w.atNode
-	if u == nil {
-		u = w.retainUnit
-	}
-	if u == nil {
-		return w.err
-	}
-	return fmt.Errorf("%s work: %w", u.owner, w.err)
+	return w.err
 }
 
 // takeUnit is the mutation half of a move: occupy u, release everything the item held behind it, wake the waiters
@@ -484,8 +435,8 @@ func (r *run) releaseSlot(it *item, j int) {
 // --- release ---
 
 // releaseBelow frees every slot the item holds in units of its own scope with rank strictly below beforeRank,
-// except a unit kept by a live RetainFor wave or an unreleased Retain (that slot is freed when the bgOp returns or
-// the hold is released, or when the item moves on — whichever is later, so the item never sits somewhere holding
+// except a unit kept by a live RetainFor task group or an unreleased Retain (that slot is freed when the task returns
+// or the hold is released, or when the item moves on — whichever is later, so the item never sits somewhere holding
 // nothing). It reports whether any
 // slot was actually freed. Caller holds mu and must broadcast.
 //
@@ -536,7 +487,7 @@ func (r *run) prepare(it *item, f *fanOut, tasks []Task) {
 // activateDormant submits the work the item prepared for f, if any, as the initial batch of its fresh body w: one
 // root submission, in the same lock hold as the admission, so the rank is published (and the hold's branches are
 // marked) before the item behind can pass the gate. Caller holds mu.
-func (r *run) activateDormant(it *item, w *wave, f *fanOut) {
+func (r *run) activateDormant(it *item, w *taskGroup, f *fanOut) {
 	d, ok := it.dormant[f.node.index]
 	if !ok {
 		return
@@ -546,16 +497,11 @@ func (r *run) activateDormant(it *item, w *wave, f *fanOut) {
 }
 
 // dropDormant discards the work the item prepared for fan-outs of rank below beforeRank: the item has passed them
-// without entering (or, with beforeRank past every rank, is over), so it will never be activated. The sources are
-// released off the lock, as in dropCollection; nothing waits for them. Caller holds mu.
+// without entering (or, with beforeRank past every rank, is over), so it will never be activated. Caller holds mu.
 func (r *run) dropDormant(it *item, beforeRank int) {
-	for j, d := range it.dormant {
-		if r.conveyor.units[j].rank >= beforeRank {
-			continue
-		}
-		delete(it.dormant, j)
-		if srcs := d.sources(); len(srcs) > 0 {
-			go releaseSources(srcs)
+	for j := range it.dormant {
+		if r.conveyor.units[j].rank < beforeRank {
+			delete(it.dormant, j)
 		}
 	}
 }
@@ -573,12 +519,12 @@ func (r *run) dropDormantIfCanceled(it *item) {
 // --- upstream hold (Balanced / Strict backpressure) ---
 
 // upstreamHold is the release a Balanced or Strict admission deferred: the one token the item would have given up on
-// entering the fan-out — the previous node's slot, or the queued token when it was admitted from the fan-out's
-// waiting room (takeQueue released the previous node already) — kept until the item's first Schedule has made
-// progress. It is a kind of ownership separate from wave.retainUnit: releaseBelow skips a held unit the way it skips
-// a retained one, so the sweep an unrelated RetainFor completion or Retain release triggers cannot free it, and a unit both hold is freed
-// only when both have ended. A held queued token is owned by the hold outright: newHold takes it off item.queuedAt,
-// so a later takeQueue cannot give it back, and dischargeHold returns the count.
+// entering the fan-out — the previous node's slot, or the queued token when it was admitted from the fan-out's waiting
+// room (takeQueue released the previous node already) — kept until the item's first Schedule has made progress. It is a
+// kind of ownership separate from taskGroup.retainUnit: releaseBelow skips a held unit the way it skips a retained one,
+// so the sweep an unrelated RetainFor completion or Retain release triggers cannot free it, and a unit both hold is
+// freed only when both have ended. A held queued token is owned by the hold outright: newHold takes it off
+// item.queuedAt, so a later takeQueue cannot give it back, and dischargeHold returns the count.
 //
 // The hold ends (dischargeHold) when the entering submission — the item's first root Schedule at the fan-out — has
 // reached the mode's milestone (branchStarted): under Strict, one start on every branch it touched, or that branch
@@ -589,7 +535,7 @@ func (r *run) dropDormantIfCanceled(it *item) {
 // left. The mode is snapshotted at admission and the life cycle depends only on item state, never on the current
 // dial, which is what makes SetBackpressure safe on a live conveyor.
 type upstreamHold struct {
-	// at is the fan-out node whose admission opened the hold; newBody attaches the hold to that body's wave.
+	// at is the fan-out node whose admission opened the hold; newBody attaches the hold to that body's task group.
 	at *unit
 	// mode is the backpressure mode the admission saw (never Buffered, which opens no hold).
 	mode FanOutBackpressure
@@ -608,8 +554,8 @@ type upstreamHold struct {
 
 // newHold records the token the admission to u would have released and adds it to the item's holds: the queued slot
 // if the item is waiting anywhere (taken over from item.queuedAt), else the highest-rank unit below u the item
-// occupies — whether or not a RetainFor wave, a Retain or an earlier hold has it too, so a unit under several is freed only when
-// all have ended. Caller holds mu.
+// occupies — whether or not a RetainFor task group, a Retain or an earlier hold has it too, so a unit under several
+// is freed only when all have ended. Caller holds mu.
 func (r *run) newHold(it *item, u *unit) *upstreamHold {
 	h := &upstreamHold{at: u, mode: u.backpressureMode(), unit: -1}
 	if it.queuedAt >= 0 {
@@ -631,7 +577,7 @@ func (r *run) newHold(it *item, u *unit) *upstreamHold {
 
 // dischargeHold ends the hold h of it, if it has not ended yet, and performs the release it deferred: a held queued
 // token is given back; a held unit is swept by the ordinary rule (everything behind the item's current position),
-// which leaves it alone while another live hold or a retaining wave still needs it. Every discharge path funnels
+// which leaves it alone while another live hold or a retaining task group still needs it. Every discharge path funnels
 // through here, so the hold ends exactly once. Caller holds mu and must broadcast.
 func (r *run) dischargeHold(it *item, h *upstreamHold) {
 	if h.done {
@@ -651,7 +597,7 @@ func (r *run) dischargeHold(it *item, h *upstreamHold) {
 // markEntering makes the collections of the first root submission to body w the ones that end its hold: each is
 // tagged with the hold and its branch joins the awaiting set. A submission that touched no branch discharges at
 // once. Caller holds mu and must broadcast.
-func (r *run) markEntering(w *wave, cols []*taskCollection) {
+func (r *run) markEntering(w *taskGroup, cols []*taskCollection) {
 	h := w.hold
 	if h == nil || h.done {
 		return
@@ -702,9 +648,9 @@ func (r *run) freeUnit(it *item, u *unit) bool {
 //
 // It sweeps every unit of the conveyor, not just its own scope's (as releaseBelow does), because an item can hold a
 // slot outside its scope: work on a lane without interior nodes cannot travel, so startWork charges its slot to the
-// scheduling item, which lives in the parent scope. By the time an item gets here completeItem has already waited
-// for all of its waves, so those slots are gone — the wider sweep is a backstop that keeps the "no slot outlives its
-// item" invariant true of this function alone, rather than of the order its callers run in.
+// scheduling item, which lives in the parent scope. By the time an item gets here completeItem has already waited for
+// all of its task groups, so those slots are gone — the wider sweep is a backstop that keeps the "no slot outlives
+// its item" invariant true of this function alone, rather than of the order its callers run in.
 func (r *run) finishItem(it *item) {
 	// A Retain hold never released ends here; its slot is freed below.
 	it.stageHolds = nil
@@ -719,7 +665,7 @@ func (r *run) finishItem(it *item) {
 	for _, u := range r.conveyor.units {
 		r.freeUnit(it, u)
 	}
-	if it.parentWave == nil {
+	if it.parentGroup == nil {
 		r.inFlight.add(-1)
 	}
 	it.finished = true
@@ -747,13 +693,12 @@ func (r *run) unlink(it *item) {
 
 // insertCollection places col in the branch's queue at its item's place — behind every queued collection of the same
 // item or an older one, ahead of the first that belongs to a younger item (age is item.seq) — and registers it on its
-// wave. Caller holds mu.
+// task group. Caller holds mu.
 //
 // Walking from the tail is what makes the common case constant-time: a submission by the youngest item with queued
 // work, which is every submission when each item submits once right after entering, lands at the tail after one
 // comparison. Only a submission by an item with younger items queued behind it walks further. An inserted collection
-// may displace the head, including one with an async pull in flight: that collection keeps its single-flight status
-// and its reserved slot, and pulls simply continue from the new head (see pullableHead).
+// may displace the head; pulls simply continue from the new head.
 //
 // It also counts the collection in run.queued, the same counter a stage's waiting room uses — a branch's queue is its
 // waiting room, and this is what Stats reports as the branch's backlog (see UnitStat.Queued). Nothing else is shared:
@@ -770,15 +715,14 @@ func (r *run) insertCollection(branchIdx int, col *taskCollection) {
 	q[i] = col
 	r.taskQueues[branchIdx] = q
 	r.queued[branchIdx].add(1)
-	col.wave.addSource(col.root)
+	col.group.addSource()
 }
 
 // dequeue removes col from the branch's queue, wherever it stands, and uncounts it. Both ways a collection leaves the
 // queue (settled or dropped) funnel through here, so the backlog gauge cannot drift from the queue itself, and each
-// collection leaves exactly once. Removal is by identity, not "the head": a collection that was displaced from the
-// head by an older item's insertion while its async pull was in flight settles from wherever it now stands. The head
-// case stays constant-time (clear the pointer, reslice), so draining a long backlog is linear; the vacated slot is
-// zeroed so the backing array does not pin the collection until reallocation. Caller holds mu.
+// collection leaves exactly once. Removal is by identity, not "the head", so a dropped collection may stand anywhere.
+// The head case stays constant-time (clear the pointer, reslice), so draining a long backlog is linear; the vacated
+// slot is zeroed so the backing array does not pin the collection until reallocation. Caller holds mu.
 func (r *run) dequeue(branchIdx int, col *taskCollection) {
 	q := r.taskQueues[branchIdx]
 	if q[0] == col {
@@ -799,20 +743,19 @@ func (r *run) dequeue(branchIdx int, col *taskCollection) {
 	}
 }
 
-// pullableHead returns the branch's head collection if work may be pulled from it right now, or nil when the queue is
-// empty or an async pull is already in flight on the head (pulls are single-flight per source, and per-branch item
-// ordering forbids pulling past the head). Caller holds mu.
-func (r *run) pullableHead(branchIdx int) *taskCollection {
+// head returns the branch's head collection, or nil when the queue is empty. Per-branch item ordering forbids pulling
+// past the head. Caller holds mu.
+func (r *run) head(branchIdx int) *taskCollection {
 	q := r.taskQueues[branchIdx]
-	if len(q) == 0 || q[0].pulling {
+	if len(q) == 0 {
 		return nil
 	}
 	return q[0]
 }
 
 // settleCollection trims col and, once the whole collection is exhausted, removes it from the branch's queue — from
-// then on nothing references it — and tells its wave one source is done. Because a collection leaves the queue as
-// soon as its work has all been handed out, the backlog counts items with work not yet started, never work merely
+// then on nothing references it — and tells its task group one source is done. Because a collection leaves the queue
+// as soon as its work has all been handed out, the backlog counts items with work not yet started, never work merely
 // still running. Caller holds mu and must broadcast.
 func (r *run) settleCollection(branchIdx int, col *taskCollection) {
 	col.trim()
@@ -820,140 +763,80 @@ func (r *run) settleCollection(branchIdx int, col *taskCollection) {
 		return
 	}
 	r.dequeue(branchIdx, col)
-	col.wave.sourceExhausted(col.root)
+	col.group.sourceExhausted()
 }
 
 // dropCollection abandons col because its item is canceled: the work it has not handed out yet will never run, so the
-// collection is removed from the queue and its wave is told the source is done (which is what lets the wave resolve —
-// see Wave). The wave records why the work was abandoned, so it cannot report a clean finish for work that never ran
-// (see wave.recordAbandoned). Caller holds mu, has checked that no async pull is in flight on it, and must broadcast.
-//
-// The abandoned sources are released on their own goroutine, because this is the one path that discards a source that
-// may still be holding something — a generator suspended between pulls — and letting go of it runs user code, which
-// must not happen under run.mu. Everywhere else a source is finished by the pull that exhausted it. Since no pull is in
-// flight and the collection is now unreachable, nothing can race with the release.
+// collection is removed from the queue and its task group is told the source is done (which is what lets the task group
+// resolve — see TaskGroup). The task group records why the work was abandoned, so it cannot report a clean finish for
+// work that never ran (see taskGroup.recordAbandoned). Caller holds mu and must broadcast.
 func (r *run) dropCollection(branchIdx int, col *taskCollection, cause error) {
 	r.dequeue(branchIdx, col)
-	if rest := col.detachSources(); len(rest) > 0 {
-		go releaseSources(rest)
-	}
-	col.wave.recordAbandoned(cause)
-	col.wave.sourceExhausted(col.root)
+	col.sources, col.srcIdx = nil, 0 // the collection is unreachable now; let its sources go
+	col.group.recordAbandoned(cause)
+	col.group.sourceExhausted()
 }
 
-// grabNext tries to fill one free slot of the lane from the head collection (caller holds mu; the caller must
-// broadcast, as a pull can exhaust the head and settle its wave). Three outcomes:
-//   - sync source: the work is pulled inline (no user code) and fully accounted — run it (ok == true);
-//   - async source: the slot is reserved and the pull marked in flight — the caller must finish it via
-//     finishAsyncPull WITHOUT holding mu (asyncCol != nil);
-//   - nothing to start (no free slot, empty queue, or busy head): both zero.
-func (r *run) grabNext(branchIdx int) (g grabbed, asyncCol *taskCollection, ok bool) {
+// grabNext tries to fill one free slot of the lane from the head collection: the work is pulled inline (no user code)
+// and fully accounted, ready to run (ok == true). It reports false when there is nothing to start (no free slot or an
+// empty queue). Caller holds mu and must broadcast, as a pull can exhaust the head and settle its task group.
+func (r *run) grabNext(branchIdx int) (g grabbed, ok bool) {
 	for {
 		if !r.unitHasFreeSlot(branchIdx) {
-			return grabbed{}, nil, false
+			return grabbed{}, false
 		}
-		col := r.pullableHead(branchIdx)
+		col := r.head(branchIdx)
 		if col == nil {
-			return grabbed{}, nil, false
+			return grabbed{}, false
 		}
-		if cause := context.Cause(col.it.ctx); cause != nil {
-			// The item is canceled (shutdown, or its own failure): its remaining work will never run, so drop it
-			// rather than starting callbacks that would only find a canceled context. This makes every source kind
-			// behave the same way on cancellation, and lets the lane serve the next item at once. Whether an item is
-			// allowed to keep working is decided per item, never per task — a task is part of one item's work in a
-			// node, so an item still allowed to continue pulls and runs all of its tasks whatever shape they came in.
+		if cause := context.Cause(col.group.ctx); cause != nil {
+			// The item or the body is canceled (shutdown, the processor's failure, or the body's first error): its
+			// remaining work will never run, so drop it
+			// rather than starting callbacks that would only find a canceled context. This lets the lane serve the
+			// next item at once. Whether an item is allowed to keep working is decided per item, never per task — a
+			// task is part of one item's work in a node, so an item still allowed to continue pulls and runs all of
+			// its tasks whatever shape they came in.
 			r.dropCollection(branchIdx, col, cause)
 			continue
 		}
 		if h := r.conveyor.assignHook; h != nil {
-			h(branchIdx, col, r.taskQueues[branchIdx]) // the slot is handed out here, for a sync pull or a reservation
+			h(branchIdx, col, r.taskQueues[branchIdx]) // the slot is handed out here
 		}
-		src := col.curSource()
-		if !src.isSync() {
-			// Reserve the slot for the duration of the user pull, so admission and SetLimit see the lane as busy
-			// serving this item.
-			r.occupySlot(col.it, branchIdx)
-			col.pulling = true
-			return grabbed{}, col, false
-		}
-		fn, pulled := src.pull(col.it.ctx)
+		fn, pulled := col.curSource().pull()
 		if !pulled {
-			// Unreachable when eager trimming holds (a sync head is never exhausted); settle and retry.
+			// Unreachable when eager trimming holds (the head is never exhausted); settle and retry.
 			r.settleCollection(branchIdx, col)
 			continue
 		}
-		g := r.startWork(col, branchIdx, fn, false)
+		g := r.startWork(col, branchIdx, fn)
 		r.settleCollection(branchIdx, col)
-		return g, nil, true
-	}
-}
-
-// finishAsyncPull completes a pull reserved by grabNext: it runs the user code (generator body / channel receive;
-// the source treats item-ctx cancellation as exhaustion) WITHOUT holding mu, then re-enters the lock to account
-// the outcome. On success the reserved slot becomes the work's slot. On exhaustion the slot is given back, the
-// head settled and the lane re-pumped; the caller must not touch the slot again.
-func (r *run) finishAsyncPull(col *taskCollection, branchIdx int) (grabbed, bool) {
-	fn, pulled := col.curSource().pull(col.it.ctx)
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	col.pulling = false
-	if pulled {
-		g := r.startWork(col, branchIdx, fn, true)
-		r.pump(branchIdx) // the head is pullable again; fill any other free slots
-		r.cond.Broadcast()
 		return g, true
 	}
-	r.releaseSlot(col.it, branchIdx)
-	// A streaming source treats cancellation as exhaustion, so a pull that was in flight when the item was canceled
-	// lands here rather than in dropCollection. The item is what decides, so report it the same way: this source
-	// stopped because the item lost permission to work, not because it ran out.
-	if cause := context.Cause(col.it.ctx); cause != nil {
-		col.wave.recordAbandoned(cause)
-	}
-	r.settleCollection(branchIdx, col) // the failed pull marked the source exhausted; drop it (and maybe the collection)
-	r.pump(branchIdx)                  // the freed slot may start the collection's next source, or the next collection
-	r.cond.Broadcast()
-	return grabbed{}, false
 }
 
-// startWork accounts one pulled piece of work on the lane and registers it on the wave. Where the slot is charged
+// startWork accounts one pulled piece of work on the lane and registers it on the task group. Where the slot is charged
 // depends on the lane: work on a lane with interior nodes runs as a child item that holds the lane's start gate
 // itself (and gives it up on its first move); work on a lane without them cannot travel, so its slot is charged to
-// the scheduling item for the duration. reserved says the slot is already taken (an async pull held it for the
-// scheduling item). Caller holds mu.
-func (r *run) startWork(col *taskCollection, branchIdx int, fn TaskFunc, reserved bool) grabbed {
+// the scheduling item for the duration. Caller holds mu.
+func (r *run) startWork(col *taskCollection, branchIdx int, fn TaskFunc) grabbed {
 	g := grabbed{col: col, fn: fn}
 	if col.branch.travels() {
-		if reserved {
-			r.releaseSlot(col.it, branchIdx) // hand the reserved slot over to the child (no window: still under mu)
-		}
 		g.child = r.newChildItem(col)
-	} else if !reserved {
+	} else {
 		r.occupySlot(col.it, branchIdx)
 	}
-	col.wave.workStarted()
+	col.group.workStarted()
 	if col.hold != nil {
 		r.branchStarted(col, branchIdx, true)
 	}
 	return g
 }
 
-// pump starts as many queued pieces of work on the lane as free slots and pullable work allow, spawning one worker
-// per started piece (caller holds mu and must broadcast). When the head collection's current source is async, pump
-// reserves the slot and hands the pull to the spawned worker, then stops: the head is single-flight, so nothing
-// more can start on this lane until that pull completes (per-lane item ordering).
+// pump starts as many queued pieces of work on the lane as free slots and queued work allow, spawning one worker
+// per started piece (caller holds mu and must broadcast).
 func (r *run) pump(branchIdx int) {
 	for {
-		g, asyncCol, ok := r.grabNext(branchIdx)
-		if asyncCol != nil {
-			go func() {
-				if g, ok := r.finishAsyncPull(asyncCol, branchIdx); ok {
-					r.branchWorker(branchIdx, g)
-				}
-			}()
-			return
-		}
+		g, ok := r.grabNext(branchIdx)
 		if !ok {
 			return
 		}
@@ -962,9 +845,8 @@ func (r *run) pump(branchIdx int) {
 }
 
 // branchWorker runs one piece of lane work, then keeps its slot busy with the next queued piece (possibly another
-// item's): a sync source is pulled inline and the worker continues with it; an async head makes this worker the
-// puller (slot reserved, user code run outside the lock). Otherwise — nothing pullable, or a limit lowered below
-// the current occupancy — the slot is released and the worker exits.
+// item's). Otherwise — nothing queued, or a limit lowered below the current occupancy — the slot is released and the
+// worker exits.
 //
 // Release-on-completion is what makes an item that scheduled more work than a lane's capacity drain through its
 // own completions; the limit re-check on reuse (grabNext) is what makes a SetLimit decrease shrink the lane.
@@ -973,27 +855,19 @@ func (r *run) branchWorker(branchIdx int, g grabbed) {
 		r.runWork(branchIdx, g)
 
 		r.mu.Lock()
-		next, asyncCol, ok := r.grabNext(branchIdx)
-		if !ok && asyncCol == nil {
-			r.cond.Broadcast()
-			r.mu.Unlock()
-			return
-		}
+		next, ok := r.grabNext(branchIdx)
 		r.cond.Broadcast()
 		r.mu.Unlock()
-		if asyncCol != nil {
-			var pulled bool
-			if next, pulled = r.finishAsyncPull(asyncCol, branchIdx); !pulled {
-				return // the source was exhausted; the slot was given back and the lane re-pumped
-			}
+		if !ok {
+			return
 		}
 		g = next
 	}
 }
 
 // runWork runs one piece of work to completion and accounts its outcome: a child item goes through the full item
-// completion (its own background work joined, its slots released, its outcome reported to the wave); work that
-// cannot travel frees its slot and reports to the wave directly. Not holding mu.
+// completion (its own background work joined, its slots released, its outcome reported to the task group); work that
+// cannot travel frees its slot and reports to the task group directly. Not holding mu.
 func (r *run) runWork(branchIdx int, g grabbed) {
 	if g.child != nil {
 		r.completeItem(g.child, g.fn(g.child.ctx))
@@ -1007,13 +881,13 @@ func (r *run) runWork(branchIdx int, g grabbed) {
 
 	r.mu.Lock()
 	r.releaseSlot(g.col.it, branchIdx)
-	g.col.wave.workDone(err)
+	g.col.group.workDone(err, g.col.branch.start)
 	r.cond.Broadcast()
 	r.mu.Unlock()
 }
 
 // releaseStageHold ends the Retain hold h of it, if it is still live, and frees the slot if the item has moved on
-// and nothing else keeps it (the same sweep as wave.releaseRetained). Safe from any goroutine, more than once, and
+// and nothing else keeps it (the same sweep as taskGroup.releaseRetained). Safe from any goroutine, more than once, and
 // after the item finished.
 func (r *run) releaseStageHold(it *item, h *stageHold) {
 	r.mu.Lock()
@@ -1028,13 +902,14 @@ func (r *run) releaseStageHold(it *item, h *stageHold) {
 	}
 }
 
-// runRetain runs a RetainFor bgOp and settles its wave, which is also what gives back the stage slot the wave was holding
-// (see wave.releaseRetained — the same path a retained fan-out's slot takes). Not holding mu while bgOp runs.
-func (r *run) runRetain(w *wave, bgOp func() error) {
-	err := bgOp()
+// runRetain runs a RetainFor task and settles its task group, which is also what gives back the stage slot the task
+// group was holding (see taskGroup.releaseRetained — the same path a retained fan-out's slot takes). Not holding mu
+// while the task runs.
+func (r *run) runRetain(w *taskGroup, fn TaskFunc) {
+	err := fn(withRetainTask(w.ctx, w.retainUnit))
 
 	r.mu.Lock()
-	w.workDone(err)
+	w.workDone(err, w.retainUnit)
 	r.cond.Broadcast()
 	r.mu.Unlock()
 }

@@ -574,7 +574,7 @@ func TestBackpressure_EmptyEnteringSubmissionDischarges(t *testing.T) {
 		}{
 			{"no tasks", func(Pool) []Task { return nil }},
 			{"statically empty", func(p Pool) []Task {
-				return []Task{p.NewTasks(0, func(context.Context, int) error { return nil }), p.NewTasksGen(nil)}
+				return []Task{p.NewTasks(0, func(context.Context, int) error { return nil }), p.NewTasks(-1, nil)}
 			}},
 		} {
 			t.Run(mode.String()+"/"+tc.name, func(t *testing.T) {
@@ -612,107 +612,6 @@ func TestBackpressure_EmptyEnteringSubmissionDischarges(t *testing.T) {
 				<-done
 			})
 		}
-	}
-}
-
-// TestBackpressure_ExhaustionWithoutStartIsNotAStart: item 2's first Schedule touches p (blocked by item 1) and q with
-// a streaming source that ends without a task. q running out is not a start: under both modes the hold stays until
-// p starts. Once q has run out and p starts, both milestones are met.
-func TestBackpressure_ExhaustionWithoutStartIsNotAStart(t *testing.T) {
-	for _, mode := range holdingModes {
-		t.Run(mode.String(), func(t *testing.T) {
-			c := NewConveyor()
-			read := c.AddStage(OptName("read"))
-			f := c.AddFanOut(OptName("f")).SetLimit(100).SetBackpressure(mode)
-			p := f.AddPool(OptName("p"))
-			q := f.AddPool(OptName("q"))
-			commit := c.AddStage(OptName("commit")).SetLimit(10)
-			bt := newBlockingTasks()
-			bt.gate("1/p")
-			bt.gate("2/p")
-			feed := make(chan TaskFunc) // item 2's q source: closed empty by the driver
-
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				waitFor(t, "item 2 admitted with a hold", func() bool { return slices.Equal(heldItems(c), []int64{2}) })
-				waitFor(t, "the q pull to reserve a slot", func() bool { return occupancyOf(c, q) == 1 })
-				close(feed) // q proves empty: its branch is settled without a start
-				waitFor(t, "q released", func() bool { return occupancyOf(c, q) == 0 && queueOccupancy(c, q) == 0 })
-				if got := inBodyOf(c, read); !slices.Equal(got, []int64{2}) {
-					t.Errorf("read = %v after q ran out, want [2] (p has not started)", got)
-				}
-				if held := heldItems(c); !slices.Equal(held, []int64{2}) {
-					t.Errorf("items holding upstream = %v, want [2]", held)
-				}
-				close(bt.gate("1/p"))
-				waitFor(t, "item 2 started on p", func() bool { return bt.hasStarted("2/p") })
-				waitFor(t, "read released", func() bool { return len(inBodyOf(c, read)) == 0 })
-				bt.releaseAll()
-			}()
-
-			runNOK(t, c, 2, func(ctx context.Context, no int64) error {
-				if err := read.MoveTo(ctx); err != nil {
-					return err
-				}
-				if err := f.MoveTo(ctx); err != nil {
-					return err
-				}
-				tasks := []Task{bt.task(p, no)}
-				if no == 2 {
-					tasks = append(tasks, q.NewTasksChan(feed))
-				}
-				if err := f.Schedule(ctx, tasks...); err != nil {
-					return err
-				}
-				return commit.MoveTo(ctx)
-			})
-			<-done
-		})
-	}
-}
-
-// TestBackpressure_EveryBranchRunsOutDischarges: a first Schedule whose only source is a stream that ends without a
-// task releases the previous node once it has run out — the batch proved empty — under both modes.
-func TestBackpressure_EveryBranchRunsOutDischarges(t *testing.T) {
-	for _, mode := range holdingModes {
-		t.Run(mode.String(), func(t *testing.T) {
-			c := NewConveyor()
-			read := c.AddStage(OptName("read"))
-			f := c.AddFanOut(OptName("f")).SetBackpressure(mode)
-			p := f.AddPool(OptName("p"))
-			commit := c.AddStage(OptName("commit"))
-			feed := make(chan TaskFunc)
-
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				waitFor(t, "item 1 admitted with a hold", func() bool { return slices.Equal(heldItems(c), []int64{1}) })
-				waitFor(t, "the pull to reserve a slot", func() bool { return occupancyOf(c, p) == 1 })
-				if got := inBodyOf(c, read); !slices.Equal(got, []int64{1}) {
-					t.Errorf("read = %v while the pull is in flight, want [1] (a pull is not a start)", got)
-				}
-				close(feed)
-				waitFor(t, "read released", func() bool { return len(inBodyOf(c, read)) == 0 })
-				if held := heldItems(c); len(held) != 0 {
-					t.Errorf("items holding upstream = %v, want none", held)
-				}
-			}()
-
-			runNOK(t, c, 1, func(ctx context.Context, no int64) error {
-				if err := read.MoveTo(ctx); err != nil {
-					return err
-				}
-				if err := f.MoveTo(ctx); err != nil {
-					return err
-				}
-				if err := f.Schedule(ctx, p.NewTasksChan(feed)); err != nil {
-					return err
-				}
-				return commit.MoveTo(ctx)
-			})
-			<-done
-		})
 	}
 }
 
@@ -811,9 +710,9 @@ func TestBackpressureStrict_UnrelatedRetainCompletionKeepsTheHeldToken(t *testin
 		if err := a.MoveTo(ctx); err != nil {
 			return err
 		}
-		var w Wave
+		var w TaskGroup
 		if no == 2 {
-			w = a.RetainFor(ctx, func() error { <-bgDone; return nil })
+			w = a.RetainFor(ctx, func(context.Context) error { <-bgDone; return nil })
 		}
 		if err := read.MoveTo(ctx); err != nil {
 			return err
@@ -847,7 +746,7 @@ func TestBackpressureStrict_RetainOnPreviousStagePlusHold(t *testing.T) {
 			x := newTwoPoolFanOut(BackpressureStrict, 2)
 			c := x.c
 			bgDone := make(chan struct{})
-			waveCh := make(chan Wave, 1)
+			groupCh := make(chan TaskGroup, 1)
 
 			done := make(chan struct{})
 			go func() {
@@ -855,7 +754,7 @@ func TestBackpressureStrict_RetainOnPreviousStagePlusHold(t *testing.T) {
 				waitFor(t, "item 2 admitted with a hold", func() bool { return slices.Equal(heldItems(c), []int64{2}) })
 				if retainFirst {
 					close(bgDone)
-					<-(<-waveCh).Finished() // the finishing sweep has run by the time the channel closes
+					<-(<-groupCh).Finished() // the finishing sweep has run by the time the channel closes
 					if got := inBodyOf(c, x.read); !slices.Equal(got, []int64{2}) {
 						t.Errorf("read = %v after the Retain ended, want [2] (the hold still protects it)", got)
 					}
@@ -880,8 +779,8 @@ func TestBackpressureStrict_RetainOnPreviousStagePlusHold(t *testing.T) {
 				if err := x.read.MoveTo(ctx); err != nil {
 					return err
 				}
-				w := x.read.RetainFor(ctx, func() error { <-bgDone; return nil })
-				waveCh <- w
+				w := x.read.RetainFor(ctx, func(context.Context) error { <-bgDone; return nil })
+				groupCh <- w
 				if err := x.f.MoveTo(ctx); err != nil {
 					return err
 				}
@@ -944,7 +843,7 @@ func TestBackpressure_WaitingRoomTokenIsHeld(t *testing.T) {
 				if err := x.f.Schedule(ctx, tasks...); err != nil {
 					return err
 				}
-				var w Wave
+				var w TaskGroup
 				switch no {
 				case 1:
 					w = x.f.Retain(ctx)
@@ -1356,7 +1255,7 @@ func TestBackpressure_HeldWaitingRoomTokenSurvivesALaterWaitingRoom(t *testing.T
 		if err := x.f.Schedule(ctx, tasks...); err != nil {
 			return err
 		}
-		var w Wave
+		var w TaskGroup
 		switch no {
 		case 1, 3:
 			w = x.f.Retain(ctx)

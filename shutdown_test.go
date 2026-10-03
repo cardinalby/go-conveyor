@@ -617,6 +617,64 @@ func TestFirstItemErrorWins(t *testing.T) {
 	}
 }
 
+// TestFailureStartsShutdownBeforeBackgroundWorkEnds: a failed item begins the shutdown as soon as its processor
+// returns, while its retained work is still running: later items are canceled, the drain context is asked for, and a
+// later failure during that work cannot take the first one's place.
+func TestFailureStartsShutdownBeforeBackgroundWorkEnds(t *testing.T) {
+	first := errors.New("first")
+	second := errors.New("second")
+	var drainAsked atomic.Bool
+	c := NewConveyor(OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
+		drainAsked.Store(true)
+		return nil, nil // no limit: the retained work is left to finish
+	}))
+	gate := c.AddStage(OptName("gate")).SetLimit(2)
+
+	reached2 := make(chan struct{})
+	bgRelease := make(chan struct{})
+	var bgDone atomic.Bool
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	err := c.Run(ctx, func(ic context.Context) error {
+		no, _ := ItemNoFromContext(ic)
+		if err := gate.MoveTo(ic); err != nil {
+			return err
+		}
+		switch no {
+		case 1:
+			gate.RetainFor(ic, func(context.Context) error {
+				<-bgRelease // ignores the item's cancellation: still running while item 1 is joined
+				bgDone.Store(true)
+				return nil
+			})
+			<-reached2
+			return first
+		case 2:
+			close(reached2)
+			waitFor(t, "item 2 to be canceled while item 1's retained work runs", func() bool { return ic.Err() != nil })
+			waitFor(t, "the drain context to be asked for", drainAsked.Load)
+			if bgDone.Load() {
+				t.Error("the retained work finished before the checks")
+			}
+			if !shutdownBegun(c) {
+				t.Error("the shutdown has not begun")
+			}
+			close(bgRelease)
+			return second // a real error of its own, which must not displace the first
+		}
+		return nil
+	})
+
+	if !errors.Is(err, first) {
+		t.Fatalf("Run error = %v, want %v", err, first)
+	}
+	var re RunError
+	if errors.As(err, &re) && re.DrainError() != nil {
+		t.Errorf("DrainError = %v, want nil (item 2 was canceled, so its error is an abort)", re.DrainError())
+	}
+}
+
 // TestShutdownErrorFromProcessorIsNotAFailure: a processor that returns (even wrapped in its own chain) the
 // ShutdownError a node call handed it does not make Run fail — Run still reports the Run context's cause.
 func TestShutdownErrorFromProcessorIsNotAFailure(t *testing.T) {

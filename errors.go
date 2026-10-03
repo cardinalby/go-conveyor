@@ -6,7 +6,7 @@ import (
 )
 
 // Returned errors, inspectable with errors.Is on the value returned by Run and the node methods (MoveTo, TryMoveTo,
-// FanOut.Schedule, FanOut.Wait), or on Wave.Err.
+// FanOut.Schedule, FanOut.Wait, TaskGroup.Wait).
 var (
 	// ErrConveyorAlreadyRunning is returned by Run when the conveyor is already running.
 	ErrConveyorAlreadyRunning = errors.New("conveyor is already running")
@@ -19,7 +19,7 @@ var (
 	ErrForeignContext = fmt.Errorf("%w: not derived from a conveyor item's ctx", ErrInvalidContext)
 
 	// ErrStaleContext indicates the context's owner has already finished: the item, a lane child whose callback
-	// returned, or a pool task whose wave has finished.
+	// returned, or a pool task whose task group has finished.
 	ErrStaleContext = fmt.Errorf("%w: the item or work it belongs to has finished", ErrInvalidContext)
 )
 
@@ -58,8 +58,8 @@ type ShutdownError interface {
 }
 
 // ItemError is returned by Run when an item failed and the Run context was not canceled before. Its Unwrap gives
-// the item's own error, so errors.Is and errors.As work with it. The item's error can come from the ItemProcessor,
-// from a task, or from RetainFor.
+// the item's own error, so errors.Is and errors.As work with it. The item's error is the one the ItemProcessor
+// returned, or a TaskError of tasks it never joined.
 type ItemError interface {
 	RunError
 	// Unit is the node the item was in when it failed. For an item waiting in the queue in front of a node, it is
@@ -67,6 +67,34 @@ type ItemError interface {
 	Unit() Unit
 	sealedItemError()
 }
+
+// TaskError is the first error of an item's tasks — fan-out tasks, lane children, a RetainFor task — reported by a
+// join once those tasks have all stopped: TaskGroup.Wait, FanOut.Wait, or the MoveTo that leaves a fan-out. The
+// processor decides what it means for the item: return it (or another error) to fail the item, or nil to go on
+// without it.
+//
+// It is never an abort: tasks stopped because the conveyor canceled the item are reported with the ShutdownError
+// itself. Any other error from a join (a canceled call context, a ShutdownError, a stale context) means the tasks are
+// not joined yet.
+type TaskError interface {
+	error
+	// Unwrap returns the error the task returned, unchanged.
+	Unwrap() error
+	// Unit is where the task ran: the Pool or Lane of a fan-out task, the Stage or Lane of RetainFor.
+	Unit() Unit
+	sealedTaskError()
+}
+
+// taskError is the only TaskError implementation.
+type taskError struct {
+	unit Unit
+	err  error
+}
+
+func (e *taskError) sealedTaskError() {}
+func (e *taskError) Unit() Unit       { return e.unit }
+func (e *taskError) Unwrap() error    { return e.err }
+func (e *taskError) Error() string    { return fmt.Sprintf("%s task: %v", e.unit, e.err) }
 
 // shutdownError is the only ShutdownError implementation.
 type shutdownError struct {
@@ -125,7 +153,7 @@ func isShutdown(err error) bool {
 // assert the panic via errors.Is.
 //
 // Genuine runtime conditions that a correct program legitimately hits — ctx cancellation, ShutdownError,
-// fail-fast work errors, and a stale/unknown context (benign, like a closed-channel receive) — are returned, not
+// TaskError, and a stale/unknown context (benign, like a closed-channel receive) — are returned, not
 // panicked.
 var (
 	// errInvalidUnit is panicked with when a node handle (Stage / FanOut / Branch / Task) is used on a conveyor or
@@ -136,9 +164,10 @@ var (
 	// move through the nodes of the lane it runs in, and a root item may not reach into a lane.
 	errWrongScope = errors.New("node belongs to another series")
 
-	// errCannotMove is panicked with when a context handed to a Pool's work is used to move or wait: there is nowhere
-	// to go, the work holds a slot it must not wait on, and the context carries the item that scheduled the work,
-	// which must not be moved from a task goroutine. Such a context may only Schedule at its own fan-out.
+	// errCannotMove is panicked with when a context handed to a Pool's work or to a RetainFor task is used to move or
+	// wait: there is nowhere to go, the work holds a slot it must not wait on, and the context carries the item that
+	// started the work, which must not be moved from a task goroutine. A pool task's context may only Schedule at its
+	// own fan-out; a RetainFor task's context drives no node method.
 	errCannotMove = errors.New("pool work cannot move or wait")
 
 	// errConveyorRunning is panicked with when the topology is extended while the conveyor is running.
@@ -162,7 +191,7 @@ var (
 	errBodyClosed = errors.New("the item's body at this fan-out is closed")
 
 	// errWorkRetained is panicked with when the ItemProcessor adds to or waits for its body at a fan-out where it
-	// retained the work: from Retain on, the body belongs to the returned wave.
+	// retained the work: from Retain on, the body belongs to the returned task group.
 	errWorkRetained = errors.New("the item's work at this fan-out was retained")
 
 	// errWrongEnterOrder is panicked with by MoveTo when the target is behind the item's furthest rank (items move
@@ -173,16 +202,14 @@ var (
 	// are entered once per item).
 	errNodeAlreadyEntered = errors.New("nodes are entered once per item")
 
-	// errNilTaskFunc flags a nil callback. The eager constructors (NewTask, NewTasks) panic with it;
-	// a nil callback produced later by a streaming source (NewTasksGen, NewTasksChan)
-	// instead fails the item with it (fail-fast), since by then the misuse surfaces on an internal goroutine.
+	// errNilTaskFunc flags a nil callback. The constructors (NewTask, NewTasks) panic with it.
 	errNilTaskFunc = errors.New("nil callback")
 
 	// errTaskReused is panicked with by FanOut.Schedule when a Task is submitted twice (tasks are lazy, stateful and
 	// single-use).
 	errTaskReused = errors.New("tasks are single-use")
 
-	// errForeignWave is panicked with when Wave.Wait is called with the context of an item that did not create the
-	// wave (or on a nil wave). A wave is only meaningful to its own item.
-	errForeignWave = errors.New("wave belongs to another item")
+	// errForeignTaskGroup is panicked with when TaskGroup.Wait is called with the context of an item that did not
+	// create the task group (or on a nil task group). A task group is only meaningful to its own item.
+	errForeignTaskGroup = errors.New("task group belongs to another item")
 )

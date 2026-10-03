@@ -6,8 +6,8 @@
 //   - Schedule registers parallel work for a fan-out, before or after entering it.
 //   - FanOut.Wait joins the work scheduled so far without leaving the fan-out.
 //   - Retain (on a Stage or a FanOut) keeps the node occupied while the item moves on: a stage until the returned
-//     release is called, a fan-out until its work is done. Stage.RetainFor does the same for a background callback.
-//   - Wave.Wait waits for retained work later in the item's path.
+//     release is called, a fan-out until its work is done. Stage.RetainFor does the same for a background task.
+//   - TaskGroup.Wait waits for retained work later in the item's path.
 //
 // Most processors need only MoveTo and Schedule. Adaptive rounds add FanOut.Wait; overlapping work across stages
 // adds Retain or RetainFor.
@@ -29,8 +29,8 @@ import (
 // the item schedules work onto branches (Pool or Lane) that run it in parallel. An item advances between nodes with
 // MoveTo.
 //
-// Background work started with Stage.RetainFor or FanOut.Retain is represented by a Wave: wait for it with Wave.Wait,
-// or read its Finished and Err.
+// Background work started with Stage.RetainFor or FanOut.Retain is represented by a TaskGroup: wait for it with
+// TaskGroup.Wait, or select on Finished. Wait returns the work's first error as a TaskError.
 type Conveyor interface {
 	// AddStage adds a Stage to the end of the conveyor, admitting one item at a time by default. Chain SetLimit and
 	// SetQueueSize to adjust its capacity, and pass OptName to name it.
@@ -54,29 +54,31 @@ type Conveyor interface {
 	//
 	// Both are RunErrors. RunError.DrainError tells how the items in flight finished: the first failure among them,
 	// or the drain timeout (OptDrainTimeout). To see every failure, log it where it happens (the
-	// ItemProcessor, a task, a RetainFor callback). Items aborted by the conveyor are not failures and are not
+	// ItemProcessor, a task, a RetainFor task). Items aborted by the conveyor are not failures and are not
 	// reported. ErrConveyorAlreadyRunning is returned as is.
 	//
 	// An item counts as aborted if it returns an error that is or wraps a ShutdownError (e.g. from a node method,
 	// or context.Cause of an UntilShutdown context), or any error after the conveyor canceled it. Any other error
-	// is a failure, also one that wraps context.Canceled: for a read canceled through UntilShutdown, return
-	// context.Cause of that context instead.
+	// is a failure, also one that wraps context.Canceled: for a call canceled through UntilShutdown, return
+	// ShutdownCause(pre, err) instead.
 	//
 	// An item that fails or is aborted cancels all younger items, so no younger item gets past it. Use UntilShutdown
 	// to stop items at once when shutdown begins, before their side effects start.
+	//
+	// Item contexts carry ctx's values (trace spans, loggers), but not its cancellation.
 	//
 	// Build all nodes before calling Run; the topology is frozen from the first Run on. Run may be called again
 	// after it returns, but a concurrent second call returns ErrConveyorAlreadyRunning.
 	Run(ctx context.Context, itemProcessor ItemProcessor) error
 
 	// SetItemsLimit caps how many items may be in flight across the whole conveyor at once. One item is one
-	// ItemProcessor call, from creation to completion, so this also bounds the number of worker goroutines. A limit <= 0
-	// means unlimited, the default. It returns the conveyor for chaining.
+	// ItemProcessor call, from creation to completion, so this also bounds the number of worker goroutines. A
+	// limit <= 0 means unlimited, the default. It returns the conveyor for chaining.
 	//
 	// It is a global bound on top of the nodes' own limits and does not change any of them.
 	//
-	// Safe to call at any time, from any goroutine, including on a running conveyor. Lowering it never evicts an item in
-	// flight; it only stops new items from being created until the count has fallen below the new limit.
+	// Safe to call at any time, from any goroutine, including on a running conveyor. Lowering it never evicts an item
+	// in flight; it only stops new items from being created until the count has fallen below the new limit.
 	SetItemsLimit(n int) Conveyor
 
 	// ItemsLimit returns the current cap on items in flight across the whole conveyor, or 0 if unlimited (the
@@ -170,7 +172,8 @@ func OptDrainTimeout(d time.Duration) Option {
 
 // OptDrainContextFunc bounds how long items may keep running after a shutdown begins (the Run context is canceled,
 // or an ItemProcessor fails). Once shutdown starts, f is asked for a context; when that context is done, every
-// in-flight item's context is canceled.
+// in-flight item's context is canceled. f is called once per shutdown, before Run returns, even if all items have
+// finished by then.
 //
 //	return context.WithTimeout(context.Background(), 30*time.Second) // a drain timeout, then cancel
 //	return alreadyDoneCtx, nil                                       // cancel in-flight items at once
@@ -242,8 +245,8 @@ func (h startHandle) Retain(ctx context.Context) func() {
 }
 
 // RetainFor hands the start stage's slot to a background operation (see the RetainableStage interface).
-func (h startHandle) RetainFor(ctx context.Context, bgOp func() error) Wave {
-	return h.u.conveyor.retainFor(ctx, h.u, bgOp)
+func (h startHandle) RetainFor(ctx context.Context, fn TaskFunc) TaskGroup {
+	return h.u.conveyor.retainFor(ctx, h.u, fn)
 }
 
 // validateUnit panics if u is not a unit of this conveyor — a handle from another conveyor, or a zero handle.

@@ -5,8 +5,8 @@ to keep it:
 
 - `Retain(ctx)` keeps the stage until you call the returned `release`. Use it when later work of the item (in the
   ItemProcessor or in its fan-out tasks) still uses the stage's resource.
-- `RetainFor(ctx, fn)` keeps the stage while `fn` runs in the background, in parallel with the next stages. Wait for
-  it later with `Wave.Wait`.
+- `RetainFor(ctx, fn)` keeps the stage while the task `fn` runs in the background, in parallel with the next stages.
+  Wait for it later with `TaskGroup.Wait`.
 
 ## Retain: keep the stage until release
 
@@ -75,10 +75,10 @@ c.Run(ctx, func(ctx context.Context) error {
     // (2) work with db1 exclusively, perform some reads and prepare data for db2
     
     // get db1 retention handle
-    db1wave := db1.RetainFor(ctx, func () error {
-        // finalize the job by writing to db1 still holding the "db1" stage. 
-        // capture and use ItemProcessor's ctx so that you don't miss shutdown signal
-        // Any error returned by the callback is propagated to the itemProcessor and stops the conveyor
+    db1Group := db1.RetainFor(ctx, func(ctx context.Context) error {
+        // finalize the job by writing to db1 still holding the "db1" stage.
+        // ctx is the item's context: it is canceled when the item is. Node calls (MoveTo, ...) with it panic.
+        // A returned error does not cancel the item: db1Group.Wait returns it below
         return nil
     })
     
@@ -92,10 +92,10 @@ c.Run(ctx, func(ctx context.Context) error {
     if err := commit.MoveTo(ctx); err != nil {
         return err
     }
-    // Wait for the db1.RetainFor callback to finish, holding the "commit" slot meanwhile. Put the Wait before
-    // commit.MoveTo to hold the "db2" slot instead. An error returned by the callback is returned here as
-    // "db1 work: <err>" and stops the conveyor.
-    if err := db1wave.Wait(ctx); err != nil {
+    // Wait for the db1.RetainFor task to finish, holding the "commit" slot meanwhile. Put the Wait before
+    // commit.MoveTo to hold the "db2" slot instead. An error returned by the task is returned here as a
+    // TaskError ("<stage> task: <err>"); returning it fails the item and stops the conveyor.
+    if err := db1Group.Wait(ctx); err != nil {
         return err
     }
 
@@ -106,13 +106,12 @@ c.Run(ctx, func(ctx context.Context) error {
 
 ![retain previous stage](./res/readme/retain.svg)
 
-`Wave.Wait` may be called only by the item that created the wave. A wave nobody waits for is not lost: an error on it
-fails the item when it completes. If the callback fails while other work of the item is still winding down, `Wait`
-returns the item's cancellation cause instead; wait for `Finished` and read `Err`, or call `Wait` again after
-`Finished` is closed, to observe the wave's own error.
-
-If the ItemProcessor returns an error (a shutdown abort too), the item's context is canceled while a `RetainFor`
-callback may still use it. Return nil to let the callback finish.
+- `TaskGroup.Wait` may be called only by the item that created the task group. It waits until the task returns and
+  gives its error as a [TaskError](https://pkg.go.dev/github.com/cardinalby/go-conveyor#TaskError): `Unwrap` is the
+  task's own error. The processor decides: return it to fail the item, or handle it and go on.
+- A task group the item never waits for is not lost: its error fails the item when the processor returns.
+- If the ItemProcessor returns an error (a shutdown abort too), the item's context is canceled while a `RetainFor`
+  task may still use it. Return nil to let the task finish.
 
 ## Retain the starting stage
 

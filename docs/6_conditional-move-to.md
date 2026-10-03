@@ -71,8 +71,8 @@ Work prepared with `Schedule` before entering (see [Schedule before entry](4_fan
 survives a decline unchanged: it starts if a later attempt or a `MoveTo` enters, and is discarded if the item moves
 past the fan-out.
 
-Neither variant takes waves, so a `TryMoveTo` that declines never waits on anything. To wait for a `Stage.RetainFor` or
-`FanOut.Retain` wave after a conditional move, call `Wave.Wait` once `entered` is true.
+Neither variant takes task groups, so a `TryMoveTo` that declines never waits on anything. To wait for a `Stage.RetainFor` or
+`FanOut.Retain` task group after a conditional move, call `TaskGroup.Wait` once `entered` is true.
 
 ## Out of a fan-out
 
@@ -80,8 +80,9 @@ Neither variant takes waves, so a `TryMoveTo` that declines never waits on anyth
 still **busy** (tasks queued or running). Leaving would mean waiting for them, which is exactly what the call promises
 not to do, so it returns `(false, nil)` and touches nothing — the body stays open and the item may keep scheduling.
 With an idle body it behaves like the stage variant: it leaves if the target has room, and otherwise declines, again
-leaving the body open. A body whose task has failed has already canceled the item, so the call returns
-`(false, cause)`; the node-qualified error is what `Wait` or the blocking `MoveTo` report.
+leaving the body open. If a task of the body has failed, a call that finds the body idle and the target free joins
+the body and returns `(false, TaskError)`: the body is closed and the item stays in the fan-out. Handle it as a
+failed `MoveTo` (see [Errors](4_fan-out.md#errors)).
 
 ---
 

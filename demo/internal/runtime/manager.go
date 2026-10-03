@@ -387,8 +387,9 @@ func (m *Manager) FailItem(itemNo int64) error {
 	return nil
 }
 
-// FailTask asks the task item itemNo is running on pool poolID to fail. The task's error poisons its item fail-fast,
-// so the item fails too and the run reaches the same error-shutdown as FailItem — what differs, and what makes this
+// FailTask asks the task item itemNo is running on pool poolID to fail. The task's error stops the item's other tasks
+// at that fan-out and is returned by the processor, so the item fails too and the run reaches the same error-shutdown
+// as FailItem — what differs, and what makes this
 // worth having separately, is that the failure originates in a fan-out's background work rather than in the item's
 // own straight-line code. It errors if nothing is running or poolID names something other than a pool of this run.
 // A lane child's own failure needs no equivalent here — its journey is the item's own work one level down, so

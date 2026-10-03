@@ -156,22 +156,22 @@ type propTopology struct {
 	// run is the live run, captured through implOf by the first item to be processed, so the leak check can inspect
 	// its counters after Run returned (Stats is the zero value by then).
 	run atomic.Pointer[run]
-	// waves collects every wave the scenario retained, root and interior alike; all must be finished after the run.
-	wavesMu sync.Mutex
-	waves   []Wave
+	// taskGroups collects every task group the scenario retained, root and interior alike; all must be finished after
+	// the run.
+	taskGroupsMu sync.Mutex
+	taskGroups   []TaskGroup
 	// orderViolations counts slot hand-outs that found an older item's work still queued on the branch (see onAssign).
 	orderViolations atomic.Int64
 }
 
-func (top *propTopology) addWave(w Wave) {
-	top.wavesMu.Lock()
-	defer top.wavesMu.Unlock()
-	top.waves = append(top.waves, w)
+func (top *propTopology) addTaskGroup(w TaskGroup) {
+	top.taskGroupsMu.Lock()
+	defer top.taskGroupsMu.Unlock()
+	top.taskGroups = append(top.taskGroups, w)
 }
 
-// onAssign is the run.grabNext hook: when a branch slot is handed to col — for a sync pull or a streaming
-// reservation — no collection still queued on that branch may belong to an older item. It runs under run.mu, so it
-// only counts; the assertion is made after the run.
+// onAssign is the run.grabNext hook: when a branch slot is handed to col, no collection still queued on that branch may
+// belong to an older item. It runs under run.mu, so it only counts; the assertion is made after the run.
 func (top *propTopology) onAssign(_ int, col *taskCollection, queue []*taskCollection) {
 	for _, q := range queue {
 		if q.it.seq < col.it.seq {
@@ -194,10 +194,10 @@ type mover interface {
 	TryMoveTo(ctx context.Context) (entered bool, err error)
 }
 
-// moveTo enters m, sometimes trying first, then waits for the listed waves. A declined TryMoveTo — the item's body
-// is still busy, or the target has no room — must leave the item exactly where it was, so the MoveTo that follows
-// still works.
-func moveTo(ctx context.Context, m mover, try bool, waves []Wave) error {
+// moveTo enters m, sometimes trying first, then waits for the listed task groups. A declined TryMoveTo — the item's
+// body is still busy, or the target has no room — must leave the item exactly where it was, so the MoveTo that
+// follows still works.
+func moveTo(ctx context.Context, m mover, try bool, groups []TaskGroup) error {
 	entered := false
 	if try {
 		var err error
@@ -211,7 +211,7 @@ func moveTo(ctx context.Context, m mover, try bool, waves []Wave) error {
 			return err
 		}
 	}
-	for _, w := range waves {
+	for _, w := range groups {
 		if err := w.Wait(ctx); err != nil {
 			return err
 		}
@@ -277,7 +277,7 @@ func (top *propTopology) buildLane(rnd *rand.Rand, fo FanOut, name string, inter
 	stages, innerFanOut := 0, false
 	if interiors {
 		stages = rnd.Intn(3)  // 0, 1 or 2 interior stages
-		if rnd.Intn(6) == 0 { // rarely, an interior fan-out — entered before the stages so its wave can be joined
+		if rnd.Intn(6) == 0 { // rarely, an interior fan-out — entered before the stages so its task group can be joined
 			innerFanOut = true
 			if stages == 0 {
 				stages = 1
@@ -336,29 +336,29 @@ func spin() {
 }
 
 // process is the ItemProcessor of a generated scenario: it walks the root nodes, skipping some, scheduling random
-// work on the fan-outs' lanes — in one go and retained, or in rounds with Wait between them — joining waves either at
+// work on the fan-outs' lanes — in one go and retained, or in rounds with Wait between them — joining task groups either at
 // the next node or later, and finally committing. Some moves are tried first. With inj set it instead plants exactly
 // one failure (and takes no random shortcuts, so the failure is always reached).
 func (top *propTopology) process(ctx context.Context, no int64, inj *propInjection) error {
 	top.captureRun()
 	rnd := rand.New(rand.NewSource(top.seed*7919 + no*31))
 	failing := inj != nil && inj.item == no
-	var pending []Wave
+	var pending []TaskGroup
 
 	for i := range top.nodes {
 		nd := top.nodes[i]
 		if inj == nil && rnd.Intn(6) == 0 {
 			continue // skip this node entirely
 		}
-		var waves []Wave
+		var groups []TaskGroup
 		if inj == nil && len(pending) > 0 && rnd.Intn(2) == 0 {
-			waves, pending = pending, nil // wait here; otherwise the wait is deferred to a later node
+			groups, pending = pending, nil // wait here; otherwise the wait is deferred to a later node
 		}
 
 		try := inj == nil && rnd.Intn(4) == 0
 
 		if nd.stage != nil {
-			if err := moveTo(ctx, nd.stage.st, try, waves); err != nil {
+			if err := moveTo(ctx, nd.stage.st, try, groups); err != nil {
 				return err
 			}
 			// The instrumented region lies between two moves, so it is strictly inside the stage's slot.
@@ -367,7 +367,7 @@ func (top *propTopology) process(ctx context.Context, no int64, inj *propInjecti
 			injectRetain := failing && inj.kind == injRetain && inj.node == i
 			if injectRetain || rnd.Intn(4) == 0 {
 				top.scheduled.Add(1)
-				pending = append(pending, nd.stage.st.RetainFor(ctx, func() error {
+				pending = append(pending, nd.stage.st.RetainFor(ctx, func(context.Context) error {
 					top.ran.Add(1)
 					if injectRetain {
 						return errPropBoom
@@ -381,7 +381,7 @@ func (top *propTopology) process(ctx context.Context, no int64, inj *propInjecti
 			}
 		} else {
 			fo := nd.fanOut.fo
-			if err := moveTo(ctx, fo, try, waves); err != nil {
+			if err := moveTo(ctx, fo, try, groups); err != nil {
 				return err
 			}
 			// The failing item takes the plain shape, so its failure is always scheduled. Otherwise the body is either
@@ -392,7 +392,7 @@ func (top *propTopology) process(ctx context.Context, no int64, inj *propInjecti
 					return err
 				}
 				w := fo.Retain(ctx)
-				top.addWave(w)
+				top.addTaskGroup(w)
 				pending = append(pending, w)
 			} else {
 				for k, rounds := 0, rnd.Intn(3); k < rounds; k++ {
@@ -422,9 +422,7 @@ func (top *propTopology) process(ctx context.Context, no int64, inj *propInjecti
 }
 
 // fanOutTasks draws 0-3 tasks per lane of one fan-out, planting the injected failure on the chosen lane. The source
-// KIND is drawn too, so a scenario exercises the lazy eager source and both streaming ones — whose pulls run user code
-// outside the conveyor's lock, single-flight per source — under the same random topologies and interleavings as
-// everything else.
+// KIND is drawn too, so a scenario exercises both source kinds under the same random topologies and interleavings.
 func (top *propTopology) fanOutTasks(
 	ctx context.Context, pf *propFanOut, rnd *rand.Rand, failing bool, inj *propInjection, nodeIdx int,
 ) []Task {
@@ -439,45 +437,24 @@ func (top *propTopology) fanOutTasks(
 			continue
 		}
 		top.scheduled.Add(int64(n))
-		tasks = append(tasks, top.laneTask(ctx, pl, rnd.Intn(3), n, inject))
+		tasks = append(tasks, top.laneTasks(pl, rnd.Intn(2), n, inject)...)
 	}
 	return tasks
 }
 
-// laneTask wraps n pieces of a lane's work in one of the three source kinds. All three produce exactly n callbacks
-// when the item is allowed to finish, so the COMPLETION invariant (scheduled == ran) is the same whichever is drawn.
-func (top *propTopology) laneTask(ctx context.Context, pl *propLane, kind, n int, inject bool) Task {
+// laneTasks wraps n pieces of a lane's work in one of the two source kinds: one NewTasks, or n NewTask calls. Both
+// produce exactly n callbacks when the item is allowed to finish, so the COMPLETION invariant (scheduled == ran) is
+// the same whichever is drawn.
+func (top *propTopology) laneTasks(pl *propLane, kind, n int, inject bool) []Task {
 	work := top.laneWork(pl, inject, 0)
-	fn := func(i int) TaskFunc {
-		return func(cctx context.Context) error { return work(cctx, i) }
+	if kind == 0 {
+		return []Task{pl.branch.NewTasks(n, work)}
 	}
-	switch kind {
-	case 0:
-		return pl.branch.NewTasks(n, work)
-	case 1:
-		return pl.branch.NewTasksGen(func(yield func(TaskFunc) bool) {
-			for i := 0; i < n; i++ {
-				if !yield(fn(i)) {
-					return
-				}
-			}
-		})
-	default:
-		// The producer must respect the item's ctx and must close, or a canceled item would leave it blocked on a
-		// channel nobody reads — which assertNoLeaks would catch.
-		ch := make(chan TaskFunc)
-		go func() {
-			defer close(ch)
-			for i := 0; i < n; i++ {
-				select {
-				case ch <- fn(i):
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-		return pl.branch.NewTasksChan(ch)
+	tasks := make([]Task, n)
+	for i := range tasks {
+		tasks[i] = pl.branch.NewTask(func(cctx context.Context) error { return work(cctx, i) })
 	}
+	return tasks
 }
 
 // laneWork is one piece of a branch's work at the given spawn depth. On a pool it just runs; on a lane it is a child
@@ -498,7 +475,7 @@ func (top *propTopology) laneWork(pl *propLane, inject bool, depth int) func(con
 		spin()
 		pl.g.leave()
 
-		var iw Wave
+		var iw TaskGroup
 		if pl.inner != nil {
 			if err := pl.inner.fo.MoveTo(cctx); err != nil {
 				return err
@@ -507,7 +484,7 @@ func (top *propTopology) laneWork(pl *propLane, inject bool, depth int) func(con
 				return err
 			}
 			iw = pl.inner.fo.Retain(cctx)
-			top.addWave(iw)
+			top.addTaskGroup(iw)
 		}
 		for k, si := range pl.stages {
 			if err := si.st.MoveTo(cctx); err != nil {
@@ -646,17 +623,17 @@ func (top *propTopology) assertBranchOrder(t *testing.T) {
 	}
 }
 
-// assertWavesFinished pins the WAVES FINISH invariant: every wave the scenario retained is finished once Run returned,
-// including the ones whose trees kept growing after the retain.
-func (top *propTopology) assertWavesFinished(t *testing.T) {
+// assertTaskGroupsFinished pins the TASK GROUPS FINISH invariant: every task group the scenario retained is finished
+// once Run returned, including the ones whose trees kept growing after the retain.
+func (top *propTopology) assertTaskGroupsFinished(t *testing.T) {
 	t.Helper()
-	top.wavesMu.Lock()
-	defer top.wavesMu.Unlock()
-	for i, w := range top.waves {
+	top.taskGroupsMu.Lock()
+	defer top.taskGroupsMu.Unlock()
+	for i, w := range top.taskGroups {
 		select {
 		case <-w.Finished():
 		default:
-			t.Errorf("seed %d: retained wave %d of %d is not finished after the run", top.seed, i, len(top.waves))
+			t.Errorf("seed %d: retained task group %d of %d is not finished after the run", top.seed, i, len(top.taskGroups))
 		}
 	}
 }
@@ -714,7 +691,7 @@ func TestPropertyRandomTopologiesHoldInvariants(t *testing.T) {
 			top.assertCommitOrder(t)
 			top.assertCapacity(t)
 			top.assertBranchOrder(t)
-			top.assertWavesFinished(t)
+			top.assertTaskGroupsFinished(t)
 			// COMPLETION: everything scheduled ran, since nothing was ever cancelled.
 			if sched, ran := top.scheduled.Load(), top.ran.Load(); sched != ran {
 				t.Errorf("seed %d: %d pieces of work were scheduled but %d ran", seed, sched, ran)
@@ -757,7 +734,7 @@ func TestPropertyRandomFailFast(t *testing.T) {
 			top.assertCommitOrder(t)
 			top.assertCapacity(t)
 			top.assertBranchOrder(t)
-			top.assertWavesFinished(t)
+			top.assertTaskGroupsFinished(t)
 			top.assertNoLeaks(t, base)
 		})
 	}
@@ -798,7 +775,7 @@ func TestPropertyCapacityJitterHoldsInvariants(t *testing.T) {
 			top.assertCommitOrder(t)
 			top.assertCapacity(t)
 			top.assertBranchOrder(t)
-			top.assertWavesFinished(t)
+			top.assertTaskGroupsFinished(t)
 			if sched, ran := top.scheduled.Load(), top.ran.Load(); sched != ran {
 				t.Errorf("seed %d: %d pieces of work were scheduled but %d ran", seed, sched, ran)
 			}

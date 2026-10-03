@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// This file pins FanOut.Wait: it returns once the body is idle — the whole tree scheduled so far — reports the body's
-// error with the node's name, never seals the body, and judges cancellation by the item.
+// This file pins FanOut.Wait: it returns once the body is idle — the whole tree scheduled so far — reports the
+// body's error as a TaskError named after the branch, never seals the body, and judges cancellation by the item.
 
 // TestWaitOnEmptyBodyReturnsAtOnce: nothing scheduled, nothing to wait for. The body stays open: work may still be
 // added and waited for afterwards.
@@ -87,8 +88,9 @@ func TestWaitReturnsWhenTheWholeTreeIsDone(t *testing.T) {
 	}
 }
 
-// TestWaitReportsTheBodyErrorAndKeepsIt: a failed task surfaces from Wait with the fan-out's name, again on a repeated
-// Wait, and Schedule afterwards returns the poison. Wait observed the error, so the item completes without failing.
+// TestWaitReportsTheBodyErrorAndKeepsIt: a failed task surfaces from Wait as a TaskError named after its pool, again
+// on a repeated Wait, and Schedule afterwards is refused with it: the failure canceled the body, not the item. Wait
+// joined the error and the processor returns nil, so the item completes without failing.
 func TestWaitReportsTheBodyErrorAndKeepsIt(t *testing.T) {
 	boom := errors.New("boom")
 	c := NewConveyor()
@@ -104,92 +106,117 @@ func TestWaitReportsTheBodyErrorAndKeepsIt(t *testing.T) {
 			return err
 		}
 		first := fo.Wait(ctx)
-		if !errors.Is(first, boom) || first.Error() != "fo work: boom" {
-			t.Errorf("Wait after a failed task = %q, want %q", first, "fo work: boom")
+		var te TaskError
+		if !errors.As(first, &te) || te.Unwrap() != boom || te.Unit() != Unit(pool) || first.Error() != "pool task: boom" {
+			t.Errorf("Wait after a failed task = %v, want a TaskError %q", first, "pool task: boom")
 		}
 		if second := fo.Wait(ctx); second == nil || second.Error() != first.Error() {
 			t.Errorf("repeated Wait = %v, want the same error again (%v)", second, first)
 		}
-		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil })); !errors.Is(err, boom) {
-			t.Errorf("Schedule after the failure = %v, want the poison", err)
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil })); !errors.As(err, &te) ||
+			te.Unwrap() != boom {
+			t.Errorf("Schedule after the failure = %v, want the body's TaskError", err)
+		}
+		if cause := context.Cause(ctx); cause != nil {
+			t.Errorf("item context cause = %v, want nil: a task error cancels only its body", cause)
 		}
 		checked.Store(true)
 		return nil
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatalf("Wait observed the failure, so the run should not fail, got %v", err)
+		t.Fatalf("Wait joined the failure and the processor dropped it, so the run should not fail, got %v", err)
 	}
 	if !checked.Load() {
 		t.Fatalf("the checks did not run")
 	}
 }
 
+// runFirstItemAsync runs c with runAsync: the first item runs proc, later items wait until their context is done and
+// return its cause (an abort). Used with OptDrainTimeout(0) to get an item canceled by a shutdown.
+func runFirstItemAsync(c Conveyor, proc ItemProcessor) (context.CancelCauseFunc, <-chan error) {
+	var once sync.Once
+	return runAsync(c, func(ctx context.Context) error {
+		first := false
+		once.Do(func() { first = true })
+		if !first {
+			<-ctx.Done()
+			return context.Cause(ctx)
+		}
+		return proc(ctx)
+	})
+}
+
 // TestWaitWithStrippedContextOnCanceledItem: a context with the cancellation stripped cannot get nil out of Wait for
-// a canceled item. With an idle clean body the cancellation cause is returned; with an idle failed body the body's
-// own error wins, as the truer message.
+// a canceled item (here canceled by a shutdown with no drain time). With an idle clean body the cancellation cause is
+// returned; with an idle failed body the body's own error wins, as the truer message.
 func TestWaitWithStrippedContextOnCanceledItem(t *testing.T) {
 	boom := errors.New("boom")
+	cause := errors.New("stop")
 	t.Run("idle clean body returns the cause", func(t *testing.T) {
-		c := NewConveyor()
-		s := c.AddStage(OptName("s"))
+		c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
 		fo := c.AddFanOut(OptName("fo"))
 		_ = fo.AddPool(OptName("pool"))
 
-		trigger := make(chan struct{})
-		var checked atomic.Bool
-		err := runOnce(t, c, func(ctx context.Context) error {
-			if err := s.MoveTo(ctx); err != nil {
-				return err
-			}
-			poison := s.RetainFor(ctx, func() error {
-				<-trigger
-				return boom
-			})
+		inFo := make(chan struct{})
+		var waitErr error
+		cancel, done := runFirstItemAsync(c, func(ctx context.Context) error {
 			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
-			close(trigger)
-			<-poison.Finished()
-			_ = poison.Err()
-			if err := fo.Wait(context.WithoutCancel(ctx)); !errors.Is(err, boom) {
-				t.Errorf("Wait with a stripped context on a poisoned item with an empty body = %v, want the poison", err)
-			}
-			checked.Store(true)
+			signal(inFo)
+			<-ctx.Done()
+			waitErr = fo.Wait(context.WithoutCancel(ctx))
 			return nil
 		})
-		if err != nil && !errors.Is(err, context.Canceled) {
-			t.Fatalf("run failed: %v", err)
+		<-inFo
+		cancel(cause)
+		err := recvErr(t, "Run", done)
+		var se ShutdownError
+		if !errors.As(waitErr, &se) || !errors.Is(waitErr, cause) {
+			t.Fatalf("Wait with a stripped context on a canceled item with an empty body = %v, want its ShutdownError",
+				waitErr)
 		}
-		if !checked.Load() {
-			t.Fatalf("the checks did not run")
+		var ie ItemError
+		if !errors.As(err, &se) || !errors.Is(err, cause) || errors.As(err.(RunError).DrainError(), &ie) {
+			t.Fatalf("Run error = %v, want a ShutdownError with %v and no item failure", err, cause)
 		}
 	})
 	t.Run("idle failed body returns the body error", func(t *testing.T) {
-		c := NewConveyor()
+		c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
 		fo := c.AddFanOut(OptName("fo"))
 		pool := fo.AddPool(OptName("pool"))
 
-		var checked atomic.Bool
-		err := runOnce(t, c, func(ctx context.Context) error {
+		failed := make(chan struct{})
+		var waitErr error
+		cancel, done := runFirstItemAsync(c, func(ctx context.Context) error {
 			if err := fo.MoveTo(ctx); err != nil {
 				return err
 			}
 			if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return boom })); err != nil {
 				return err
 			}
-			<-ctx.Done() // the failure poisoned the item
-			err := fo.Wait(context.WithoutCancel(ctx))
-			if !errors.Is(err, boom) || err.Error() != "fo work: boom" {
-				t.Errorf("Wait with a stripped context on a failed body = %q, want %q", err, "fo work: boom")
-			}
-			checked.Store(true)
+			it := itemOf(ctx)
+			waitFor(t, "the body to fail and become idle", func() bool {
+				it.run.mu.Lock()
+				defer it.run.mu.Unlock()
+				return it.pending.idle() && it.pending.err != nil
+			})
+			signal(failed)
+			<-ctx.Done() // the shutdown cancels the item; the failed body is not joined yet
+			waitErr = fo.Wait(context.WithoutCancel(ctx))
 			return nil
 		})
-		if err != nil && !errors.Is(err, context.Canceled) {
-			t.Fatalf("Wait observed the failure, so the run should not fail, got %v", err)
+		<-failed
+		cancel(cause)
+		err := recvErr(t, "Run", done)
+		var te TaskError
+		if !errors.As(waitErr, &te) || te.Unwrap() != boom || waitErr.Error() != "pool task: boom" {
+			t.Fatalf("Wait with a stripped context on a failed body = %v, want %q", waitErr, "pool task: boom")
 		}
-		if !checked.Load() {
-			t.Fatalf("the checks did not run")
+		var se ShutdownError
+		var ie ItemError
+		if !errors.As(err, &se) || !errors.Is(err, cause) || errors.As(err.(RunError).DrainError(), &ie) {
+			t.Fatalf("Run error = %v, want a ShutdownError with %v and no item failure: Wait joined the body", err, cause)
 		}
 	})
 }
@@ -241,50 +268,6 @@ func TestStrippedContextWaitWakesOnItemCancellation(t *testing.T) {
 		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil })); !errors.Is(err, boom) {
 			t.Errorf("Schedule after the canceled Wait = %v, want the cause (the body is open, the item canceled)", err)
 		}
-		return nil
-	})
-	if err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatalf("run failed: %v", err)
-	}
-	if !checked.Load() {
-		t.Fatalf("the checks did not run")
-	}
-}
-
-// TestUnclosedChannelSourceBlocksWait: a channel source counts as work to come until it is closed, so Wait blocks on
-// it exactly as leaving does; closing the channel releases Wait.
-func TestUnclosedChannelSourceBlocksWait(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-
-	ch := make(chan TaskFunc)
-	ran := make(chan struct{})
-	waited := make(chan error, 1)
-	var checked atomic.Bool
-	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx); err != nil {
-			return err
-		}
-		if err := fo.Schedule(ctx, pool.NewTasksChan(ch)); err != nil {
-			return err
-		}
-		go func() { waited <- fo.Wait(ctx) }()
-		ch <- func(context.Context) error {
-			close(ran)
-			return nil
-		}
-		<-ran // the next pull is now in flight (reserving a slot), waiting on the open channel
-		select {
-		case err := <-waited:
-			t.Errorf("Wait returned (%v) while the channel source was still open", err)
-		default:
-		}
-		close(ch)
-		if err := <-waited; err != nil {
-			t.Errorf("Wait after the channel was closed = %v, want nil", err)
-		}
-		checked.Store(true)
 		return nil
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {

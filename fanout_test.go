@@ -219,8 +219,7 @@ func TestPoolRunsTasksInParallelUpToLimit(t *testing.T) {
 			return err
 		}
 		w := fo.Retain(ctx)
-		<-w.Finished()
-		return w.Err()
+		return w.Wait(ctx)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -252,8 +251,7 @@ func TestPoolRunsSequentiallyByDefault(t *testing.T) {
 			return err
 		}
 		w := fo.Retain(ctx)
-		<-w.Finished()
-		return w.Err()
+		return w.Wait(ctx)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -325,8 +323,7 @@ func TestFanOutOverSubscribedPoolDrains(t *testing.T) {
 			return err
 		}
 		w := fo.Retain(ctx)
-		<-w.Finished()
-		return w.Err()
+		return w.Wait(ctx)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -336,7 +333,7 @@ func TestFanOutOverSubscribedPoolDrains(t *testing.T) {
 	}
 }
 
-// TestFanOutMultiplePoolsDifferentLimits exercises several pools with different capacities in one wave.
+// TestFanOutMultiplePoolsDifferentLimits exercises several pools with different capacities in one task group.
 func TestFanOutMultiplePoolsDifferentLimits(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
@@ -368,7 +365,7 @@ func TestFanOutMultiplePoolsDifferentLimits(t *testing.T) {
 }
 
 // TestFanOutEmptyScheduleIsLegal: scheduling nothing is legal — the item is inside the node with an empty body, and
-// retaining it hands back an already-finished wave.
+// retaining it hands back an already-finished task group.
 func TestFanOutEmptyScheduleIsLegal(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -397,10 +394,10 @@ func TestFanOutEmptyScheduleIsLegal(t *testing.T) {
 				select {
 				case <-w.Finished():
 				default:
-					t.Errorf("an empty wave should be born finished")
+					t.Errorf("an empty task group should be born finished")
 				}
-				if err := w.Err(); err != nil {
-					t.Errorf("empty wave error = %v, want nil", err)
+				if err := groupErr(w); err != nil {
+					t.Errorf("empty task group error = %v, want nil", err)
 				}
 				if err := commit.MoveTo(ctx); err != nil {
 					return err
@@ -449,7 +446,7 @@ func TestFanOutSubsetOfPools(t *testing.T) {
 	}
 }
 
-// TestFanOutJoinHappensBeforeNewWorkStarts: waves named in a fan-out move are joined *before* the new work is
+// TestFanOutJoinHappensBeforeNewWorkStarts: task groups named in a fan-out move are joined *before* the new work is
 // enqueued, so scheduled work may depend on them.
 func TestFanOutJoinHappensBeforeNewWorkStarts(t *testing.T) {
 	c := NewConveyor()
@@ -506,8 +503,8 @@ func TestFanOutJoinHappensBeforeNewWorkStarts(t *testing.T) {
 	}
 }
 
-// TestDeferredJoinOverlapsInlineWork: not naming the wave at the next stage is what buys the overlap — the stage's
-// inline work runs while the wave is still going.
+// TestDeferredJoinOverlapsInlineWork: not naming the task group at the next stage is what buys the overlap — the
+// stage's inline work runs while the task group is still going.
 func TestDeferredJoinOverlapsInlineWork(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -538,7 +535,7 @@ func TestDeferredJoinOverlapsInlineWork(t *testing.T) {
 		<-taskRunning
 		select {
 		case <-w.Finished():
-			// The wave finished before the inline work: no overlap.
+			// The task group finished before the inline work: no overlap.
 		default:
 			overlapped.Store(true)
 		}
@@ -549,11 +546,12 @@ func TestDeferredJoinOverlapsInlineWork(t *testing.T) {
 		t.Fatalf("run failed: %v", err)
 	}
 	if !overlapped.Load() {
-		t.Fatalf("the deferred wave did not overlap the inline stage work")
+		t.Fatalf("the deferred task group did not overlap the inline stage work")
 	}
 }
 
-// TestFanOutTaskErrorFailsRun: a task error is fail-fast — it cancels the item and becomes Run's error.
+// TestFanOutTaskErrorFailsRun: a task error is joined by the move out of the fan-out, which returns it as a TaskError
+// naming the pool; the processor returns it and it becomes Run's error.
 func TestFanOutTaskErrorFailsRun(t *testing.T) {
 	boom := errors.New("task boom")
 	c := NewConveyor()
@@ -580,6 +578,9 @@ func TestFanOutTaskErrorFailsRun(t *testing.T) {
 			return err
 		}
 		if err := commit.MoveTo(ic); err != nil {
+			if cause := context.Cause(ic); cause != nil {
+				t.Errorf("item canceled with %v; a task failure must not cancel the item", cause)
+			}
 			return err
 		}
 		if no == 1 {
@@ -591,17 +592,21 @@ func TestFanOutTaskErrorFailsRun(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("Run error = %v, want %v", err, boom)
 	}
-	// The leave names the fan-out whose work failed, not the node the item was entering.
-	if !strings.Contains(err.Error(), "fo work: task boom") {
-		t.Fatalf("Run error = %q, want it to contain %q", err, "fo work: task boom")
+	var te TaskError
+	if !errors.As(err, &te) || te.Unit() != pool || te.Unwrap() != boom {
+		t.Fatalf("Run error = %v, want a TaskError of %s with %v", err, pool, boom)
+	}
+	// The error names the pool the failed task ran on, not the node the item was entering.
+	if !strings.Contains(err.Error(), "pool task: task boom") {
+		t.Fatalf("Run error = %q, want it to contain %q", err, "pool task: task boom")
 	}
 	if committed.Load() {
-		t.Fatalf("the item ran its commit work although the joined wave had failed")
+		t.Fatalf("the item ran its commit work although the joined task group had failed")
 	}
 }
 
-// TestFanOutSiblingTasksSeeCancellation: when one task fails, the item's context is canceled so its siblings can
-// bail out promptly.
+// TestFanOutSiblingTasksSeeCancellation: when one task fails, the body's context is canceled with the TaskError so
+// its siblings can bail out promptly. The item itself is not canceled.
 func TestFanOutSiblingTasksSeeCancellation(t *testing.T) {
 	boom := errors.New("sibling boom")
 	c := NewConveyor()
@@ -609,17 +614,25 @@ func TestFanOutSiblingTasksSeeCancellation(t *testing.T) {
 	failing := fo.AddPool(OptName("failing"))
 	waiting := fo.AddPool(OptName("waiting"))
 
-	sawCancel := make(chan struct{})
+	waitingStarted := make(chan struct{})
+	sawCancel := make(chan error, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	err := c.Run(ctx, func(ic context.Context) error {
 		err := fo.MoveTo(ic)
 		if err == nil {
 			err = fo.Schedule(ic,
-				failing.NewTask(func(context.Context) error { return boom }),
-				waiting.NewTask(func(context.Context) error {
-					<-ic.Done() // must be released by the fail-fast cancellation
-					close(sawCancel)
+				failing.NewTask(func(context.Context) error {
+					<-waitingStarted // else the sibling may be dropped before it starts
+					return boom
+				}),
+				waiting.NewTask(func(tctx context.Context) error {
+					close(waitingStarted)
+					<-tctx.Done() // must be released by the fail-fast cancellation of the body
+					if cause := context.Cause(ic); cause != nil {
+						t.Errorf("item canceled with %v; a task failure must not cancel the item", cause)
+					}
+					sawCancel <- context.Cause(tctx)
 					return nil
 				}),
 			)
@@ -627,12 +640,13 @@ func TestFanOutSiblingTasksSeeCancellation(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		w := fo.Retain(ic)
-		<-w.Finished()
-		return w.Err()
+		return fo.Retain(ic).Wait(ic)
 	})
 
-	<-sawCancel
+	var te TaskError
+	if cause := <-sawCancel; !errors.As(cause, &te) || te.Unit() != failing || te.Unwrap() != boom {
+		t.Errorf("sibling's context cause = %v, want a TaskError of %s with %v", cause, failing, boom)
+	}
 	if !errors.Is(err, boom) {
 		t.Fatalf("Run error = %v, want %v", err, boom)
 	}

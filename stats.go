@@ -48,11 +48,11 @@ func (w *windowedInt) snapshot() Gauge {
 // UnitStat is the per-node portion of Stats. Unit is the handle (a Stage, a FanOut, a Pool, a Lane, or
 // Conveyor.StartingStage) that produced it.
 //
-// Occupied and Limit describe the node itself. A slot counts while an item runs the node's code or has work
-// outstanding there, while Retain, RetainFor or FanOut.Retain keeps it after the item moved on, and while an item admitted to a
-// Balanced or Strict fan-out still keeps the previous node's slot (see FanOutBackpressure). So a node's occupancy
-// may include items that are already in the next node. Work prepared with Schedule before entering a fan-out is
-// not counted anywhere.
+// Occupied and Limit describe the node itself. A slot counts while an item runs the node's code or has work outstanding
+// there, while Retain, RetainFor or FanOut.Retain keeps it after the item moved on, and while an item admitted to a
+// Balanced or Strict fan-out still keeps the previous node's slot (see FanOutBackpressure). So a node's occupancy may
+// include items that are already in the next node. Work prepared with Schedule before entering a fan-out is not counted
+// anywhere.
 //
 // Queued describes what waits in front of the node: items in a waiting room (under Balanced or Strict, possibly an
 // item already admitted to the fan-out from that room), or, for a branch, the submissions whose tasks are not all
@@ -93,6 +93,9 @@ func (c *conveyor) Stats() Stats {
 // handle returns the public handle for this unit: the Stage, FanOut or Branch that owns it (or the start-stage
 // handle), so a UnitStat can be matched back to what the caller built.
 func (u *unit) handle() Unit {
+	if b, ok := u.owner.(*branch); ok {
+		return b.handle
+	}
 	if h, ok := u.owner.(Unit); ok {
 		return h
 	}

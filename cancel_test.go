@@ -16,61 +16,69 @@ const wakeTimeout = 5 * time.Second
 // a context with the cancellation stripped (context.WithoutCancel) cannot move, retain, or otherwise act for a
 // canceled item (see ItemProcessor). A context that adds a deadline of its own keeps working.
 
-// TestStrippedContextCannotActForPoisonedItem: once a Retain's error has poisoned the item, MoveTo, TryMoveTo and
-// Retain called with context.WithoutCancel(ctx) all answer with the poison, and nothing is entered or run.
-func TestStrippedContextCannotActForPoisonedItem(t *testing.T) {
-	boom := errors.New("poison")
-	c := NewConveyor()
+// TestStrippedContextCannotActForCanceledItem: once the drain timeout has canceled the item, MoveTo, TryMoveTo and
+// RetainFor called with context.WithoutCancel(ctx) all answer with the item's ShutdownError, and nothing is entered or
+// run.
+func TestStrippedContextCannotActForCanceledItem(t *testing.T) {
+	c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
 	a := c.AddStage(OptName("a"))
 	b := c.AddStage(OptName("b"))
 
 	var bgRan atomic.Bool
 	var checked atomic.Bool
-	err := runOnce(t, c, func(ctx context.Context) error {
+	stop, done := runAsync(c, func(ctx context.Context) error {
+		if itemNo(ctx) != 1 {
+			<-ctx.Done()
+			return nil
+		}
 		if err := a.MoveTo(ctx); err != nil {
 			return err
 		}
-		first := a.RetainFor(ctx, func() error { return boom })
-		<-first.Finished()
-		if got := first.Err(); !errors.Is(got, boom) {
-			t.Errorf("first wave error = %v, want %v", got, boom)
+		<-ctx.Done() // the drain timeout canceled the item
+		var se ShutdownError
+		if !errors.As(context.Cause(ctx), &se) {
+			t.Errorf("item cause = %v, want a ShutdownError", context.Cause(ctx))
 		}
 		stripped := context.WithoutCancel(ctx)
 
-		if err := b.MoveTo(stripped); !errors.Is(err, boom) {
-			t.Errorf("MoveTo with a stripped context on a poisoned item = %v, want the poison", err)
+		if err := b.MoveTo(stripped); !errors.As(err, &se) {
+			t.Errorf("MoveTo with a stripped context on a canceled item = %v, want a ShutdownError", err)
 		}
 		if got := occupancyOf(c, b); got != 0 {
 			t.Errorf("b occupancy = %d after the refused move, want 0", got)
 		}
 		entered, err := b.TryMoveTo(stripped)
-		if entered || !errors.Is(err, boom) {
-			t.Errorf("TryMoveTo with a stripped context on a poisoned item = (%v, %v), want (false, the poison)",
-				entered, err)
+		if entered || !errors.As(err, &se) {
+			t.Errorf("TryMoveTo with a stripped context on a canceled item = (%v, %v), want (false, a "+
+				"ShutdownError)", entered, err)
 		}
-		second := a.RetainFor(stripped, func() error {
+		w := a.RetainFor(stripped, func(context.Context) error {
 			bgRan.Store(true)
 			return nil
 		})
 		select {
-		case <-second.Finished():
+		case <-w.Finished():
 		default:
-			t.Errorf("Retain with a stripped context on a poisoned item must hand back a finished wave")
+			t.Errorf("RetainFor with a stripped context on a canceled item must hand back a finished task group")
 		}
-		if got := second.Err(); !errors.Is(got, boom) {
-			t.Errorf("second wave error = %v, want the poison", got)
+		if got := groupErr(w); !errors.As(got, &se) {
+			t.Errorf("task group error = %v, want a ShutdownError", got)
 		}
 		checked.Store(true)
 		return nil
 	})
+	waitFor(t, "item 1 to enter a", func() bool { return occupancyOf(c, a) == 1 })
+	stop(errors.New("stop"))
+	runErr := recvErr(t, "Run", done)
 	if bgRan.Load() {
-		t.Fatalf("the bgOp ran although the item was poisoned")
+		t.Fatalf("the task ran although the item was canceled")
 	}
 	if !checked.Load() {
 		t.Fatalf("the checks did not run")
 	}
-	if err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatalf("every wave was observed, so the run should not fail, got %v", err)
+	var re RunError
+	if !errors.As(runErr, &re) || re.DrainError() == nil {
+		t.Fatalf("Run = %v, want a RunError with the drain timeout as DrainError", runErr)
 	}
 }
 
@@ -221,7 +229,7 @@ func TestStrippedContextAdmissionWaitWakesOnItemCancellation(t *testing.T) {
 	})
 }
 
-// TestStrippedContextJoinWaitWakesOnItemCancellation: a Wave.Wait with a stripped context wakes when the item's own
+// TestStrippedContextJoinWaitWakesOnItemCancellation: a TaskGroup.Wait with a stripped context wakes when the item's own
 // context is canceled, with nothing else waking the run. The item is inside the target stage when it starts the
 // wait; once it is parked there, the item's own context is canceled directly, with no broadcast.
 func TestStrippedContextJoinWaitWakesOnItemCancellation(t *testing.T) {
@@ -244,7 +252,7 @@ func TestStrippedContextJoinWaitWakesOnItemCancellation(t *testing.T) {
 		select {
 		case err := <-returned:
 			if !errors.Is(err, boom) {
-				t.Errorf("Wait on a parked wave with a stripped context = %v, want the item's cancellation cause", err)
+				t.Errorf("Wait on a parked task group with a stripped context = %v, want the item's cancellation cause", err)
 			}
 		case <-time.After(wakeTimeout):
 			t.Errorf("Wait did not wake within %v after the item's own context was canceled", wakeTimeout)
@@ -257,7 +265,7 @@ func TestStrippedContextJoinWaitWakesOnItemCancellation(t *testing.T) {
 		if err := a.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := a.RetainFor(ctx, func() error {
+		w := a.RetainFor(ctx, func(context.Context) error {
 			<-park
 			return nil
 		})
@@ -268,7 +276,7 @@ func TestStrippedContextJoinWaitWakesOnItemCancellation(t *testing.T) {
 		}
 		returned <- w.Wait(stripped)
 		<-w.Finished()
-		return w.Err()
+		return groupErr(w)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)

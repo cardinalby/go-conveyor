@@ -3,6 +3,7 @@ package conveyor
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -313,6 +314,62 @@ func TestRunAgainAfterReturn(t *testing.T) {
 		got := seen.all()
 		if len(got) == 0 || got[0] != 1 {
 			t.Fatalf("round %d: item numbering did not restart: %v", round, got)
+		}
+	}
+}
+
+// TestRunContextValuesReachItems: the values of the context passed to Run reach the ItemProcessor, pool tasks, lane
+// children and UntilShutdown contexts, while its cancellation stays a graceful shutdown.
+func TestRunContextValuesReachItems(t *testing.T) {
+	type key struct{}
+	c := NewConveyor()
+	fo := c.AddFanOut(OptName("fo"))
+	pool := fo.AddPool(OptName("pool"))
+	lane := fo.AddLane(OptName("lane"))
+	mid := lane.AddStage(OptName("mid"))
+
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), key{}, "v"))
+	defer cancel()
+	var mu sync.Mutex
+	seen := map[string]any{}
+	record := func(where string, c context.Context) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen[where] = c.Value(key{})
+	}
+	var once sync.Once
+	err := c.Run(ctx, func(ic context.Context) error {
+		first := false
+		once.Do(func() { first = true })
+		if !first {
+			return nil
+		}
+		defer cancel()
+		record("processor", ic)
+		record("until shutdown", UntilShutdown(ic))
+		if err := fo.MoveTo(ic); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ic,
+			pool.NewTask(func(tc context.Context) error { record("pool task", tc); return nil }),
+			lane.NewTask(func(cc context.Context) error {
+				if err := mid.MoveTo(cc); err != nil {
+					return err
+				}
+				record("lane child", cc)
+				return nil
+			}),
+		); err != nil {
+			return err
+		}
+		return fo.Wait(ic)
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v", err)
+	}
+	for _, where := range []string{"processor", "until shutdown", "pool task", "lane child"} {
+		if got := seen[where]; got != "v" {
+			t.Errorf("%s: value = %v, want v", where, got)
 		}
 	}
 }

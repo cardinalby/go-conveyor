@@ -142,7 +142,7 @@ func TestSetLimitRaisePoolStartsQueuedWork(t *testing.T) {
 		})
 		close(release)
 		<-w.Finished()
-		return w.Err()
+		return groupErr(w)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -193,7 +193,7 @@ func TestSetLimitLowerPoolDrainsOversubscribed(t *testing.T) {
 		}
 		close(gate)
 		<-w.Finished()
-		return w.Err()
+		return groupErr(w)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -442,7 +442,7 @@ func TestSetLimitConcurrentWhileRunning(t *testing.T) {
 		}
 		w := fo.Retain(ctx)
 		<-w.Finished()
-		return w.Err()
+		return groupErr(w)
 	})
 
 	close(stop)
@@ -495,7 +495,7 @@ func TestLimitsAreAlwaysAtLeastOne(t *testing.T) {
 		w := fo.Retain(ctx)
 		pool.SetLimit(0) // clamped to 1 while the pool's work is still queued
 		<-w.Finished()
-		return w.Err()
+		return groupErr(w)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)

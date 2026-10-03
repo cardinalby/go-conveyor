@@ -3,13 +3,12 @@ package conveyor
 import (
 	"context"
 	"fmt"
-	"iter"
 )
 
 // This file holds the two kinds of branch a FanOut fans out to, and the one implementation behind both.
 //
 // A branch is where a fan-out's work runs. Both kinds own exactly one unit — the branch's own start gate — and both
-// are built with the same four task constructors (the Branch interface). They differ in one thing: whether the work
+// are built with the same task constructors (the Branch interface). They differ in one thing: whether the work
 // can travel.
 //
 //	kind                    interior nodes   what a slot means           capacity
@@ -19,11 +18,11 @@ import (
 //
 // The runtime needs to know nothing about the two kinds: it asks travels() — "does this branch have nodes?" — and
 // charges the slot to a fresh child item or to the scheduling item accordingly (see run.startWork). A Pool has no way
-// to add nodes, so its answer is fixed at build time. AddPool and AddLane are therefore the *same* call, differing
-// only in what they hand back; which one you used is not recorded anywhere, and a Lane left without nodes simply
-// behaves as the pool it is.
+// to add nodes, so its answer is fixed at build time. AddPool and AddLane build the same branch and differ only in the
+// handle they hand back (poolHandle, laneHandle), which exposes just the methods of its kind, so a type assertion to
+// the other kind fails. A Lane left without nodes simply behaves as the pool it is.
 //
-// The four constructors are spelled out in each interface rather than only inherited from Branch, so that every
+// The constructors are spelled out in each interface rather than only inherited from Branch, so that every
 // method carries the wording of its own kind and gets its own godoc anchor.
 
 // Branch is what a FanOut's work is scheduled on: a Pool or a Lane. It is the task-construction surface the two
@@ -39,12 +38,6 @@ type Branch interface {
 	// NewTasks creates a task of count independent callbacks fn(ctx, 0)..fn(ctx, count-1), each one slot's worth
 	// of work on this branch. A count <= 0 yields a no-op task; a nil fn with count > 0 panics.
 	NewTasks(count int, fn func(ctx context.Context, index int) error) Task
-
-	// NewTasksGen creates a task whose callbacks are produced by gen, pulled one by one as slots free up.
-	NewTasksGen(gen iter.Seq[TaskFunc]) Task
-
-	// NewTasksChan creates a task whose callbacks are received from ch, pulled one by one as slots free up.
-	NewTasksChan(ch <-chan TaskFunc) Task
 }
 
 // Pool is a single-step branch of a FanOut's work: a task runs on the slot it was given and is done. SetLimit(n)
@@ -75,17 +68,6 @@ type Pool interface {
 	// of work on this pool, built lazily as slots free up. A count <= 0 yields a no-op task; a nil fn with
 	// count > 0 panics.
 	NewTasks(count int, fn func(ctx context.Context, index int) error) Task
-
-	// NewTasksGen creates a task whose callbacks are produced by gen, pulled one by one as pool slots free up. Use
-	// it to stream work without materializing it upfront; gen should respect the ItemProcessor's ctx. State it
-	// reads must not be mutated until Wait returns or, after Retain, until the wave's Started channel closes. A nil
-	// gen is a no-op.
-	NewTasksGen(gen iter.Seq[TaskFunc]) Task
-
-	// NewTasksChan creates a task whose callbacks are received from ch, pulled one by one as pool slots free up.
-	// The producer must run in its own goroutine, respect the ItemProcessor's ctx, and close the channel when
-	// done. A nil channel is a no-op.
-	NewTasksChan(ch <-chan TaskFunc) Task
 }
 
 // Lane is a branch of a FanOut's work that is a pipeline in its own right: it has interior nodes (AddStage,
@@ -95,7 +77,8 @@ type Pool interface {
 // A lane's entrance admits one child at a time (there is no SetLimit), so its parallelism comes from the interior
 // stages' own limits. Children are created in queue order (item age, then Schedule order) and enter the interior
 // nodes in that order. A child may Schedule more work at the fan-out its lane belongs to, before its callback
-// returns.
+// returns. A child's context is canceled with the other tasks of its body, and a child that fails (its callback or
+// its own tasks) fails the body, like a pool task error (see FanOut).
 //
 // A lane with no interior nodes behaves as a Pool with limit 1.
 //
@@ -123,25 +106,16 @@ type Lane interface {
 	//
 	// The ctx each callback receives is the child's own — pass it to the lane's stages, not the item's.
 	NewTasks(count int, fn func(ctx context.Context, index int) error) Task
-
-	// NewTasksGen creates a task whose callbacks are produced by gen, pulled one by one as the lane's entrance
-	// frees up. Use it to stream work without materializing it upfront; gen should respect the ItemProcessor's
-	// ctx. State it reads must not be mutated until the wave's Started channel closes. A nil gen is a no-op.
-	NewTasksGen(gen iter.Seq[TaskFunc]) Task
-
-	// NewTasksChan creates a task whose callbacks are received from ch, pulled one by one as the lane's entrance
-	// frees up. The producer must run in its own goroutine, respect the ItemProcessor's ctx, and close the channel
-	// when done. A nil channel is a no-op.
-	NewTasksChan(ch <-chan TaskFunc) Task
 }
 
-// branch is the implementation behind both Pool and Lane: a series whose start gate is the branch's own unit. Which
-// interface it was handed out as is deliberately not recorded — nothing needs it, since what governs behaviour is
-// whether the series ended up with nodes (travels()), not which constructor was called.
+// branch is the implementation behind both Pool and Lane: a series whose start gate is the branch's own unit. What
+// governs behaviour is whether the series ended up with nodes (travels()), not which constructor was called; the
+// kind only decides the public handle.
 type branch struct {
 	*series // the branch's own interior series; series.start is the branch's unit. Always empty for a pool.
 
 	fanout *fanOut
+	handle Branch // the *poolHandle or *laneHandle handed out for this branch
 	name   string // optional user-given name (OptName); empty -> positional in String
 	no     int    // 1-based position among its fan-out's branches, for the positional name
 }
@@ -155,31 +129,11 @@ func (b *branch) String() string {
 	return fmt.Sprintf("%s.%d", b.fanout, b.no)
 }
 
-func (b *branch) unit() *unit { return b.start }
-
-// Retain keeps the lane's entrance slot until the returned release is called (see the Lane and RetainableStage
-// interfaces).
-func (b *branch) Retain(ctx context.Context) func() {
-	return b.fanout.series.conveyor.retain(ctx, b.start)
-}
-
-// RetainFor hands the lane's entrance slot to a background operation (see the Lane and RetainableStage interfaces).
-func (b *branch) RetainFor(ctx context.Context, bgOp func() error) Wave {
-	return b.fanout.series.conveyor.retainFor(ctx, b.start, bgOp)
-}
-
 // travels reports whether this branch's work runs as child items that may move — i.e. whether it has anywhere to go.
 // It is a property of the topology, which is frozen from the first Run on, so it is stable for the lifetime of a run.
 // A pool can never have nodes; a lane normally does, and one that was left without any answers false and so behaves
 // as a pool.
 func (b *branch) travels() bool { return len(b.nodes) > 0 }
-
-func (b *branch) SetLimit(limit int) Pool {
-	b.start.setLimit(limit)
-	return b
-}
-
-func (b *branch) Limit() int { return int(b.start.limit.Load()) }
 
 func (b *branch) NewTask(fn TaskFunc) Task {
 	if fn == nil {
@@ -198,16 +152,48 @@ func (b *branch) NewTasks(count int, fn func(ctx context.Context, index int) err
 	return Task{branch: b, src: &countSource{count: count, fn: fn}}
 }
 
-func (b *branch) NewTasksGen(gen iter.Seq[TaskFunc]) Task {
-	if gen == nil {
-		return Task{branch: b}
-	}
-	return Task{branch: b, src: &genSource{seq: gen}}
+// poolHandle is the Pool handed out by AddPool.
+type poolHandle struct{ b *branch }
+
+func (p *poolHandle) String() string { return p.b.String() }
+func (p *poolHandle) unit() *unit    { return p.b.start }
+
+func (p *poolHandle) SetLimit(limit int) Pool {
+	p.b.start.setLimit(limit)
+	return p
 }
 
-func (b *branch) NewTasksChan(ch <-chan TaskFunc) Task {
-	if ch == nil {
-		return Task{branch: b}
-	}
-	return Task{branch: b, src: &chanSource{ch: ch}}
+func (p *poolHandle) Limit() int { return int(p.b.start.limit.Load()) }
+
+func (p *poolHandle) NewTask(fn TaskFunc) Task { return p.b.NewTask(fn) }
+
+func (p *poolHandle) NewTasks(count int, fn func(ctx context.Context, index int) error) Task {
+	return p.b.NewTasks(count, fn)
+}
+
+// laneHandle is the Lane handed out by AddLane.
+type laneHandle struct{ b *branch }
+
+func (l *laneHandle) String() string { return l.b.String() }
+func (l *laneHandle) unit() *unit    { return l.b.start }
+
+func (l *laneHandle) AddStage(opts ...AnyUnitOption) Stage { return l.b.series.AddStage(opts...) }
+
+func (l *laneHandle) AddFanOut(opts ...AnyUnitOption) FanOut { return l.b.series.AddFanOut(opts...) }
+
+// Retain keeps the lane's entrance slot until the returned release is called (see the Lane and RetainableStage
+// interfaces).
+func (l *laneHandle) Retain(ctx context.Context) func() {
+	return l.b.fanout.series.conveyor.retain(ctx, l.b.start)
+}
+
+// RetainFor hands the lane's entrance slot to a background operation (see the Lane and RetainableStage interfaces).
+func (l *laneHandle) RetainFor(ctx context.Context, fn TaskFunc) TaskGroup {
+	return l.b.fanout.series.conveyor.retainFor(ctx, l.b.start, fn)
+}
+
+func (l *laneHandle) NewTask(fn TaskFunc) Task { return l.b.NewTask(fn) }
+
+func (l *laneHandle) NewTasks(count int, fn func(ctx context.Context, index int) error) Task {
+	return l.b.NewTasks(count, fn)
 }

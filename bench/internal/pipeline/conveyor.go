@@ -86,9 +86,9 @@ func (p *conveyorPipeline) Run(ctx context.Context, n int) error {
 		if no > n {
 			return nil // overrun item created before cancellation took effect
 		}
-		// A fan-out's work is waited for at the next node, after entering it, so its wave rides along until
+		// A fan-out's work is waited for at the next node, after entering it, so its task group rides along until
 		// there is a node to wait in.
-		var pending []conveyor.Wave
+		var pending []conveyor.TaskGroup
 		for i := range p.nodes {
 			nd := &p.nodes[i]
 			switch nd.kind {
@@ -139,9 +139,9 @@ func (p *conveyorPipeline) Run(ctx context.Context, n int) error {
 	return err
 }
 
-// waitAll waits for the retained waves in order and returns the first error.
-func waitAll(ctx context.Context, waves []conveyor.Wave) error {
-	for _, w := range waves {
+// waitAll waits for the retained task groups in order and returns the first error.
+func waitAll(ctx context.Context, groups []conveyor.TaskGroup) error {
+	for _, w := range groups {
 		if err := w.Wait(ctx); err != nil {
 			return err
 		}

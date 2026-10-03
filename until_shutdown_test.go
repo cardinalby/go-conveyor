@@ -181,29 +181,46 @@ func TestUntilShutdownBornDone(t *testing.T) {
 	assertShutdownCause(t, "Run", recvErr(t, "Run", done), cause)
 }
 
-// TestUntilShutdownItemCanceled: the context follows the item's own context: done with the cause of a failed task,
-// and done once the item is over.
+// TestUntilShutdownItemCanceled: the context follows the item's own context: done with its cause when that context is
+// canceled for another reason than shutdown (a lane child whose body failed), and done once the item is over.
 func TestUntilShutdownItemCanceled(t *testing.T) {
-	t.Run("failed task", func(t *testing.T) {
+	t.Run("failed body of a lane child", func(t *testing.T) {
 		errTask := errors.New("task failed")
 		c := NewConveyor()
 		fo := c.AddFanOut(OptName("fo"))
 		pool := fo.AddPool(OptName("pool"))
-		var cause error
+		lane := fo.AddLane(OptName("lane"))
+		childReady := make(chan struct{})
+		var cause, joinErr error
 		err := runOnce(t, c, func(ic context.Context) error {
-			pre := UntilShutdown(ic)
 			if err := fo.MoveTo(ic); err != nil {
 				return err
 			}
-			if err := fo.Schedule(ic, pool.NewTask(func(context.Context) error { return errTask })); err != nil {
+			err := fo.Schedule(ic,
+				lane.NewTask(func(cctx context.Context) error {
+					pre := UntilShutdown(cctx)
+					signal(childReady)
+					<-pre.Done() // the pool task's failure cancels the body, and with it the child
+					cause = context.Cause(pre)
+					return nil
+				}),
+				pool.NewTask(func(context.Context) error {
+					<-childReady
+					return errTask
+				}),
+			)
+			if err != nil {
 				return err
 			}
-			<-pre.Done()
-			cause = context.Cause(pre)
-			return context.Cause(ic) // nil would let runOnce cancel the run before the task failure is recorded
+			joinErr = fo.Wait(ic)
+			return joinErr
 		})
-		if !errors.Is(cause, errTask) {
-			t.Fatalf("pre cause = %v, want %v", cause, errTask)
+		var te TaskError
+		if !errors.As(cause, &te) || te.Unwrap() != errTask || te.Unit() != Unit(pool) {
+			t.Fatalf("child pre cause = %v, want the body's TaskError of %s with %v", cause, pool, errTask)
+		}
+		if !errors.Is(joinErr, errTask) {
+			t.Fatalf("fan-out Wait = %v, want %v", joinErr, errTask)
 		}
 		if !errors.Is(err, errTask) {
 			t.Fatalf("Run = %v, want %v", err, errTask)
@@ -900,9 +917,10 @@ func TestUntilShutdownLaneChild(t *testing.T) {
 	assertShutdownCause(t, "Run", recvErr(t, "Run", done), cause)
 }
 
-// TestUntilShutdownWorkReturn: a pool task or lane child whose read stops through UntilShutdown fails fast if it
-// returns context.Cause(pre): the item and a sibling using its own context are canceled with a ShutdownError. If it
-// returns nil instead, the sibling finishes and the item goes on, with no drain timeout.
+// TestUntilShutdownWorkReturn: a pool task or lane child whose read stops through UntilShutdown may return
+// context.Cause(pre) or nil. The ShutdownError is an abort, not a task failure: it cancels neither the body nor the
+// item, so a sibling using its own context finishes. With the abort, the leave reports that ShutdownError once the
+// body is idle and the item stops; with nil, the item goes on. Neither is a failure, with no drain timeout.
 func TestUntilShutdownWorkReturn(t *testing.T) {
 	for _, kind := range []string{"pool task", "lane child"} {
 		for _, returnErr := range []bool{true, false} {
@@ -916,7 +934,7 @@ func TestUntilShutdownWorkReturn(t *testing.T) {
 				write := c.AddStage(OptName("write"))
 
 				reading, siblingRunning, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
-				siblingErr, itemErr := make(chan error, 1), make(chan error, 1)
+				siblingErr, itemErr, moveErr := make(chan error, 1), make(chan error, 1), make(chan error, 1)
 				var wrote atomic.Bool
 				var it atomic.Pointer[item]
 				read := func(wctx context.Context) error {
@@ -967,34 +985,36 @@ func TestUntilShutdownWorkReturn(t *testing.T) {
 					if err == nil {
 						wrote.Store(true)
 					}
+					moveErr <- err
 					itemErr <- context.Cause(ic)
 					return err
 				})
 				<-reading
 				<-siblingRunning
 				cancel(cause)
+				waitFor(t, "reader done", func() bool {
+					r := it.Load().run
+					r.mu.Lock()
+					defer r.mu.Unlock()
+					return it.Load().pending.running <= 1
+				})
+				select {
+				case err := <-siblingErr:
+					t.Fatalf("sibling stopped with %v before release: the reader's return must not cancel the body", err)
+				default:
+				}
+				close(release)
+				if err := recvErr(t, "sibling", siblingErr); err != nil {
+					t.Fatalf("sibling canceled: %v", err)
+				}
+				if err := recvErr(t, "item", itemErr); err != nil {
+					t.Fatalf("item canceled: %v", err)
+				}
+				leaveErr := recvErr(t, "leave", moveErr)
 				if returnErr {
-					err, ok := recvErrWithin(siblingErr, 5*time.Second)
-					if !ok {
-						close(release)
-						t.Fatal("sibling not canceled after the reader returned its error")
-					}
-					assertShutdownCause(t, "sibling", err, cause)
-					assertShutdownCause(t, "item", recvErr(t, "item", itemErr), cause)
-				} else {
-					waitFor(t, "reader done", func() bool {
-						r := it.Load().run
-						r.mu.Lock()
-						defer r.mu.Unlock()
-						return it.Load().pending.running <= 1
-					})
-					close(release)
-					if err := recvErr(t, "sibling", siblingErr); err != nil {
-						t.Fatalf("sibling canceled: %v", err)
-					}
-					if err := recvErr(t, "item", itemErr); err != nil {
-						t.Fatalf("item canceled: %v", err)
-					}
+					assertShutdownCause(t, "leave", leaveErr, cause)
+				} else if leaveErr != nil {
+					t.Fatalf("leave = %v, want nil", leaveErr)
 				}
 				err := recvErr(t, "Run", done)
 				assertShutdownCause(t, "Run", err, cause)
@@ -1288,7 +1308,7 @@ func TestUntilShutdownAbortCancelsOwnWork(t *testing.T) {
 						if err := hold.MoveTo(ic); err != nil {
 							return err
 						}
-						hold.RetainFor(ic, func() error { return work(ic) })
+						hold.RetainFor(ic, func(context.Context) error { return work(ic) })
 					}
 					<-pre.Done()
 					if !abort {
@@ -1325,5 +1345,53 @@ func TestUntilShutdownAbortCancelsOwnWork(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestShutdownCauseMapsOnlyErrorsCausedByPre: ShutdownCause replaces an error caused by pre stopping the call with the
+// ShutdownError, and returns every other error, nil included, as is.
+func TestShutdownCauseMapsOnlyErrorsCausedByPre(t *testing.T) {
+	other := errors.New("other")
+	c := NewConveyor()
+	reached := make(chan struct{})
+	type result struct{ before, nilErr, mapped, unrelated, ownDeadline error }
+	var got result
+	cancelRun, done := runAsync(c, func(ic context.Context) error {
+		if itemNo(ic) != 1 {
+			<-ic.Done()
+			return context.Cause(ic)
+		}
+		pre := UntilShutdown(ic)
+		got.before = ShutdownCause(pre, fmt.Errorf("driver: %w", context.Canceled)) // pre is not done yet
+		close(reached)
+		<-pre.Done()
+		got.nilErr = ShutdownCause(pre, nil)
+		got.mapped = ShutdownCause(pre, fmt.Errorf("driver: %w", pre.Err()))
+		got.unrelated = ShutdownCause(pre, other)
+		got.ownDeadline = ShutdownCause(pre, fmt.Errorf("own timeout: %w", context.DeadlineExceeded))
+		return got.mapped
+	})
+	<-reached
+	cancelRun(nil)
+	err := recvErr(t, "Run", done)
+
+	var se ShutdownError
+	if errors.As(got.before, &se) || !errors.Is(got.before, context.Canceled) {
+		t.Errorf("before shutdown: %v, want the error as is", got.before)
+	}
+	if got.nilErr != nil {
+		t.Errorf("nil error: %v, want nil", got.nilErr)
+	}
+	if !errors.As(got.mapped, &se) {
+		t.Errorf("error caused by pre: %v, want a ShutdownError", got.mapped)
+	}
+	if got.unrelated != other {
+		t.Errorf("unrelated error: %v, want it as is", got.unrelated)
+	}
+	if errors.As(got.ownDeadline, &se) || !errors.Is(got.ownDeadline, context.DeadlineExceeded) {
+		t.Errorf("own deadline: %v, want it as is", got.ownDeadline)
+	}
+	if !errors.As(err, &se) || se.DrainError() != nil {
+		t.Fatalf("Run = %v, want a ShutdownError without a drain failure (the item was aborted)", err)
 	}
 }
