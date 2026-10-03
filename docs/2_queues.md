@@ -4,7 +4,7 @@ By default, similar to channels, stages have no waiting room: if an item cannot 
 the stage is available. To change it:
 
 ```go
-c := conveyor.NewConveyor()
+c := conveyor.New()
 write := c.AddStage()                   // no waiting room
 commit := c.AddStage().SetQueueSize(2)  // waiting room of 2 items
 ```

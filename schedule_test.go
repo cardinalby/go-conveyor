@@ -27,10 +27,10 @@ func assertEvents(t *testing.T, got, want []string) {
 // TestScheduleRoundsDecidedByEarlierResults: Schedule, Wait, Schedule, Wait, leave. The second round is planned from
 // the first round's results, which Wait guarantees are complete; the body stays open between rounds.
 func TestScheduleRoundsDecidedByEarlierResults(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")).SetLimit(2)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")).SetLimit(2)
+	commit := c.AddStage(WithName("commit"))
 
 	var events recorder
 	var found atomic.Int64
@@ -76,10 +76,10 @@ func TestScheduleRoundsDecidedByEarlierResults(t *testing.T) {
 // whole tree whatever its depth. Several roots grow side by side on one pool.
 func TestScheduleTreeFromTasksOnOnePool(t *testing.T) {
 	const roots, width, depth = 3, 2, 3
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")).SetLimit(4)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")).SetLimit(4)
+	commit := c.AddStage(WithName("commit"))
 
 	var visited atomic.Int64
 	var visit func(ctx context.Context, d int) error
@@ -122,11 +122,11 @@ func TestScheduleTreeFromTasksOnOnePool(t *testing.T) {
 // over both branches, and the leave joins all of it.
 func TestScheduleTreeAcrossTwoPools(t *testing.T) {
 	const pages, depth = 2, 2
-	c := NewConveyor()
-	crawl := c.AddFanOut(OptName("crawl"))
-	fetch := crawl.AddPool(OptName("fetch")).SetLimit(2)
-	store := crawl.AddPool(OptName("store")).SetLimit(2)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	crawl := c.AddFanOut(WithName("crawl"))
+	fetch := crawl.AddPool(WithName("fetch")).SetLimit(2)
+	store := crawl.AddPool(WithName("store")).SetLimit(2)
+	commit := c.AddStage(WithName("commit"))
 
 	var fetched, stored atomic.Int64
 	var visit func(ctx context.Context, d int) error
@@ -168,9 +168,9 @@ func TestScheduleTreeAcrossTwoPools(t *testing.T) {
 // order and Wait returns after the last page.
 func TestSchedulePaginationChain(t *testing.T) {
 	const pages = 6
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	var order numbers
 	var page func(ctx context.Context, n int) error
@@ -208,11 +208,11 @@ func TestSchedulePaginationChain(t *testing.T) {
 // by the last sibling to finish — while it still holds a slot, so the merge is queued before any slot frees.
 func TestJoinAsAContinuation(t *testing.T) {
 	const parts = 5
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	work := fo.AddPool(OptName("work")).SetLimit(3)
-	merge := fo.AddPool(OptName("merge"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	work := fo.AddPool(WithName("work")).SetLimit(3)
+	merge := fo.AddPool(WithName("merge"))
+	commit := c.AddStage(WithName("commit"))
 
 	var done, merged atomic.Int64
 	var partsAtMerge int64
@@ -252,12 +252,12 @@ func TestJoinAsAContinuation(t *testing.T) {
 // its callback returns; the work joins the parent's body — on a pool, or as a sibling child — and the parent's leave
 // waits for it.
 func TestLaneChildSpawnsIntoItsParentsFanOut(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	inner := lane.AddStage(OptName("inner"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	inner := lane.AddStage(WithName("inner"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	var poolRuns, siblingRuns atomic.Int64
 	var atCommit [2]int64
@@ -303,10 +303,10 @@ func TestLaneChildSpawnsIntoItsParentsFanOut(t *testing.T) {
 // TestSpawnIntoRetainedTaskGroupKeepsTheSlot: a task of a retained task group may still spawn; the task group finishes
 // only when the whole tree is done, and the fan-out slot follows the tree meanwhile.
 func TestSpawnIntoRetainedTaskGroupKeepsTheSlot(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")).SetLimit(2)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")).SetLimit(2)
+	commit := c.AddStage(WithName("commit"))
 
 	inCommit := make(chan struct{})
 	spawnRunning := make(chan struct{})
@@ -358,9 +358,9 @@ func TestSpawnIntoRetainedTaskGroupKeepsTheSlot(t *testing.T) {
 // TestScheduleFromCanceledItemQueuesNothing: a canceled item's Schedule returns the cause and queues nothing, also
 // when the call hides the cancellation with context.WithoutCancel — the item's own context decides.
 func TestScheduleFromCanceledItemQueuesNothing(t *testing.T) {
-	c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New(WithDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	var ran, checked atomic.Bool
 	stop, done := runAsync(c, func(ctx context.Context) error {
@@ -409,9 +409,9 @@ func TestScheduleFromCanceledItemQueuesNothing(t *testing.T) {
 // TaskError and queues nothing, also with context.WithoutCancel; the item itself is not canceled.
 func TestScheduleIntoFailedBodyQueuesNothing(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	var ran, checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -470,12 +470,12 @@ func bodyErrOf(ctx context.Context) error {
 // lane child's context after the child's callback returned, even while sibling work keeps the parent's task group busy
 // — the child's own lifetime is judged before its work would be redirected to the parent's task group.
 func TestScheduleFromFinishedWorkIsStale(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	lane := fo.AddLane(OptName("lane"))
-	inner := lane.AddStage(OptName("inner"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	lane := fo.AddLane(WithName("lane"))
+	inner := lane.AddStage(WithName("inner"))
+	commit := c.AddStage(WithName("commit"))
 
 	taskCtx := make(chan context.Context, 1)
 	childCtx := make(chan context.Context, 1)
@@ -548,10 +548,10 @@ func TestScheduleFromFinishedWorkIsStale(t *testing.T) {
 // schedule_before_entry_test.go); a fan-out the item has already passed can never be entered, so it is misuse, the
 // same as a MoveTo to it.
 func TestScheduleForAPassedFanOutPanics(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	panicsInItem(t, c, errWrongEnterOrder, func(ctx context.Context) {
 		if err := commit.MoveTo(ctx); err != nil {
@@ -563,10 +563,10 @@ func TestScheduleForAPassedFanOutPanics(t *testing.T) {
 
 // TestScheduleAfterLeavingPanics: leaving closes the body; the ItemProcessor's path into it is over.
 func TestScheduleAfterLeavingPanics(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	panicsInItem(t, c, errBodyClosed, func(ctx context.Context) {
 		if err := fo.MoveTo(ctx); err != nil {
@@ -581,9 +581,9 @@ func TestScheduleAfterLeavingPanics(t *testing.T) {
 
 // TestScheduleAfterRetainPanics: from Retain on the body belongs to the returned task group, whatever its progress.
 func TestScheduleAfterRetainPanics(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	panicsInItem(t, c, errWorkRetained, func(ctx context.Context) {
 		if err := fo.MoveTo(ctx); err != nil {
@@ -597,11 +597,11 @@ func TestScheduleAfterRetainPanics(t *testing.T) {
 // TestTaskSchedulingAtAnotherFanOutPanics: a task's context may only Schedule at the fan-out its pool belongs to.
 // The panic is recovered inside the task: a panic on the runtime's goroutine would crash the test binary.
 func TestTaskSchedulingAtAnotherFanOutPanics(t *testing.T) {
-	c := NewConveyor()
-	first := c.AddFanOut(OptName("first"))
-	firstPool := first.AddPool(OptName("firstPool"))
-	second := c.AddFanOut(OptName("second"))
-	secondPool := second.AddPool(OptName("secondPool"))
+	c := New()
+	first := c.AddFanOut(WithName("first"))
+	firstPool := first.AddPool(WithName("firstPool"))
+	second := c.AddFanOut(WithName("second"))
+	secondPool := second.AddPool(WithName("secondPool"))
 
 	got := make(chan error, 1)
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -630,10 +630,10 @@ func TestTaskSchedulingAtAnotherFanOutPanics(t *testing.T) {
 // body closed once the processor has returned — completion seals it — so its Schedule panics with errBodyClosed
 // instead of adding work nobody would wait for. Recovered inside the callback, which runs on a runtime goroutine.
 func TestScheduleFromRetainCallbackAfterProcessorReturnedPanics(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	s := c.AddStage(WithName("s"))
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	got := make(chan error, 1)
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -662,10 +662,10 @@ func TestScheduleFromRetainCallbackAfterProcessorReturnedPanics(t *testing.T) {
 // TestTryMoveToOutOfBusyBodyLeavesItOpen: a non-blocking leave while the body is busy is declined with (false, nil)
 // and touches nothing: the item keeps scheduling into the same body, and the blocking leave then joins all of it.
 func TestTryMoveToOutOfBusyBodyLeavesItOpen(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")).SetLimit(2)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")).SetLimit(2)
+	commit := c.AddStage(WithName("commit"))
 
 	release := make(chan struct{})
 	var ran atomic.Int64
@@ -708,10 +708,10 @@ func TestTryMoveToOutOfBusyBodyLeavesItOpen(t *testing.T) {
 // TestTryMoveToOutOfIdleBodyIntoFullTargetLeavesItOpen: an idle clean body is closed only when the item is admitted.
 // Declined for lack of room, the item is still inside with an open body and may schedule more.
 func TestTryMoveToOutOfIdleBodyIntoFullTargetLeavesItOpen(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	firstInCommit := make(chan struct{})
 	releaseFirst := make(chan struct{})
@@ -772,10 +772,10 @@ func TestTryMoveToOutOfIdleBodyIntoFullTargetLeavesItOpen(t *testing.T) {
 // processor that handles the error may still move on.
 func TestTryMoveToOutOfFailedBodyReportsTheTaskError(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -827,10 +827,10 @@ func TestTryMoveToOutOfFailedBodyReportsTheTaskError(t *testing.T) {
 // while the spawner still holds the slot, so the freed slot always goes to the older item.
 func TestSpawnChainOnLimitOnePoolKeepsItemOrder(t *testing.T) {
 	const chain = 5
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	olderScheduled := make(chan struct{})
 	youngerQueued := make(chan struct{})
@@ -882,10 +882,10 @@ func TestSpawnChainOnLimitOnePoolKeepsItemOrder(t *testing.T) {
 // while the older item's tasks run; the older item's spawn still takes the next freed slot, because it is inserted at
 // its item's place, ahead of the younger work.
 func TestSpawnTakesTheFreedSlotAheadOfYoungerQueuedWork(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	pool := fo.AddPool(OptName("pool")).SetLimit(2)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	pool := fo.AddPool(WithName("pool")).SetLimit(2)
+	commit := c.AddStage(WithName("commit"))
 
 	olderScheduled := make(chan struct{})
 	youngerQueued := make(chan struct{})
@@ -943,10 +943,10 @@ func TestSpawnTakesTheFreedSlotAheadOfYoungerQueuedWork(t *testing.T) {
 // joins all of it.
 func TestConcurrentSchedulesAllLandOnce(t *testing.T) {
 	const roots, perRoot, extra = 4, 5, 3
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")).SetLimit(3)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")).SetLimit(3)
+	commit := c.AddStage(WithName("commit"))
 
 	var runs atomic.Int64
 	var atCommit int64
@@ -992,13 +992,13 @@ func TestConcurrentSchedulesAllLandOnce(t *testing.T) {
 // schedules roots, waits for them and their spawns, schedules another round, and leaves — all inside the lane.
 func TestChildRunsRoundsAndSpawnsInsideItsLane(t *testing.T) {
 	const children = 2
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("outer"))
-	lane := fo.AddLane(OptName("lane"))
-	inner := lane.AddFanOut(OptName("inner"))
-	innerPool := inner.AddPool(OptName("innerPool")).SetLimit(2)
-	after := lane.AddStage(OptName("after"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("outer"))
+	lane := fo.AddLane(WithName("lane"))
+	inner := lane.AddFanOut(WithName("inner"))
+	innerPool := inner.AddPool(WithName("innerPool")).SetLimit(2)
+	after := lane.AddStage(WithName("after"))
+	commit := c.AddStage(WithName("commit"))
 
 	var round2 atomic.Int64
 	var shortWaits atomic.Int64
@@ -1054,11 +1054,11 @@ func TestChildRunsRoundsAndSpawnsInsideItsLane(t *testing.T) {
 // it retained work at an interior fan-out that is still running. Its context is over for its own code: a Schedule into
 // the parent's fan-out with it is refused with ErrStaleContext, not redirected into the parent's task group.
 func TestScheduleFromReturnedChildIsStale(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	inner := lane.AddFanOut(OptName("inner"))
-	ipool := inner.AddPool(OptName("ipool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	inner := lane.AddFanOut(WithName("inner"))
+	ipool := inner.AddPool(WithName("ipool"))
 
 	childCtx := make(chan context.Context, 1)
 	release := make(chan struct{})

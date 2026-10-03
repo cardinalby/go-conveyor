@@ -12,13 +12,13 @@ import (
 // built afterwards — stages, fan-outs and branches — takes the next index in creation order. A waiting room adds no
 // unit, so it takes no index: it is capacity on the node it fronts.
 func TestUnitIndexesFollowCreationOrder(t *testing.T) {
-	c := NewConveyor()
-	s1 := c.AddStage(OptName("s1"))
-	fo := c.AddFanOut(OptName("fo"))
-	l1 := fo.AddLane(OptName("l1"))
-	l2 := fo.AddPool(OptName("l2"))
-	s2 := c.AddStage(OptName("s2")).SetQueueSize(2) // a waiting room, which creates no unit of its own
-	in := l1.AddStage(OptName("in"))                // built into a lane, but indexed in the one flat space
+	c := New()
+	s1 := c.AddStage(WithName("s1"))
+	fo := c.AddFanOut(WithName("fo"))
+	l1 := fo.AddLane(WithName("l1"))
+	l2 := fo.AddPool(WithName("l2"))
+	s2 := c.AddStage(WithName("s2")).SetQueueSize(2) // a waiting room, which creates no unit of its own
+	in := l1.AddStage(WithName("in"))                // built into a lane, but indexed in the one flat space
 
 	start := c.StartingStage().unit()
 	if start.index != 0 || start.kind != kindStart {
@@ -44,11 +44,11 @@ func TestUnitIndexesFollowCreationOrder(t *testing.T) {
 // configured. Reserving the pair unconditionally is what lets a queue appear at runtime without renumbering
 // anything, and the lower rank is what keeps a waiting item from letting a follower into the node ahead of it.
 func TestRanksReserveTwoForEveryNode(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b")).SetQueueSize(2)
-	fo := c.AddFanOut(OptName("fo")).SetQueueSize(3)
-	d := c.AddStage(OptName("d"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b")).SetQueueSize(2)
+	fo := c.AddFanOut(WithName("fo")).SetQueueSize(3)
+	d := c.AddStage(WithName("d"))
 	ci := implOf(c)
 	ci.finalize()
 
@@ -81,15 +81,15 @@ func TestRanksReserveTwoForEveryNode(t *testing.T) {
 // interior nodes take the reserved rank pairs that follow (2, 4, ...), and a nested fan-out's own branches open
 // further scopes.
 func TestBranchIsItsOwnRankSpace(t *testing.T) {
-	c := NewConveyor()
-	pre := c.AddStage(OptName("pre"))
-	fo := c.AddFanOut(OptName("fo"))
-	l1 := fo.AddLane(OptName("l1"))
-	l2 := fo.AddPool(OptName("l2"))
-	i1 := l1.AddStage(OptName("i1"))
-	inner := l1.AddFanOut(OptName("inner")).SetQueueSize(2)
-	il := inner.AddLane(OptName("il"))
-	ii := il.AddStage(OptName("ii"))
+	c := New()
+	pre := c.AddStage(WithName("pre"))
+	fo := c.AddFanOut(WithName("fo"))
+	l1 := fo.AddLane(WithName("l1"))
+	l2 := fo.AddPool(WithName("l2"))
+	i1 := l1.AddStage(WithName("i1"))
+	inner := l1.AddFanOut(WithName("inner")).SetQueueSize(2)
+	il := inner.AddLane(WithName("il"))
+	ii := il.AddStage(WithName("ii"))
 	implOf(c).finalize()
 
 	rootScope := c.StartingStage().unit().scope
@@ -123,17 +123,17 @@ func TestBranchIsItsOwnRankSpace(t *testing.T) {
 	}
 }
 
-// TestPositionalNames pins the naming fallback: OptName wins, an unnamed node is named after its ordinal among its
+// TestPositionalNames pins the naming fallback: WithName wins, an unnamed node is named after its ordinal among its
 // series' nodes, a branch after its fan-out, a node built in a lane is prefixed by that lane, and a queue by the node
 // it fronts. The ordinal counts nodes, not ranks, so a name never moves when a queue is added.
 func TestPositionalNames(t *testing.T) {
-	c := NewConveyor()
-	s1 := c.AddStage()                 // 1st node
-	fo := c.AddFanOut(OptName("fo"))   // 2nd node, named
-	l1 := fo.AddLane()                 // 1st branch of fo
-	l2 := fo.AddPool(OptName("named")) // 2nd branch, named
-	in := l1.AddStage()                // 1st node of l1's own scope
-	s2 := c.AddStage(OptName("s")).SetQueueSize(2)
+	c := New()
+	s1 := c.AddStage()                  // 1st node
+	fo := c.AddFanOut(WithName("fo"))   // 2nd node, named
+	l1 := fo.AddLane()                  // 1st branch of fo
+	l2 := fo.AddPool(WithName("named")) // 2nd branch, named
+	in := l1.AddStage()                 // 1st node of l1's own scope
+	s2 := c.AddStage(WithName("s")).SetQueueSize(2)
 	s3 := c.AddStage().SetQueueSize(2) // 4th node, queued
 	fo2 := c.AddFanOut()               // 5th node
 	implOf(c).finalize()
@@ -160,7 +160,7 @@ func TestPositionalNames(t *testing.T) {
 // TestPositionalNamesInStats: the same positional names identify the nodes in Stats, where a caller that named
 // nothing still has to be able to tell the entries apart.
 func TestPositionalNamesInStats(t *testing.T) {
-	c := NewConveyor()
+	c := New()
 	s := c.AddStage()
 	fo := c.AddFanOut()
 	lane := fo.AddLane()
@@ -195,11 +195,9 @@ func TestPositionalNamesInStats(t *testing.T) {
 	}
 }
 
-// TestLimitsDefaultToOneAndClamp: every node is born exclusive, a non-positive limit is clamped to 1 rather than
-// meaning "unbounded", and a node without SetQueueSize reports no waiting room at all. A queue size is the one
-// capacity that may legitimately be 0 — that is what "no waiting room" is — so it is clamped to 0, not to 1.
-func TestLimitsDefaultToOneAndClamp(t *testing.T) {
-	c := NewConveyor()
+// TestLimitsDefaultToOne: every node is born exclusive, and a node without SetQueueSize reports no waiting room.
+func TestLimitsDefaultToOne(t *testing.T) {
+	c := New()
 	s := c.AddStage()
 	fo := c.AddFanOut()
 	pool := fo.AddPool()
@@ -210,34 +208,64 @@ func TestLimitsDefaultToOneAndClamp(t *testing.T) {
 	if s.QueueSize() != 0 || fo.QueueSize() != 0 {
 		t.Fatalf("QueueSize without SetQueueSize: stage=%d fan-out=%d, want 0 each", s.QueueSize(), fo.QueueSize())
 	}
-	for _, limit := range []int{0, -5} {
-		if got := s.SetLimit(limit).Limit(); got != 1 {
-			t.Fatalf("stage SetLimit(%d) = %d, want the clamp to 1", limit, got)
-		}
-		if got := fo.SetLimit(limit).Limit(); got != 1 {
-			t.Fatalf("fan-out SetLimit(%d) = %d, want the clamp to 1", limit, got)
-		}
-		if got := pool.SetLimit(limit).Limit(); got != 1 {
-			t.Fatalf("pool SetLimit(%d) = %d, want the clamp to 1", limit, got)
-		}
+}
+
+// TestSettersPanicOutOfRange: a value outside a setter's range is a programmer error and panics at the call, leaving
+// the old value; the boundary values are accepted (limit 1, queue size 0, item limit 0, the zero mode, count 0).
+func TestSettersPanicOutOfRange(t *testing.T) {
+	c := New()
+	s := c.AddStage(WithName("s")).SetLimit(3).SetQueueSize(2)
+	fo := c.AddFanOut(WithName("fo")).SetLimit(3).SetQueueSize(2).SetBackpressure(BackpressureStrict)
+	pool := fo.AddPool(WithName("pool")).SetLimit(3)
+	lane := fo.AddLane(WithName("lane"))
+	c.SetItemLimit(3)
+
+	for _, n := range []int{0, -1} {
+		assertPanics(t, errInvalidValue, func() { s.SetLimit(n) })
+		assertPanics(t, errInvalidValue, func() { fo.SetLimit(n) })
+		assertPanics(t, errInvalidValue, func() { pool.SetLimit(n) })
 	}
-	if got := c.AddStage().SetQueueSize(0).QueueSize(); got != 0 {
-		t.Fatalf("stage SetQueueSize(0) = %d, want no waiting room", got)
+	assertPanics(t, errInvalidValue, func() { s.SetQueueSize(-1) })
+	assertPanics(t, errInvalidValue, func() { fo.SetQueueSize(-1) })
+	assertPanics(t, errInvalidValue, func() { c.SetItemLimit(-1) })
+	for _, m := range []FanOutBackpressure{BackpressureStrict + 1, -1} {
+		assertPanics(t, errInvalidValue, func() { fo.SetBackpressure(m) })
 	}
-	if got := c.AddFanOut().SetQueueSize(-5).QueueSize(); got != 0 {
-		t.Fatalf("fan-out SetQueueSize(-5) = %d, want the clamp to 0", got)
+	fn := func(context.Context, int) error { return nil }
+	assertPanics(t, errInvalidValue, func() { pool.NewTasks(-1, fn) })
+	assertPanics(t, errInvalidValue, func() { lane.NewTasks(-1, nil) })
+
+	if s.Limit() != 3 || fo.Limit() != 3 || pool.Limit() != 3 || s.QueueSize() != 2 || fo.QueueSize() != 2 ||
+		c.ItemLimit() != 3 || fo.Backpressure() != BackpressureStrict {
+		t.Fatalf("a panicking setter changed a value: stage=%d/%d fan-out=%d/%d/%v pool=%d items=%d",
+			s.Limit(), s.QueueSize(), fo.Limit(), fo.QueueSize(), fo.Backpressure(), pool.Limit(), c.ItemLimit())
 	}
+
+	if s.SetLimit(1).Limit() != 1 || fo.SetLimit(1).Limit() != 1 || pool.SetLimit(1).Limit() != 1 {
+		t.Fatalf("SetLimit(1) not accepted: stage=%d fan-out=%d pool=%d", s.Limit(), fo.Limit(), pool.Limit())
+	}
+	if s.SetQueueSize(0).QueueSize() != 0 || fo.SetQueueSize(0).QueueSize() != 0 {
+		t.Fatalf("SetQueueSize(0) not accepted: stage=%d fan-out=%d", s.QueueSize(), fo.QueueSize())
+	}
+	if got := c.SetItemLimit(0).ItemLimit(); got != 0 {
+		t.Fatalf("SetItemLimit(0): ItemLimit = %d, want 0", got)
+	}
+	if got := fo.SetBackpressure(FanOutBackpressure(0)).Backpressure(); got != BackpressureBalanced {
+		t.Fatalf("SetBackpressure(0): Backpressure = %v, want Balanced", got)
+	}
+	_ = pool.NewTasks(0, nil)
+	_ = lane.NewTasks(0, fn)
 }
 
 // TestTopologyFrozenFromTheFirstRun: extending the topology is build-time only — it panics while a run is active
 // and after one has returned. Capacity changes (SetLimit and SetQueueSize) are not topology and stay legal
 // throughout, including giving a node a waiting room it never had.
 func TestTopologyFrozenFromTheFirstRun(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
-	queued := c.AddStage(OptName("queued")).SetQueueSize(1)
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	s := c.AddStage(WithName("s"))
+	queued := c.AddStage(WithName("queued")).SetQueueSize(1)
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	// Assert on the test goroutine while a run is provably in flight: the first item parks until released.
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -292,8 +320,8 @@ func TestTopologyFrozenFromTheFirstRun(t *testing.T) {
 // TestStartingStageHandle: the implicit start stage is a real unit with limit 1, named "start", and it leads the Stats
 // entries so a caller can watch the gate that paces item creation.
 func TestStartingStageHandle(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 
 	start := c.StartingStage()
 	if got := fmt.Sprint(start); got != "start" {
@@ -325,12 +353,12 @@ func TestStartingStageHandle(t *testing.T) {
 // TestBranchesAccessorIsAnOrderedCopy: Branches() hands out the branches — pools and lanes alike — in creation order
 // and never the internal slice.
 func TestBranchesAccessorIsAnOrderedCopy(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	a := fo.AddPool(OptName("a"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	a := fo.AddPool(WithName("a"))
 	b := fo.AddLane() // both kinds land in one list, sharing one numbering sequence
-	_ = b.AddStage(OptName("b.inner"))
-	d := fo.AddPool(OptName("d"))
+	_ = b.AddStage(WithName("b.inner"))
+	d := fo.AddPool(WithName("d"))
 
 	branches := fo.Branches()
 	if len(branches) != 3 || branches[0] != a || branches[1] != b || branches[2] != d {

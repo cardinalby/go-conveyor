@@ -16,10 +16,10 @@ import (
 // TestWaitOnEmptyBodyReturnsAtOnce: nothing scheduled, nothing to wait for. The body stays open: work may still be
 // added and waited for afterwards.
 func TestWaitOnEmptyBodyReturnsAtOnce(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	var ran atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -52,9 +52,9 @@ func TestWaitOnEmptyBodyReturnsAtOnce(t *testing.T) {
 // still to come; Wait returns only after the last level of the chain.
 func TestWaitReturnsWhenTheWholeTreeIsDone(t *testing.T) {
 	const depth = 3
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	var levels atomic.Int64
 	var level func(ctx context.Context, d int) error
@@ -93,9 +93,9 @@ func TestWaitReturnsWhenTheWholeTreeIsDone(t *testing.T) {
 // joined the error and the processor returns nil, so the item completes without failing.
 func TestWaitReportsTheBodyErrorAndKeepsIt(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -132,7 +132,7 @@ func TestWaitReportsTheBodyErrorAndKeepsIt(t *testing.T) {
 }
 
 // runFirstItemAsync runs c with runAsync: the first item runs proc, later items wait until their context is done and
-// return its cause (an abort). Used with OptDrainTimeout(0) to get an item canceled by a shutdown.
+// return its cause (an abort). Used with WithDrainTimeout(0) to get an item canceled by a shutdown.
 func runFirstItemAsync(c Conveyor, proc ItemProcessor) (context.CancelCauseFunc, <-chan error) {
 	var once sync.Once
 	return runAsync(c, func(ctx context.Context) error {
@@ -153,9 +153,9 @@ func TestWaitWithStrippedContextOnCanceledItem(t *testing.T) {
 	boom := errors.New("boom")
 	cause := errors.New("stop")
 	t.Run("idle clean body returns the cause", func(t *testing.T) {
-		c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
-		fo := c.AddFanOut(OptName("fo"))
-		_ = fo.AddPool(OptName("pool"))
+		c := New(WithDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
+		fo := c.AddFanOut(WithName("fo"))
+		_ = fo.AddPool(WithName("pool"))
 
 		inFo := make(chan struct{})
 		var waitErr error
@@ -182,9 +182,9 @@ func TestWaitWithStrippedContextOnCanceledItem(t *testing.T) {
 		}
 	})
 	t.Run("idle failed body returns the body error", func(t *testing.T) {
-		c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
-		fo := c.AddFanOut(OptName("fo"))
-		pool := fo.AddPool(OptName("pool"))
+		c := New(WithDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
+		fo := c.AddFanOut(WithName("fo"))
+		pool := fo.AddPool(WithName("pool"))
 
 		failed := make(chan struct{})
 		var waitErr error
@@ -228,9 +228,9 @@ func TestWaitWithStrippedContextOnCanceledItem(t *testing.T) {
 // cancellation, which the same rule answers at once.
 func TestStrippedContextWaitWakesOnItemCancellation(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	waiting := make(chan *item, 1)
 	release := make(chan struct{})
@@ -284,16 +284,16 @@ func TestStrippedContextWaitWakesOnItemCancellation(t *testing.T) {
 // leaving, a retained one after Retain.
 func TestWaitOutsideAnOpenBodyPanics(t *testing.T) {
 	t.Run("before entering", func(t *testing.T) {
-		c := NewConveyor()
-		fo := c.AddFanOut(OptName("fo"))
-		_ = fo.AddPool(OptName("pool"))
+		c := New()
+		fo := c.AddFanOut(WithName("fo"))
+		_ = fo.AddPool(WithName("pool"))
 		panicsInItem(t, c, errStageNotEntered, func(ctx context.Context) { _ = fo.Wait(ctx) })
 	})
 	t.Run("after leaving", func(t *testing.T) {
-		c := NewConveyor()
-		fo := c.AddFanOut(OptName("fo"))
-		_ = fo.AddPool(OptName("pool"))
-		commit := c.AddStage(OptName("commit"))
+		c := New()
+		fo := c.AddFanOut(WithName("fo"))
+		_ = fo.AddPool(WithName("pool"))
+		commit := c.AddStage(WithName("commit"))
 		panicsInItem(t, c, errBodyClosed, func(ctx context.Context) {
 			if err := fo.MoveTo(ctx); err != nil {
 				t.Fatalf("move failed: %v", err)
@@ -305,9 +305,9 @@ func TestWaitOutsideAnOpenBodyPanics(t *testing.T) {
 		})
 	})
 	t.Run("after Retain", func(t *testing.T) {
-		c := NewConveyor()
-		fo := c.AddFanOut(OptName("fo"))
-		_ = fo.AddPool(OptName("pool"))
+		c := New()
+		fo := c.AddFanOut(WithName("fo"))
+		_ = fo.AddPool(WithName("pool"))
 		panicsInItem(t, c, errWorkRetained, func(ctx context.Context) {
 			if err := fo.MoveTo(ctx); err != nil {
 				t.Fatalf("move failed: %v", err)
@@ -321,9 +321,9 @@ func TestWaitOutsideAnOpenBodyPanics(t *testing.T) {
 // TestWaitFromPoolTaskPanics: a running task holds a slot and must not wait for other work. Recovered inside the task,
 // which runs on a runtime goroutine.
 func TestWaitFromPoolTaskPanics(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	got := make(chan error, 1)
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -354,10 +354,10 @@ func TestWaitFromPoolTaskPanics(t *testing.T) {
 // TestWaitFromLaneChildOnParentsFanOutPanics: a child may Schedule at the fan-out its lane belongs to, but not wait
 // there — it holds a slot of that body, and the fan-out is outside its scope. Recovered inside the child's callback.
 func TestWaitFromLaneChildOnParentsFanOutPanics(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	inner := lane.AddStage(OptName("inner"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	inner := lane.AddStage(WithName("inner"))
 
 	got := make(chan error, 1)
 	err := runOnce(t, c, func(ctx context.Context) error {

@@ -46,7 +46,7 @@ export const api = {
   state(): RunState {
     return callWasmMethod<RunState>("state");
   },
-  /** Adjusts the running conveyor's global items-in-flight cap — see runtime.Manager.SetItemsLimit. */
+  /** Adjusts the running conveyor's global items-in-flight cap — see runtime.Manager.SetItemLimit. */
   setItemsLimit(value: number): RunState {
     return callWasmMethod<RunState>("setItemsLimit", { value } satisfies ItemsLimitRequest);
   },

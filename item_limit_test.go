@@ -8,25 +8,23 @@ import (
 	"testing"
 )
 
-// TestItemsLimitDefaultsToUnlimitedAndClampsNegative: a fresh conveyor has no items cap, and a negative value
-// clamps to 0 (unlimited) the same way 0 does.
-func TestItemsLimitDefaultsToUnlimitedAndClampsNegative(t *testing.T) {
-	c := NewConveyor()
-	if got := c.ItemsLimit(); got != 0 {
-		t.Fatalf("ItemsLimit before any SetItemsLimit = %d, want 0 (unlimited)", got)
+// TestItemLimitDefaultsToUnlimited: a fresh conveyor has no items cap, and a negative value panics (see
+// TestSettersPanicOutOfRange).
+func TestItemLimitDefaultsToUnlimited(t *testing.T) {
+	c := New()
+	if got := c.ItemLimit(); got != 0 {
+		t.Fatalf("ItemLimit before any SetItemLimit = %d, want 0 (unlimited)", got)
 	}
-	if got := c.SetItemsLimit(-5).ItemsLimit(); got != 0 {
-		t.Fatalf("SetItemsLimit(-5): ItemsLimit = %d, want the clamp to 0", got)
-	}
+	assertPanics(t, errInvalidValue, func() { c.SetItemLimit(-5) })
 }
 
-// TestSetItemsLimitBoundsConcurrentItems: the cap bounds how many root items are in flight at once, on top of
+// TestSetItemLimitBoundsConcurrentItems: the cap bounds how many root items are in flight at once, on top of
 // whatever a node's own (much larger) limit would otherwise allow.
-func TestSetItemsLimitBoundsConcurrentItems(t *testing.T) {
+func TestSetItemLimitBoundsConcurrentItems(t *testing.T) {
 	const limit = 3
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetLimit(100) // plenty of node capacity; only the items cap should bind
-	c.SetItemsLimit(limit)
+	c := New()
+	s := c.AddStage(WithName("s")).SetLimit(100) // plenty of node capacity; only the items cap should bind
+	c.SetItemLimit(limit)
 
 	g := &gauge{}
 	release := make(chan struct{})
@@ -54,12 +52,12 @@ func TestSetItemsLimitBoundsConcurrentItems(t *testing.T) {
 	}
 }
 
-// TestSetItemsLimitLowerDoesNotEvict: lowering the cap on a running conveyor never evicts the items already in
+// TestSetItemLimitLowerDoesNotEvict: lowering the cap on a running conveyor never evicts the items already in
 // flight — it converges to the new cap as they finish, admitting nobody new until in-flight has dropped below it.
-func TestSetItemsLimitLowerDoesNotEvict(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetLimit(100)
-	c.SetItemsLimit(3)
+func TestSetItemLimitLowerDoesNotEvict(t *testing.T) {
+	c := New()
+	s := c.AddStage(WithName("s")).SetLimit(100)
+	c.SetItemLimit(3)
 
 	holds := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{}), 3: make(chan struct{})}
 	var entered, left atomic.Int64
@@ -67,7 +65,7 @@ func TestSetItemsLimitLowerDoesNotEvict(t *testing.T) {
 
 	go func() {
 		waitFor(t, "3 items to fill the items cap", func() bool { return entered.Load() == 3 })
-		c.SetItemsLimit(1)
+		c.SetItemLimit(1)
 		if got := entered.Load(); got != 3 {
 			t.Errorf("lowering the cap evicted items: entered = %d, want 3", got)
 		}
@@ -105,19 +103,19 @@ func TestSetItemsLimitLowerDoesNotEvict(t *testing.T) {
 	}
 }
 
-// TestSetItemsLimitRaiseAdmitsMoreItems: raising the cap on a running conveyor lets more items be created at
+// TestSetItemLimitRaiseAdmitsMoreItems: raising the cap on a running conveyor lets more items be created at
 // once — the raise itself is the wake-up, no other event is needed.
-func TestSetItemsLimitRaiseAdmitsMoreItems(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetLimit(100)
-	c.SetItemsLimit(1)
+func TestSetItemLimitRaiseAdmitsMoreItems(t *testing.T) {
+	c := New()
+	s := c.AddStage(WithName("s")).SetLimit(100)
+	c.SetItemLimit(1)
 
 	g := &gauge{}
 	release := make(chan struct{})
 
 	go func() {
 		waitFor(t, "the cap to hold concurrency at 1", func() bool { return g.current() == 1 })
-		c.SetItemsLimit(4) // the only thing that happens from here on
+		c.SetItemLimit(4) // the only thing that happens from here on
 		waitFor(t, "the raise to admit more items", func() bool { return g.current() == 4 })
 		close(release)
 	}()
@@ -138,17 +136,17 @@ func TestSetItemsLimitRaiseAdmitsMoreItems(t *testing.T) {
 	if peak, _ := g.snapshot(); peak != 4 {
 		t.Fatalf("peak concurrent items = %d, want the raised cap 4", peak)
 	}
-	if got := c.ItemsLimit(); got != 4 {
-		t.Fatalf("ItemsLimit = %d, want 4", got)
+	if got := c.ItemLimit(); got != 4 {
+		t.Fatalf("ItemLimit = %d, want 4", got)
 	}
 }
 
-// TestSetItemsLimitConcurrentWhileRunning: SetItemsLimit is safe from any goroutine at any time (run with -race),
+// TestSetItemLimitConcurrentWhileRunning: SetItemLimit is safe from any goroutine at any time (run with -race),
 // and the cap it leaves behind is one of the values that were set.
-func TestSetItemsLimitConcurrentWhileRunning(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetLimit(8)
-	c.SetItemsLimit(4)
+func TestSetItemLimitConcurrentWhileRunning(t *testing.T) {
+	c := New()
+	s := c.AddStage(WithName("s")).SetLimit(8)
+	c.SetItemLimit(4)
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -162,7 +160,7 @@ func TestSetItemsLimitConcurrentWhileRunning(t *testing.T) {
 					return
 				default:
 				}
-				c.SetItemsLimit(1 + n%4)
+				c.SetItemLimit(1 + n%4)
 				runtime.Gosched()
 			}
 		}(i)
@@ -175,7 +173,7 @@ func TestSetItemsLimitConcurrentWhileRunning(t *testing.T) {
 	close(stop)
 	wg.Wait()
 
-	if got := c.ItemsLimit(); got < 1 || got > 4 {
-		t.Fatalf("ItemsLimit = %d, want one of the values that were set (1..4)", got)
+	if got := c.ItemLimit(); got < 1 || got > 4 {
+		t.Fatalf("ItemLimit = %d, want one of the values that were set (1..4)", got)
 	}
 }

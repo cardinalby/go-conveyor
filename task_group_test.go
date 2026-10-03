@@ -13,9 +13,9 @@ import (
 // reports it as a TaskError and joins it. A processor that handles it and returns nil ends the item clean.
 func TestTaskGroupWaitIsFinalAfterFinished(t *testing.T) {
 	boom := errors.New("task group boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	var recorded, got error
 	var joined bool
@@ -53,9 +53,9 @@ func TestTaskGroupWaitIsFinalAfterFinished(t *testing.T) {
 // fails with the TaskError.
 func TestReadingTaskGroupOutcomeDoesNotJoin(t *testing.T) {
 	boom := errors.New("monitored boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	read := make(chan error, 1)
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -102,10 +102,10 @@ func runTaskError(err error) TaskError {
 // task's own error, and Unit is where the task ran: the stage for RetainFor, the pool for a fan-out task.
 func TestTaskGroupWaitReturnsTaskError(t *testing.T) {
 	boom := errors.New("task boom")
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	check := func(what string, err error, want Unit) {
 		t.Helper()
@@ -151,9 +151,9 @@ func TestTaskGroupWaitReturnsTaskError(t *testing.T) {
 // delayed, never lost.
 func TestUnjoinedTaskGroupErrorFailsTheRun(t *testing.T) {
 	boom := errors.New("unjoined boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -180,11 +180,11 @@ func TestUnjoinedTaskGroupErrorFailsTheRun(t *testing.T) {
 // it work, and the error appears at the Wait in the later node, before that node's work runs.
 func TestTaskGroupJoinedAtLaterNodeSurfacesThere(t *testing.T) {
 	boom := errors.New("joined boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	mid := c.AddStage(OptName("mid"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	mid := c.AddStage(WithName("mid"))
+	commit := c.AddStage(WithName("commit"))
 
 	var midReached, commitReached atomic.Bool
 	var joinErr error
@@ -242,12 +242,12 @@ func TestTaskGroupJoinedAtLaterNodeSurfacesThere(t *testing.T) {
 func TestWaitSeveralTaskGroupsEachReportsItsOwnFailure(t *testing.T) {
 	first := errors.New("first boom")
 	second := errors.New("second boom")
-	c := NewConveyor()
-	foA := c.AddFanOut(OptName("foA"))
-	poolA := foA.AddPool(OptName("poolA"))
-	foB := c.AddFanOut(OptName("foB"))
-	poolB := foB.AddPool(OptName("poolB"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	foA := c.AddFanOut(WithName("foA"))
+	poolA := foA.AddPool(WithName("poolA"))
+	foB := c.AddFanOut(WithName("foB"))
+	poolB := foB.AddPool(WithName("poolB"))
+	commit := c.AddStage(WithName("commit"))
 
 	release := make(chan struct{}) // both tasks fail only once both task groups exist and the item is in commit
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -305,10 +305,10 @@ func joinedOf(ctx context.Context, w TaskGroup) bool {
 
 // TestWaitForeignTaskGroupPanics: a task group is only meaningful to the item that created it.
 func TestWaitForeignTaskGroupPanics(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	groups := make(chan TaskGroup, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -350,9 +350,9 @@ func TestWaitForeignTaskGroupPanics(t *testing.T) {
 // TestTaskGroupResolvesOnShutdown: a task group always resolves — on cancellation its work stops and the task group
 // finishes.
 func TestTaskGroupResolvesOnShutdown(t *testing.T) {
-	c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items at once on shutdown
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New(WithDrainTimeout(0)) // cancel in-flight items at once on shutdown
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	resolved := make(chan struct{})
@@ -389,9 +389,9 @@ func TestTaskGroupResolvesOnShutdown(t *testing.T) {
 
 // TestRetainTaskGroupJoined: Stage.Retain hands back the same currency, joined the same way.
 func TestRetainTaskGroupJoined(t *testing.T) {
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	commit := c.AddStage(WithName("commit"))
 
 	var order recorder
 	runNOK(t, c, 6, func(ctx context.Context, no int64) error {
@@ -452,13 +452,13 @@ func TestTaskGroupNeverReportsCleanFinishForSkippedWork(t *testing.T) {
 		wantAll bool // the item keeps permission, so every task must run and the task group must be clean
 	}{
 		{name: "allowed to continue", wantAll: true},
-		{name: "canceled at once", opts: []Option{OptDrainTimeout(0)}},
+		{name: "canceled at once", opts: []Option{WithDrainTimeout(0)}},
 	} {
 		for shape, build := range shapes {
 			t.Run(tc.name+"/"+shape, func(t *testing.T) {
-				c := NewConveyor(tc.opts...)
-				fo := c.AddFanOut(OptName("fo"))
-				pool := fo.AddPool(OptName("pool")) // limit 1: strictly one task at a time, so there is a tail to cut
+				c := New(tc.opts...)
+				fo := c.AddFanOut(WithName("fo"))
+				pool := fo.AddPool(WithName("pool")) // limit 1: strictly one task at a time, so there is a tail to cut
 
 				// Several items may be created before the shutdown lands; all assertions are about the first one,
 				// so its tasks are counted apart from any later item's.
@@ -538,11 +538,11 @@ func TestTaskGroupNeverReportsCleanFinishForSkippedWork(t *testing.T) {
 // returns nil has dealt with it; completion must not fail the item with it a second time.
 func TestWaitOnFailedTaskGroupJoinsIt(t *testing.T) {
 	boom := errors.New("joined boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	mid := c.AddStage(OptName("mid"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	mid := c.AddStage(WithName("mid"))
+	commit := c.AddStage(WithName("commit"))
 
 	var handled atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {

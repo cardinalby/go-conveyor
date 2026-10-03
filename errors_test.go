@@ -43,7 +43,7 @@ func panicsInItem(t *testing.T, c Conveyor, want error, misuse func(ctx context.
 // TestErrConveyorAlreadyRunningIsReturned: Run may not be called concurrently with itself; the second call is
 // refused with ErrConveyorAlreadyRunning instead of joining the live run.
 func TestErrConveyorAlreadyRunningIsReturned(t *testing.T) {
-	c := NewConveyor()
+	c := New()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -72,8 +72,8 @@ func TestErrConveyorAlreadyRunningIsReturned(t *testing.T) {
 // TestErrForeignContextFromStageMoveTo: a context that never came from an item cannot say who is acting, so the
 // move is declined with ErrForeignContext (a variant of ErrInvalidContext) rather than panicking.
 func TestErrForeignContextFromStageMoveTo(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 
 	err := s.MoveTo(context.Background())
 	if !errors.Is(err, ErrForeignContext) || !errors.Is(err, ErrInvalidContext) {
@@ -84,9 +84,9 @@ func TestErrForeignContextFromStageMoveTo(t *testing.T) {
 // TestErrForeignContextFromFanOutMoveTo: the declined move reports ErrForeignContext and schedules nothing, so the
 // tasks it was given never run.
 func TestErrForeignContextFromFanOutMoveTo(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	var ran atomic.Bool
 	err := fo.MoveTo(context.Background())
@@ -117,8 +117,8 @@ func TestErrForeignContextFromFanOutMoveTo(t *testing.T) {
 // TestErrForeignContextFromRetain: Retain has no error to return, so it hands back a task group that is born finished
 // carrying ErrForeignContext, and it does not run the bgOp.
 func TestErrForeignContextFromRetain(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 
 	var ran atomic.Bool
 	w := s.RetainFor(context.Background(), func(context.Context) error {
@@ -140,10 +140,10 @@ func TestErrForeignContextFromRetain(t *testing.T) {
 // TestErrStaleContextFromFinishedItem: a context of an item that already finished cannot drive transitions any
 // more; decoupled from cancellation it is caught explicitly and every node method reports ErrStaleContext.
 func TestErrStaleContextFromFinishedItem(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	s := c.AddStage(WithName("s"))
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	captured := make(chan context.Context, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -202,8 +202,8 @@ func TestErrStaleContextFromFinishedItem(t *testing.T) {
 // TestShutdownErrorFromRunContextCancellation: an item canceled by shutdown sees a ShutdownError whose cause is the
 // Run context's cause, while Run itself returns that raw cause.
 func TestShutdownErrorFromRunContextCancellation(t *testing.T) {
-	c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items at once on shutdown
-	s := c.AddStage(OptName("s"))
+	c := New(WithDrainTimeout(0)) // cancel in-flight items at once on shutdown
+	s := c.AddStage(WithName("s"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -259,8 +259,8 @@ func TestShutdownErrorFromRunContextCancellation(t *testing.T) {
 // TestShutdownErrorFromItemError: when one item fails, the later items are canceled with a ShutdownError carrying
 // that error as its cause; Run returns the error itself.
 func TestShutdownErrorFromItemError(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 	boom := errors.New("boom")
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -314,10 +314,10 @@ func TestShutdownErrorFromItemError(t *testing.T) {
 // TestTaskGroupErrorSurfacesFromJoinAndFromErr: a task group's error reaches the item through TaskGroup.Wait and
 // through TaskGroup.Err, and from there it fails the run.
 func TestTaskGroupErrorSurfacesFromJoinAndFromErr(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 	boom := errors.New("boom")
 
 	runErr := runOnce(t, c, func(ctx context.Context) error {
@@ -354,9 +354,9 @@ func TestTaskGroupErrorSurfacesFromJoinAndFromErr(t *testing.T) {
 
 // TestErrWrongEnterOrderMovingBackwards: items move forward only, so a stage behind the item's progress is misuse.
 func TestErrWrongEnterOrderMovingBackwards(t *testing.T) {
-	c := NewConveyor()
-	first := c.AddStage(OptName("first"))
-	second := c.AddStage(OptName("second"))
+	c := New()
+	first := c.AddStage(WithName("first"))
+	second := c.AddStage(WithName("second"))
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -377,10 +377,10 @@ func TestErrWrongEnterOrderMovingBackwards(t *testing.T) {
 
 // TestErrWrongEnterOrderFanOutBehindItem: the same rule holds for a fan-out node the item has already passed.
 func TestErrWrongEnterOrderFanOutBehindItem(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	after := c.AddStage(OptName("after"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	after := c.AddStage(WithName("after"))
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -405,8 +405,8 @@ func TestErrWrongEnterOrderFanOutBehindItem(t *testing.T) {
 // TestErrNodeAlreadyEnteredStage: a stage is entered once per item, so re-entering the one the item occupies is
 // misuse.
 func TestErrNodeAlreadyEnteredStage(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -428,9 +428,9 @@ func TestErrNodeAlreadyEnteredStage(t *testing.T) {
 // TestErrNodeAlreadyEnteredFanOut: a fan-out is entered once per item too — a second submission to the same node is
 // misuse, even with fresh tasks.
 func TestErrNodeAlreadyEnteredFanOut(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -460,10 +460,10 @@ func TestErrNodeAlreadyEnteredFanOut(t *testing.T) {
 
 // TestErrInvalidUnitStageFromAnotherConveyor: a node handle only works with items of its own conveyor.
 func TestErrInvalidUnitStageFromAnotherConveyor(t *testing.T) {
-	c := NewConveyor()
-	_ = c.AddStage(OptName("mine"))
-	other := NewConveyor()
-	foreign := other.AddStage(OptName("foreign"))
+	c := New()
+	_ = c.AddStage(WithName("mine"))
+	other := New()
+	foreign := other.AddStage(WithName("foreign"))
 
 	panicsInItem(t, c, errInvalidUnit, func(ctx context.Context) {
 		_ = foreign.MoveTo(ctx)
@@ -473,10 +473,10 @@ func TestErrInvalidUnitStageFromAnotherConveyor(t *testing.T) {
 // TestErrInvalidUnitItemContextFromAnotherConveyor: the mirror image — this conveyor's stage used with an item
 // context borrowed from another running conveyor.
 func TestErrInvalidUnitItemContextFromAnotherConveyor(t *testing.T) {
-	c := NewConveyor()
-	mine := c.AddStage(OptName("mine"))
-	other := NewConveyor()
-	_ = other.AddStage(OptName("theirs"))
+	c := New()
+	mine := c.AddStage(WithName("mine"))
+	other := New()
+	_ = other.AddStage(WithName("theirs"))
 
 	otherCtxs := make(chan context.Context, 1)
 	release := make(chan struct{})
@@ -507,11 +507,11 @@ func TestErrInvalidUnitItemContextFromAnotherConveyor(t *testing.T) {
 // TestErrInvalidUnitTaskFromAnotherFanOut: a task may only be scheduled at the fan-out that owns its branch; the
 // panic is Schedule's, before it touches the context.
 func TestErrInvalidUnitTaskFromAnotherFanOut(t *testing.T) {
-	c := NewConveyor()
-	fo1 := c.AddFanOut(OptName("fo1"))
-	pool1 := fo1.AddPool(OptName("pool1"))
-	fo2 := c.AddFanOut(OptName("fo2"))
-	_ = fo2.AddPool(OptName("lane2"))
+	c := New()
+	fo1 := c.AddFanOut(WithName("fo1"))
+	pool1 := fo1.AddPool(WithName("pool1"))
+	fo2 := c.AddFanOut(WithName("fo2"))
+	_ = fo2.AddPool(WithName("lane2"))
 
 	panicsInItem(t, c, errInvalidUnit, func(ctx context.Context) {
 		_ = fo2.MoveTo(ctx)
@@ -522,9 +522,9 @@ func TestErrInvalidUnitTaskFromAnotherFanOut(t *testing.T) {
 // TestErrTaskReusedOnSecondSubmission: a Task is lazy, stateful and single-use, so scheduling one twice is misuse;
 // the panic is Schedule's.
 func TestErrTaskReusedOnSecondSubmission(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	panicsInItem(t, c, errTaskReused, func(ctx context.Context) {
 		task := pool.NewTask(func(context.Context) error { return nil })
@@ -536,21 +536,76 @@ func TestErrTaskReusedOnSecondSubmission(t *testing.T) {
 // TestErrNilTaskFuncEagerConstructors: the eager constructors see the nil callback themselves, so they panic at
 // construction time, before any item is involved.
 func TestErrNilTaskFuncEagerConstructors(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	assertPanics(t, errNilTaskFunc, func() { _ = pool.NewTask(nil) })
 	assertPanics(t, errNilTaskFunc, func() { _ = pool.NewTasks(3, nil) })
-	// A non-positive count yields an empty task, so there is no callback to complain about.
+	// A zero count yields an empty task, so there is no callback to complain about.
 	_ = pool.NewTasks(0, nil)
+}
+
+// TestErrNilTaskFuncRetainFor: RetainFor checks fn before anything else, so a nil fn panics at the call site in
+// every case — no item, an item in the stage, a canceled item — instead of in the task goroutine.
+func TestErrNilTaskFuncRetainFor(t *testing.T) {
+	c := New()
+	s := c.AddStage(WithName("s"))
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	_ = lane.AddStage(WithName("ls"))
+	start := c.StartingStage()
+
+	t.Run("no item", func(t *testing.T) {
+		for _, rs := range []RetainableStage{s, start, lane} {
+			assertPanics(t, errNilTaskFunc, func() { _ = rs.RetainFor(context.Background(), nil) })
+		}
+	})
+	t.Run("item in the stage", func(t *testing.T) {
+		panicsInItem(t, c, errNilTaskFunc, func(ctx context.Context) { _ = start.RetainFor(ctx, nil) })
+		panicsInItem(t, c, errNilTaskFunc, func(ctx context.Context) {
+			if err := s.MoveTo(ctx); err != nil {
+				panic(err)
+			}
+			_ = s.RetainFor(ctx, nil)
+		})
+	})
+	t.Run("lane child", func(t *testing.T) {
+		panicsInItem(t, c, errNilTaskFunc, func(ctx context.Context) {
+			var got error
+			err := fo.Schedule(ctx, lane.NewTask(func(ctx context.Context) error {
+				got = recoveredErr(func() { _ = lane.RetainFor(ctx, nil) })
+				return nil
+			}))
+			if err == nil {
+				err = fo.MoveTo(ctx)
+			}
+			if err == nil {
+				err = fo.Wait(ctx)
+			}
+			if err != nil {
+				panic(err)
+			}
+			panic(got)
+		})
+	})
+	t.Run("canceled item", func(t *testing.T) {
+		panicsInItem(t, c, errNilTaskFunc, func(ctx context.Context) {
+			if err := s.MoveTo(ctx); err != nil {
+				panic(err)
+			}
+			cctx, cancel := context.WithCancel(ctx)
+			cancel()
+			_ = s.RetainFor(cctx, nil)
+		})
+	})
 }
 
 // TestErrStageNotEnteredOnUnenteredStage: Retain hands over the slot the item holds in the stage, so retaining a
 // stage the item never entered is meaningless.
 func TestErrStageNotEnteredOnUnenteredStage(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 
 	panicsInItem(t, c, errStageNotEntered, func(ctx context.Context) {
 		_ = s.RetainFor(ctx, func(context.Context) error { return nil })
@@ -562,11 +617,11 @@ func TestErrStageNotEnteredOnUnenteredStage(t *testing.T) {
 // over by Retain (errWorkRetained), whether or not the item still occupies the node.
 func TestErrStageNotEnteredAfterLeaving(t *testing.T) {
 	t.Run("leave", func(t *testing.T) {
-		c := NewConveyor()
-		first := c.AddStage(OptName("first"))
-		fo := c.AddFanOut(OptName("fo"))
-		pool := fo.AddPool(OptName("pool"))
-		second := c.AddStage(OptName("second"))
+		c := New()
+		first := c.AddStage(WithName("first"))
+		fo := c.AddFanOut(WithName("fo"))
+		pool := fo.AddPool(WithName("pool"))
+		second := c.AddStage(WithName("second"))
 
 		panicsInItem(t, c, errStageNotEntered, func(ctx context.Context) {
 			if err := first.MoveTo(ctx); err != nil {
@@ -586,9 +641,9 @@ func TestErrStageNotEnteredAfterLeaving(t *testing.T) {
 		})
 	})
 	t.Run("retain", func(t *testing.T) {
-		c := NewConveyor()
-		fo := c.AddFanOut(OptName("fo"))
-		pool := fo.AddPool(OptName("pool"))
+		c := New()
+		fo := c.AddFanOut(WithName("fo"))
+		pool := fo.AddPool(WithName("pool"))
 
 		panicsInItem(t, c, errWorkRetained, func(ctx context.Context) {
 			if err := fo.MoveTo(ctx); err != nil {
@@ -604,11 +659,11 @@ func TestErrStageNotEnteredAfterLeaving(t *testing.T) {
 // TestErrWrongScopeChildMovingToConveyorNode: a child item travels its lane's interior only; a node of the
 // conveyor belongs to another series.
 func TestErrWrongScopeChildMovingToConveyorNode(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	inner := lane.AddStage(OptName("inner")) // interior nodes: the lane's work runs as child items
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	inner := lane.AddStage(WithName("inner")) // interior nodes: the lane's work runs as child items
+	commit := c.AddStage(WithName("commit"))
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -640,10 +695,10 @@ func TestErrWrongScopeChildMovingToConveyorNode(t *testing.T) {
 
 // TestErrWrongScopeItemMovingIntoLane: and the conveyor's own item may not reach into a lane's interior.
 func TestErrWrongScopeItemMovingIntoLane(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	inner := lane.AddStage(OptName("inner"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	inner := lane.AddStage(WithName("inner"))
 
 	panicsInItem(t, c, errWrongScope, func(ctx context.Context) {
 		_ = inner.MoveTo(ctx)
@@ -678,12 +733,12 @@ func TestErrWrongScopeIsCheckedOnEveryEntryPoint(t *testing.T) {
 		{"FanOut.Wait", func(_ Stage, f FanOut, _ Branch, ctx context.Context) { _ = f.Wait(ctx) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := NewConveyor()
-			outer := c.AddFanOut(OptName("outer"))
-			lane := outer.AddLane(OptName("lane"))
-			innerStage := lane.AddStage(OptName("inner"))     // a stage of the lane's scope
-			innerFanOut := lane.AddFanOut(OptName("innerFo")) // and a fan-out of it, with a branch to build tasks on
-			innerPool := innerFanOut.AddPool(OptName("innerPool"))
+			c := New()
+			outer := c.AddFanOut(WithName("outer"))
+			lane := outer.AddLane(WithName("lane"))
+			innerStage := lane.AddStage(WithName("inner"))     // a stage of the lane's scope
+			innerFanOut := lane.AddFanOut(WithName("innerFo")) // and a fan-out of it, with a branch to build tasks on
+			innerPool := innerFanOut.AddPool(WithName("innerPool"))
 
 			panicsInItem(t, c, errWrongScope, func(ctx context.Context) {
 				tc.misuse(innerStage, innerFanOut, innerPool, ctx)
@@ -696,10 +751,10 @@ func TestErrWrongScopeIsCheckedOnEveryEntryPoint(t *testing.T) {
 // scheduled it — moving or waiting with it would move or park that item from a pool goroutine. Schedule at the pool's
 // own fan-out is the one thing that context is good for.
 func TestErrCannotMoveFromNonTravellingWork(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")) // a pool: its work has nowhere to travel
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")) // a pool: its work has nowhere to travel
+	commit := c.AddStage(WithName("commit"))
 
 	var checked atomic.Bool
 	var spawned atomic.Bool
@@ -742,10 +797,10 @@ func TestErrCannotMoveFromNonTravellingWork(t *testing.T) {
 // TestErrForeignTaskGroupFromAnotherItem: a task group is only meaningful to the item that created it, so joining
 // another item's task group is misuse.
 func TestErrForeignTaskGroupFromAnotherItem(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	groups := make(chan TaskGroup, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -793,16 +848,16 @@ func TestErrForeignTaskGroupFromNilTaskGroup(t *testing.T) {
 
 // TestErrConveyorRunningOnTopologyChange: the topology may not be extended while the conveyor is running.
 func TestErrConveyorRunningOnTopologyChange(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
-	fo := c.AddFanOut(OptName("fo"))
-	_ = fo.AddPool(OptName("lane"))
+	c := New()
+	s := c.AddStage(WithName("s"))
+	fo := c.AddFanOut(WithName("fo"))
+	_ = fo.AddPool(WithName("lane"))
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(context.Context) error {
-		assertPanics(t, errConveyorRunning, func() { _ = c.AddStage(OptName("late")) })
-		assertPanics(t, errConveyorRunning, func() { _ = c.AddFanOut(OptName("lateFanOut")) })
-		assertPanics(t, errConveyorRunning, func() { _ = fo.AddPool(OptName("lateLane")) })
+		assertPanics(t, errConveyorRunning, func() { _ = c.AddStage(WithName("late")) })
+		assertPanics(t, errConveyorRunning, func() { _ = c.AddFanOut(WithName("lateFanOut")) })
+		assertPanics(t, errConveyorRunning, func() { _ = fo.AddPool(WithName("lateLane")) })
 		_ = s.SetQueueSize(2) // capacity, not topology: legal on a live conveyor
 		checked.Store(true)
 		return nil
@@ -818,16 +873,16 @@ func TestErrConveyorRunningOnTopologyChange(t *testing.T) {
 // TestErrConveyorFinalizedOnTopologyChange: the topology is frozen from the first Run on, so extending it after a
 // run has returned is misuse too. Capacity changes stay legal.
 func TestErrConveyorFinalizedOnTopologyChange(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
-	fo := c.AddFanOut(OptName("fo"))
-	_ = fo.AddPool(OptName("lane"))
+	c := New()
+	s := c.AddStage(WithName("s"))
+	fo := c.AddFanOut(WithName("fo"))
+	_ = fo.AddPool(WithName("lane"))
 
 	runNOK(t, c, 2, func(ctx context.Context, _ int64) error { return s.MoveTo(ctx) })
 
-	assertPanics(t, errConveyorFinalized, func() { _ = c.AddStage(OptName("late")) })
-	assertPanics(t, errConveyorFinalized, func() { _ = c.AddFanOut(OptName("lateFanOut")) })
-	assertPanics(t, errConveyorFinalized, func() { _ = fo.AddPool(OptName("lateLane")) })
+	assertPanics(t, errConveyorFinalized, func() { _ = c.AddStage(WithName("late")) })
+	assertPanics(t, errConveyorFinalized, func() { _ = c.AddFanOut(WithName("lateFanOut")) })
+	assertPanics(t, errConveyorFinalized, func() { _ = fo.AddPool(WithName("lateLane")) })
 	s.SetLimit(3) // capacity is not topology
 	s.SetQueueSize(2)
 	if s.Limit() != 3 || s.QueueSize() != 2 {

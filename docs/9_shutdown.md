@@ -4,7 +4,7 @@ Shutdown begins when the context passed to `Run` is canceled, or when an item fa
 error it never joined (see [Errors](4_fan-out.md#errors)). It has three steps:
 1. **Shutdown begins**: no new items are started, and contexts from [`UntilShutdown`](#untilshutdown) are canceled.
 2. **Drain**: items already in the pipeline finish.
-3. **Drain times out** (only with [`OptDrainTimeout` / `OptDrainContextFunc`](#drain-timeout)): the contexts of the remaining items are canceled.
+3. **Drain times out** (only with [`WithDrainTimeout` / `WithDrainContext`](#drain-timeout)): the contexts of the remaining items are canceled.
 
 After an item error, all later items are canceled with a `ShutdownError` at once.
 
@@ -22,16 +22,20 @@ After an item error, all later items are canceled with a `ShutdownError` at once
 ```go
 err := c.Run(ctx, proc)
 
-var ie conveyor.ItemError
-var se conveyor.ShutdownError
-switch {
-case err == nil:
-case errors.As(err, &ie):
-    // an item failed. errors.Is(err, yourErr) works. ie.Unit() is the node where it failed.
-case errors.As(err, &se):
+switch e := err.(type) {
+case nil:
+case conveyor.ItemError:
+    // an item failed. errors.Is(err, yourErr) works. e.Unit() is the node where it failed.
+    log.Printf("item failed at %s: %v", e.Unit(), e.Unwrap())
+case conveyor.ShutdownError:
     // stopped from outside. errors.Is(err, context.Canceled) or your own cause works.
+    log.Printf("stopped: %v", e.Unwrap())
 }
 ```
+
+Use a type switch to learn what began the shutdown. `errors.As` and `errors.Is` search the whole chain: use them to
+inspect causes. For example, the context cause of an item aborted because an earlier item failed is a `ShutdownError`
+that wraps that item's `ItemError`, so `errors.As(cause, &itemErr)` is true although this item did not fail.
 
 Both are `RunError`s. `DrainError()` tells how the items in flight when shutdown began finished:
 - nil: they all finished without failing (aborts are not failures).
@@ -205,16 +209,16 @@ join returns a `TaskError`.
 ## Drain timeout
 
 By default, items finish on their own. To limit how long they may run after shutdown begins, use
-[`OptDrainTimeout`](https://pkg.go.dev/github.com/cardinalby/go-conveyor#OptDrainTimeout):
+[`WithDrainTimeout`](https://pkg.go.dev/github.com/cardinalby/go-conveyor#WithDrainTimeout):
 
 ```go
-c := conveyor.NewConveyor(conveyor.OptDrainTimeout(30 * time.Second))
+c := conveyor.New(conveyor.WithDrainTimeout(30 * time.Second))
 ```
 
 30 seconds after shutdown begins, the contexts of the remaining items are canceled. `d <= 0` cancels them at once.
 
 If the limit depends on the shutdown cause, or comes from an outside deadline, use
-[`OptDrainContextFunc`](https://pkg.go.dev/github.com/cardinalby/go-conveyor#OptDrainContextFunc). The function is
+[`WithDrainContext`](https://pkg.go.dev/github.com/cardinalby/go-conveyor#WithDrainContext). The function is
 called when shutdown begins. When the returned context is done, the item contexts are canceled. A nil context means
 no limit. The two options override each other: the last one wins.
 

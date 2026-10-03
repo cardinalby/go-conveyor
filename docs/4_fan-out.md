@@ -18,7 +18,7 @@ Add a [FanOut](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Conveyor.Add
 - **moving to** next stage **joins** that work
 
 ```go
-c := conveyor.NewConveyor()
+c := conveyor.New()
 // SetLimit(2): at most 2 item bodies can occupy the fan-out at a time
 dbsWrite := c.AddFanOut().SetLimit(2)
 // Pools are single-step branches with their own capacity limits (similar to connection pools)

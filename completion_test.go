@@ -19,9 +19,9 @@ func TestCompletionSealsBusyBodyAndJoinsTheTree(t *testing.T) {
 		fail bool
 	}{{"clean tree", false}, {"failing leaf", true}} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := NewConveyor()
-			fo := c.AddFanOut(OptName("fo"))
-			pool := fo.AddPool(OptName("pool")).SetLimit(2)
+			c := New()
+			fo := c.AddFanOut(WithName("fo"))
+			pool := fo.AddPool(WithName("pool")).SetLimit(2)
 
 			const depth = 3
 			var ran atomic.Int64
@@ -81,9 +81,9 @@ func TestCompletionWithErrorStopsTheSpawningTree(t *testing.T) {
 			name = "retained body"
 		}
 		t.Run(name, func(t *testing.T) {
-			c := NewConveyor()
-			fo := c.AddFanOut(OptName("fo"))
-			pool := fo.AddPool(OptName("pool")) // limit 1: task B queues behind the running task A
+			c := New()
+			fo := c.AddFanOut(WithName("fo"))
+			pool := fo.AddPool(WithName("pool")) // limit 1: task B queues behind the running task A
 
 			running := make(chan struct{})
 			var bRan atomic.Int64
@@ -138,9 +138,9 @@ func TestCompletionWithErrorStopsTheSpawningTree(t *testing.T) {
 // drain.
 func TestCompletionShutdownErrorYieldsToUnobservedTaskGroupError(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")).SetLimit(2)
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")).SetLimit(2)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -199,9 +199,9 @@ func TestCompletionShutdownErrorYieldsToUnobservedTaskGroupError(t *testing.T) {
 // group.
 func TestShutdownWhileBlockedInWaitDropsQueuedSpawns(t *testing.T) {
 	cause := errors.New("stop now")
-	c := NewConveyor(OptDrainTimeout(0))
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")) // limit 1: B queues behind A
+	c := New(WithDrainTimeout(0))
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")) // limit 1: B queues behind A
 
 	var aDone, bRan atomic.Int64
 	ctx, cancel := context.WithCancelCause(context.Background())
@@ -260,10 +260,10 @@ func TestShutdownWhileBlockedInWaitDropsQueuedSpawns(t *testing.T) {
 func TestCompletionAbandonmentDoesNotHideALaterTaskError(t *testing.T) {
 	boom := errors.New("boom")
 	errProc := errors.New("processor failed")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	work := fo.AddPool(OptName("work"))
-	feed := fo.AddPool(OptName("feed"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	work := fo.AddPool(WithName("work"))
+	feed := fo.AddPool(WithName("feed"))
 
 	groups := make(chan TaskGroup, 1)
 	workStarted := make(chan struct{})

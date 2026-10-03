@@ -6,7 +6,7 @@ operations that should be serialized (writes, commit).
 For read stages we may want to allow multiple items to enter the stage at a time.
 
 ```go
-c := conveyor.NewConveyor()
+c := conveyor.New()
 fetchMetadata := c.AddStage().SetLimit(3) // 3 items can enter this stage at a time
 write := c.AddStage()                     // only 1 item can enter this stage at a time
 commit := c.AddStage()                    // only 1 item can enter this stage at a time

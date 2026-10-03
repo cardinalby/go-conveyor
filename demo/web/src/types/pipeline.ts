@@ -44,7 +44,7 @@ export interface LaneBranch {
   name: string;
   /** The lane's own entrance's name — "" until renamed, then whatever the user typed, exactly like every other name
    * here. Display-only, for the same reason Pipeline.startName is: a lane's entrance unit is go-conveyor's own and
-   * takes no OptName, so this never reaches the Spec. */
+   * takes no WithName, so this never reaches the Spec. */
   entranceName: string;
   tasksPerItem: number;
   delayMs: number;
@@ -79,10 +79,10 @@ export type PipelineNode = StageNode | FanOutNode;
 
 /** startDelayMs/startName configure the implicit start ("Read") stage — it is not one of Nodes, since every
  * conveyor has exactly one automatically. startName is "" until the user renames it, exactly like a node's own name,
- * and is display-only: go-conveyor's start unit is always called "start" and takes no OptName, so unlike a node's
+ * and is display-only: go-conveyor's start unit is always called "start" and takes no WithName, so unlike a node's
  * name this one never reaches the Spec or the generated code. */
 /** itemsLimit caps how many items may be in flight across the whole conveyor at once (see Go's
- * conveyor.Conveyor.SetItemsLimit) — global, unlike every other dial here, which belongs to one node. 0 means
+ * conveyor.Conveyor.SetItemLimit) — global, unlike every other dial here, which belongs to one node. 0 means
  * unlimited, the default. */
 export interface Pipeline {
   nodes: PipelineNode[];

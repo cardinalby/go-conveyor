@@ -10,9 +10,9 @@ import (
 // TestHoldKeepsStageUntilReleased: a stage kept with Retain stays occupied after the item moves on, and the next
 // item enters it only once release is called.
 func TestHoldKeepsStageUntilReleased(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 
 	var created, enteredA atomic.Int64
 	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
@@ -45,9 +45,9 @@ func TestHoldKeepsStageUntilReleased(t *testing.T) {
 // TestHoldReleasedInsideStageIsNoop: a release called while the item is still in the stage frees nothing; the stage
 // is freed by the next move as usual.
 func TestHoldReleasedInsideStageIsNoop(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 
 	var created, enteredA atomic.Int64
 	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
@@ -78,11 +78,11 @@ func TestHoldReleasedInsideStageIsNoop(t *testing.T) {
 // TestHoldReleasedByPoolTask: stage1 and pool1 use the same resource. The item keeps stage1 until its pool1 task is
 // done, so no next item enters stage1 while that task runs. pool2 work does not keep stage1.
 func TestHoldReleasedByPoolTask(t *testing.T) {
-	c := NewConveyor()
-	stage1 := c.AddStage(OptName("stage1"))
-	fo := c.AddFanOut(OptName("fo"))
-	pool1 := fo.AddPool(OptName("pool1")).SetLimit(1)
-	pool2 := fo.AddPool(OptName("pool2")).SetLimit(1)
+	c := New()
+	stage1 := c.AddStage(WithName("stage1"))
+	fo := c.AddFanOut(WithName("fo"))
+	pool1 := fo.AddPool(WithName("pool1")).SetLimit(1)
+	pool2 := fo.AddPool(WithName("pool2")).SetLimit(1)
 
 	g := &gauge{} // users of the shared resource: the item in stage1 and its pool1 task
 	runNOK(t, c, 6, func(ctx context.Context, no int64) error {
@@ -113,9 +113,9 @@ func TestHoldReleasedByPoolTask(t *testing.T) {
 // TestHoldTwoReleasesBothNeeded: each Retain holds the stage until its own release; the stage is freed after the
 // last one.
 func TestHoldTwoReleasesBothNeeded(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 
 	var created, enteredA atomic.Int64
 	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
@@ -150,9 +150,9 @@ func TestHoldTwoReleasesBothNeeded(t *testing.T) {
 // TestHoldMixedWithRetainFor: a stage kept by both Retain and RetainFor is freed only when the release is called and
 // the bgOp has returned.
 func TestHoldMixedWithRetainFor(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 
 	bgDone := make(chan struct{})
 	var created, enteredA atomic.Int64
@@ -187,9 +187,9 @@ func TestHoldMixedWithRetainFor(t *testing.T) {
 // TestHoldNotReleasedEndsAtCompletion: a hold never released ends when the item completes, so later items are not
 // blocked forever.
 func TestHoldNotReleasedEndsAtCompletion(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 
 	var releases []func()
 	runNOK(t, c, 3, func(ctx context.Context, no int64) error {
@@ -210,9 +210,9 @@ func TestHoldNotReleasedEndsAtCompletion(t *testing.T) {
 // TestHoldAfterMovingOnPanics: Retain and RetainFor may be called only while the item is in the stage, even if a
 // running RetainFor still keeps the stage occupied.
 func TestHoldAfterMovingOnPanics(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 
 	bgDone := make(chan struct{})
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -238,17 +238,17 @@ func TestHoldAfterMovingOnPanics(t *testing.T) {
 
 // TestHoldForeignContextPanics: with no error to return, Retain panics on a context that carries no item.
 func TestHoldForeignContextPanics(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
+	c := New()
+	a := c.AddStage(WithName("a"))
 	assertPanics(t, ErrForeignContext, func() { a.Retain(context.Background()) })
 }
 
 // TestHoldWithCanceledCallContext: a Retain called with a canceled derived context still keeps the stage, because
 // the item itself is not canceled and moves on with its own context.
 func TestHoldWithCanceledCallContext(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 
 	var created, enteredA atomic.Int64
 	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
@@ -282,8 +282,8 @@ func TestHoldWithCanceledCallContext(t *testing.T) {
 // TestHoldOnCanceledItemEndsAtCompletion: on a canceled item Retain still records the hold, and the hold ends when
 // the item completes.
 func TestHoldOnCanceledItemEndsAtCompletion(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
+	c := New()
+	a := c.AddStage(WithName("a"))
 
 	var held *item
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -309,8 +309,8 @@ func TestHoldOnCanceledItemEndsAtCompletion(t *testing.T) {
 
 // TestHoldStartingStageDelaysNextItem: the starting stage kept with Retain lets no new item be created until release.
 func TestHoldStartingStageDelaysNextItem(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 	start := c.StartingStage()
 
 	var created atomic.Int64

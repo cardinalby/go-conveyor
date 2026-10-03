@@ -47,8 +47,8 @@ type series struct {
 
 // AddStage is the shared implementation behind Conveyor.AddStage and Lane.AddStage — those interfaces carry the
 // user-facing contract; a series does not care which of the two it is.
-func (s *series) AddStage(opts ...AnyUnitOption) Stage {
-	cfg := newAnyUnitConfig(opts)
+func (s *series) AddStage(opts ...NodeOption) Stage {
+	cfg := newNodeConfig(opts)
 	st := &stage{series: s, name: cfg.name, ord: len(s.nodes) + 1}
 	st.work = s.conveyor.newUnit(st, kindStage)
 	s.nodes = append(s.nodes, st)
@@ -57,8 +57,8 @@ func (s *series) AddStage(opts ...AnyUnitOption) Stage {
 
 // AddFanOut is the shared implementation behind Conveyor.AddFanOut and Lane.AddFanOut — those interfaces carry the
 // user-facing contract.
-func (s *series) AddFanOut(opts ...AnyUnitOption) FanOut {
-	cfg := newAnyUnitConfig(opts)
+func (s *series) AddFanOut(opts ...NodeOption) FanOut {
+	cfg := newNodeConfig(opts)
 	f := &fanOut{series: s, name: cfg.name, ord: len(s.nodes) + 1}
 	f.node = s.conveyor.newUnit(f, kindFanOut)
 	s.nodes = append(s.nodes, f)

@@ -24,12 +24,12 @@ import (
 // So the fast lane runs exactly 3 tasks and exactly 5 items exist. The number that matters is the first one: the
 // limit bounds how many items have work outstanding, whatever they do afterwards.
 func TestFanOutLimitBoundsItemsInside(t *testing.T) {
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	fo := c.AddFanOut(OptName("fo")).SetLimit(3)
-	fast := fo.AddPool(OptName("fast"))
-	slow := fo.AddPool(OptName("slow"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	fo := c.AddFanOut(WithName("fo")).SetLimit(3)
+	fast := fo.AddPool(WithName("fast"))
+	slow := fo.AddPool(WithName("slow"))
+	commit := c.AddStage(WithName("commit"))
 
 	var fastDone, created atomic.Int64
 	block := make(chan struct{})
@@ -92,10 +92,10 @@ func TestFanOutLimitBoundsItemsInside(t *testing.T) {
 // after which item 2 sits at the commit door still holding the only fan-out slot, so item 3 cannot get in. If the
 // slot were released when the work finished instead, item 3 would enter and a third task would run.
 func TestFanOutSlotHeldUntilNextAdmission(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(1)
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(1)
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	var tasksDone atomic.Int64
 	held := make(chan struct{}) // closed once item 1 is inside commit
@@ -145,10 +145,10 @@ func TestFanOutSlotHeldUntilNextAdmission(t *testing.T) {
 // door is another matter: the item behind cannot enter the node until the item ahead has scheduled once, whatever
 // the limit says.
 func TestFanOutReleasesPreviousStageAtAdmission(t *testing.T) {
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	fo := c.AddFanOut(OptName("fo")).SetLimit(4).SetBackpressure(BackpressureBuffered)
-	pool := fo.AddPool(OptName("pool")).SetLimit(4)
+	c := New()
+	write := c.AddStage(WithName("write"))
+	fo := c.AddFanOut(WithName("fo")).SetLimit(4).SetBackpressure(BackpressureBuffered)
+	pool := fo.AddPool(WithName("pool")).SetLimit(4)
 
 	secondAtDoor := make(chan struct{})
 	secondInside := make(chan struct{})
@@ -190,9 +190,9 @@ func TestFanOutReleasesPreviousStageAtAdmission(t *testing.T) {
 
 // TestPoolRunsTasksInParallelUpToLimit: a pool's limit is its task concurrency.
 func TestPoolRunsTasksInParallelUpToLimit(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")).SetLimit(4)
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")).SetLimit(4)
 
 	g := &gauge{}
 	barrier := make(chan struct{})
@@ -231,9 +231,9 @@ func TestPoolRunsTasksInParallelUpToLimit(t *testing.T) {
 
 // TestPoolRunsSequentiallyByDefault: a default pool runs its tasks one at a time, in submission order.
 func TestPoolRunsSequentiallyByDefault(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	g := &gauge{}
 	var order numbers
@@ -270,10 +270,10 @@ func TestPoolRunsSequentiallyByDefault(t *testing.T) {
 // TestPoolFIFOAcrossItems: everything an older item scheduled on a pool starts before anything a younger item
 // scheduled there.
 func TestPoolFIFOAcrossItems(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(4)
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(4)
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	var order numbers
 	runNOK(t, c, 10, func(ctx context.Context, no int64) error {
@@ -306,9 +306,9 @@ func TestPoolFIFOAcrossItems(t *testing.T) {
 // TestFanOutOverSubscribedPoolDrains: scheduling far more tasks than a pool's capacity is fine — they drain
 // through the pool's own completions.
 func TestFanOutOverSubscribedPoolDrains(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")).SetLimit(2)
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")).SetLimit(2)
 
 	var done atomic.Int64
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -335,11 +335,11 @@ func TestFanOutOverSubscribedPoolDrains(t *testing.T) {
 
 // TestFanOutMultiplePoolsDifferentLimits exercises several pools with different capacities in one task group.
 func TestFanOutMultiplePoolsDifferentLimits(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	seq := fo.AddPool(OptName("seq"))
-	par := fo.AddPool(OptName("par")).SetLimit(3)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	seq := fo.AddPool(WithName("seq"))
+	par := fo.AddPool(WithName("par")).SetLimit(3)
+	commit := c.AddStage(WithName("commit"))
 
 	seqG, parG := &gauge{}, &gauge{}
 	runNOK(t, c, 8, func(ctx context.Context, no int64) error {
@@ -367,10 +367,10 @@ func TestFanOutMultiplePoolsDifferentLimits(t *testing.T) {
 // TestFanOutEmptyScheduleIsLegal: scheduling nothing is legal — the item is inside the node with an empty body, and
 // retaining it hands back an already-finished task group.
 func TestFanOutEmptyScheduleIsLegal(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	for _, tc := range []struct {
 		name  string
@@ -417,11 +417,11 @@ func TestFanOutEmptyScheduleIsLegal(t *testing.T) {
 
 // TestFanOutSubsetOfPools: an item may use only some of the branches; unused ones must not block anything.
 func TestFanOutSubsetOfPools(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	a := fo.AddPool(OptName("a"))
-	b := fo.AddPool(OptName("b"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	a := fo.AddPool(WithName("a"))
+	b := fo.AddPool(WithName("b"))
+	commit := c.AddStage(WithName("commit"))
 
 	var aRuns, bRuns atomic.Int64
 	runNOK(t, c, 12, func(ctx context.Context, no int64) error {
@@ -449,12 +449,12 @@ func TestFanOutSubsetOfPools(t *testing.T) {
 // TestFanOutJoinHappensBeforeNewWorkStarts: task groups named in a fan-out move are joined *before* the new work is
 // enqueued, so scheduled work may depend on them.
 func TestFanOutJoinHappensBeforeNewWorkStarts(t *testing.T) {
-	c := NewConveyor()
-	first := c.AddFanOut(OptName("first"))
-	firstPool := first.AddPool(OptName("firstPool"))
-	second := c.AddFanOut(OptName("second"))
-	secondPool := second.AddPool(OptName("secondPool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	first := c.AddFanOut(WithName("first"))
+	firstPool := first.AddPool(WithName("firstPool"))
+	second := c.AddFanOut(WithName("second"))
+	secondPool := second.AddPool(WithName("secondPool"))
+	commit := c.AddStage(WithName("commit"))
 
 	var events recorder
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -506,11 +506,11 @@ func TestFanOutJoinHappensBeforeNewWorkStarts(t *testing.T) {
 // TestDeferredJoinOverlapsInlineWork: not naming the task group at the next stage is what buys the overlap — the
 // stage's inline work runs while the task group is still going.
 func TestDeferredJoinOverlapsInlineWork(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	transform := c.AddStage(OptName("transform"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	transform := c.AddStage(WithName("transform"))
+	commit := c.AddStage(WithName("commit"))
 
 	taskRunning := make(chan struct{})
 	inlineRan := make(chan struct{})
@@ -554,10 +554,10 @@ func TestDeferredJoinOverlapsInlineWork(t *testing.T) {
 // naming the pool; the processor returns it and it becomes Run's error.
 func TestFanOutTaskErrorFailsRun(t *testing.T) {
 	boom := errors.New("task boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -609,10 +609,10 @@ func TestFanOutTaskErrorFailsRun(t *testing.T) {
 // its siblings can bail out promptly. The item itself is not canceled.
 func TestFanOutSiblingTasksSeeCancellation(t *testing.T) {
 	boom := errors.New("sibling boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	failing := fo.AddPool(OptName("failing"))
-	waiting := fo.AddPool(OptName("waiting"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	failing := fo.AddPool(WithName("failing"))
+	waiting := fo.AddPool(WithName("waiting"))
 
 	waitingStarted := make(chan struct{})
 	sawCancel := make(chan error, 1)
@@ -654,11 +654,11 @@ func TestFanOutSiblingTasksSeeCancellation(t *testing.T) {
 
 // TestFanOutTasksFromForeignBranchPanics: a wiring mistake must be loud; Schedule panics before touching the context.
 func TestFanOutTasksFromForeignBranchPanics(t *testing.T) {
-	c := NewConveyor()
-	fo1 := c.AddFanOut(OptName("fo1"))
-	pool1 := fo1.AddPool(OptName("pool1"))
-	fo2 := c.AddFanOut(OptName("fo2"))
-	_ = fo2.AddPool(OptName("lane2"))
+	c := New()
+	fo1 := c.AddFanOut(WithName("fo1"))
+	pool1 := fo1.AddPool(WithName("pool1"))
+	fo2 := c.AddFanOut(WithName("fo2"))
+	_ = fo2.AddPool(WithName("lane2"))
 
 	err := runOnce(t, c, func(ctx context.Context) error {
 		assertPanics(t, errInvalidUnit, func() {
@@ -674,9 +674,9 @@ func TestFanOutTasksFromForeignBranchPanics(t *testing.T) {
 
 // TestTaskReusePanics: tasks are single-use, even within one Schedule call.
 func TestTaskReusePanics(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	err := runOnce(t, c, func(ctx context.Context) error {
 		task := pool.NewTask(func(context.Context) error { return nil })
@@ -693,9 +693,9 @@ func TestTaskReusePanics(t *testing.T) {
 
 // TestFanOutBranchesAccessor covers the inspection helper.
 func TestFanOutBranchesAccessor(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	a := fo.AddPool(OptName("a"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	a := fo.AddPool(WithName("a"))
 	b := fo.AddPool()
 
 	branches := fo.Branches()

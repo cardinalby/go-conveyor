@@ -4,16 +4,16 @@ Observability is **pull-based**: the conveyor never pushes metrics and takes no 
 with [Stats](https://pkg.go.dev/github.com/cardinalby/go-conveyor#Conveyor.Stats), from any goroutine, at any time.
 Outside a run — before the first one, or after one returns — it reports the zero value.
 
-Name your nodes with `OptName` if you're going to chart them: an unnamed node gets a positional name
+Name your nodes with `WithName` if you're going to chart them: an unnamed node gets a positional name
 (`"stage 2"`, `"fan-out 3.1"`) which moves when you insert something in front of it.
 
 ```go
-c := conveyor.NewConveyor()
-write := c.AddStage(conveyor.OptName("write")).SetQueueSize(2)
-dbs := c.AddFanOut(conveyor.OptName("dbs")).SetLimit(2)
-db1 := dbs.AddPool(conveyor.OptName("db1")).SetLimit(2)
-db2 := dbs.AddPool(conveyor.OptName("db2")).SetLimit(3)
-commit := c.AddStage(conveyor.OptName("commit"))
+c := conveyor.New()
+write := c.AddStage(conveyor.WithName("write")).SetQueueSize(2)
+dbs := c.AddFanOut(conveyor.WithName("dbs")).SetLimit(2)
+db1 := dbs.AddPool(conveyor.WithName("db1")).SetLimit(2)
+db2 := dbs.AddPool(conveyor.WithName("db2")).SetLimit(3)
+commit := c.AddStage(conveyor.WithName("commit"))
 
 // ONE reader, on a timer (see the warning below)
 go func() {

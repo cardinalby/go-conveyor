@@ -11,11 +11,11 @@ import (
 // TestRetainLetsTheItemMoveOnWithoutWaiting: a retained fan-out no longer holds the item back, so it passes the nodes
 // after it while its work is still running, and the task group it was handed is what finally waits.
 func TestFanOutRetainLetsTheItemMoveOnWithoutWaiting(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	mid := c.AddStage(OptName("mid"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	mid := c.AddStage(WithName("mid"))
+	commit := c.AddStage(WithName("commit"))
 
 	pastMid := make(chan struct{})
 	var events recorder
@@ -64,11 +64,11 @@ func TestFanOutRetainLetsTheItemMoveOnWithoutWaiting(t *testing.T) {
 // the item. So the node is still occupied while the item sits in a later stage, and its limit still bounds how many
 // items have work outstanding.
 func TestFanOutRetainedSlotOutlivesTheItemsPresence(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(1)
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
-	final := c.AddStage(OptName("final"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(1)
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
+	final := c.AddStage(WithName("final"))
 
 	release := make(chan struct{})
 	inCommit := make(chan struct{})
@@ -121,10 +121,10 @@ func TestFanOutRetainedSlotOutlivesTheItemsPresence(t *testing.T) {
 func TestFanOutRetainedWorkStillBoundedByTheLimit(t *testing.T) {
 	const items = 8
 	const limit = 2
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(limit)
-	pool := fo.AddPool(OptName("pool")).SetLimit(items) // never the constraint
-	commit := c.AddStage(OptName("commit")).SetQueueSize(3)
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(limit)
+	pool := fo.AddPool(WithName("pool")).SetLimit(items) // never the constraint
+	commit := c.AddStage(WithName("commit")).SetQueueSize(3)
 
 	var wg workGauge
 	runNOK(t, c, items, func(ctx context.Context, no int64) error {
@@ -156,10 +156,10 @@ func TestFanOutRetainedWorkStillBoundedByTheLimit(t *testing.T) {
 // it its failure still reaches the run — delayed, never lost.
 func TestFanOutRetainedErrorNobodyJoinedFailsTheItem(t *testing.T) {
 	boom := errors.New("retained boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	err := runOnce(t, c, func(ctx context.Context) error {
 		if err := fo.MoveTo(ctx); err != nil {
@@ -180,10 +180,10 @@ func TestFanOutRetainedErrorNobodyJoinedFailsTheItem(t *testing.T) {
 // nothing about a task group settling depends on Retain ever being called (see run.joinPending, which waits for it just
 // the same). Retaining such a fan-out must still succeed, handing back a task group that is already finished.
 func TestFanOutRetainAfterWorkAlreadyFinished(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	taskRan := make(chan struct{})
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -225,9 +225,9 @@ func TestFanOutRetainAfterWorkAlreadyFinished(t *testing.T) {
 
 // TestRetainWithoutWorkPanics: there is nothing to hand over if the item never scheduled anything here.
 func TestFanOutRetainWithoutWorkPanics(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	_ = fo.AddPool(OptName("lane"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	_ = fo.AddPool(WithName("lane"))
 
 	panicsInItem(t, c, errNothingToRetain, func(ctx context.Context) {
 		if err := fo.MoveTo(ctx); err != nil {
@@ -240,10 +240,10 @@ func TestFanOutRetainWithoutWorkPanics(t *testing.T) {
 
 // TestRetainNodeNotOccupiedPanics: the slot to hand over must be one the item is holding.
 func TestFanOutRetainNodeNotOccupiedPanics(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
-	fo := c.AddFanOut(OptName("fo"))
-	_ = fo.AddPool(OptName("lane"))
+	c := New()
+	s := c.AddStage(WithName("s"))
+	fo := c.AddFanOut(WithName("fo"))
+	_ = fo.AddPool(WithName("lane"))
 
 	panicsInItem(t, c, errStageNotEntered, func(ctx context.Context) {
 		if err := s.MoveTo(ctx); err != nil {
@@ -256,10 +256,10 @@ func TestFanOutRetainNodeNotOccupiedPanics(t *testing.T) {
 // TestRetainAfterMovingOnPanics: leaving the fan-out joins its work and closes the body, so afterwards there is nothing
 // left to retain — the body state answers, whether or not the item still occupies the node.
 func TestFanOutRetainAfterMovingOnPanics(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	panicsInItem(t, c, errNothingToRetain, func(ctx context.Context) {
 		if err := fo.MoveTo(ctx); err != nil {
@@ -278,11 +278,11 @@ func TestFanOutRetainAfterMovingOnPanics(t *testing.T) {
 // TestRetainOfAnEarlierFanOutPanics: an item that retained at one fan-out still occupies it, so occupancy alone cannot
 // say which work is pending. Retaining there again must not reach for the work of the node the item is in now.
 func TestFanOutRetainOfAnEarlierFanOutPanics(t *testing.T) {
-	c := NewConveyor()
-	first := c.AddFanOut(OptName("first"))
-	firstPool := first.AddPool(OptName("firstPool"))
-	second := c.AddFanOut(OptName("second"))
-	secondPool := second.AddPool(OptName("secondPool"))
+	c := New()
+	first := c.AddFanOut(WithName("first"))
+	firstPool := first.AddPool(WithName("firstPool"))
+	second := c.AddFanOut(WithName("second"))
+	secondPool := second.AddPool(WithName("secondPool"))
 
 	// The work must still be running when the second Retain is attempted, so that first is still occupied — and it is
 	// released from inside the item, since an unlimited shutdown timeout would otherwise wait for it forever.
@@ -329,11 +329,11 @@ func TestFanOutRetainOfAnEarlierFanOutPanics(t *testing.T) {
 // fan-out's slot goes back even though the item is still sitting in a later stage. Held until the work finishes, not
 // until the item does.
 func TestFanOutRetainedSlotFreedWhenTheWorkFinishes(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(1)
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
-	final := c.AddStage(OptName("final"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(1)
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
+	final := c.AddStage(WithName("final"))
 
 	inCommit := make(chan struct{})
 	taskDone := make(chan struct{})
@@ -391,10 +391,10 @@ func TestFanOutRetainedSlotFreedWhenTheWorkFinishes(t *testing.T) {
 // item moved on, the node is free — the diagnostic is still errNothingToRetain, from the body state, not
 // errStageNotEntered from the empty occupancy.
 func TestFanOutRetainTwiceAfterMovingOnPanics(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	panicsInItem(t, c, errNothingToRetain, func(ctx context.Context) {
 		if err := fo.MoveTo(ctx); err != nil {

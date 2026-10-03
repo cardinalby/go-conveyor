@@ -179,11 +179,11 @@ func (r *run) unitHasFreeSlot(j int) bool {
 	return r.occupancy[j].val < int(r.conveyor.units[j].limit.Load())
 }
 
-// hasItemsRoom reports whether the conveyor's items-in-flight cap (SetItemsLimit) allows another root item to be
+// hasItemsRoom reports whether the conveyor's items-in-flight cap (SetItemLimit) allows another root item to be
 // created right now; a limit <= 0 means unlimited. It is the sole gate acquireItem adds on top of the start
-// stage's own admission, so a live SetItemsLimit is observed the same way a live SetLimit is. Caller holds mu.
+// stage's own admission, so a live SetItemLimit is observed the same way a live SetLimit is. Caller holds mu.
 func (r *run) hasItemsRoom() bool {
-	limit := r.conveyor.itemsLimit.Load()
+	limit := r.conveyor.itemLimit.Load()
 	return limit <= 0 || int64(r.inFlight.val) < limit
 }
 
@@ -917,10 +917,10 @@ func (r *run) runRetain(w *taskGroup, fn TaskFunc) {
 // setLimit publishes a unit's new capacity and, if a run is active, wakes it so waiting items re-check admission
 // (a raise) and a lane re-pumps so queued work starts at once. Lowering is picked up lazily by the admission gate
 // (canEnter / pump / the lane worker's pull-next), which stops handing out slots beyond the new limit; work
-// already running keeps its slot and finishes normally.
+// already running keeps its slot and finishes normally. A limit below 1 panics.
 func (u *unit) setLimit(limit int) {
-	if limit <= 0 {
-		limit = 1
+	if limit < 1 {
+		panic(fmt.Errorf("%s.SetLimit(%d): %w: want >= 1", u, limit, errInvalidValue))
 	}
 	u.storeDial(&u.limit, int64(limit), func(r *run) {
 		if u.kind == kindStart && u.branchSeries != nil {
@@ -971,10 +971,10 @@ func (u *unit) storeDial(dial *atomic.Int64, v int64, then func(r *run)) {
 // Both directions are admission-only, exactly as for setLimit: a raise admits waiting items at once — including
 // items already blocked at the node's door, which step aside into the new room as soon as this broadcast wakes them
 // (see enterUnit) — while a lower (including to 0) leaves the items already in the waiting room alone and stops
-// admitting new ones until occupancy has fallen below the new size.
+// admitting new ones until occupancy has fallen below the new size. A negative size panics.
 func (u *unit) setQueueSize(size int) {
 	if size < 0 {
-		size = 0
+		panic(fmt.Errorf("%s.SetQueueSize(%d): %w: want >= 0", u, size, errInvalidValue))
 	}
 	u.storeDial(&u.queueSize, int64(size), nil)
 }
@@ -982,11 +982,13 @@ func (u *unit) setQueueSize(size int) {
 // setBackpressure publishes a fan-out's backpressure mode. Like setQueueSize it changes no topology, so it is safe on
 // a live conveyor, and it is admission-only: it never widens or narrows the entry predicate (nothing waiting needs a
 // wake-up), and it decides only whether the items admitted from then on open an upstream hold. Items already inside
-// were admitted under the mode of their time and existing holds end on their own (see upstreamHold). Values outside
-// the known modes fall back to the default, Balanced.
+// were admitted under the mode of their time and existing holds end on their own (see upstreamHold). An unknown mode
+// panics.
 func (u *unit) setBackpressure(mode FanOutBackpressure) {
-	if mode != BackpressureBuffered && mode != BackpressureStrict {
-		mode = BackpressureBalanced
+	switch mode {
+	case BackpressureBalanced, BackpressureBuffered, BackpressureStrict:
+	default:
+		panic(fmt.Errorf("%s.SetBackpressure(%v): %w: unknown mode", u, mode, errInvalidValue))
 	}
 	u.storeDial(&u.backpressure, int64(mode), nil)
 }

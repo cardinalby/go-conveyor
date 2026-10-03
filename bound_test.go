@@ -15,11 +15,11 @@ func TestFanOutLimitBoundsOutstandingWork(t *testing.T) {
 	for _, limit := range []int{1, 3} {
 		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
 			const items = 8
-			c := NewConveyor()
-			dbs := c.AddFanOut(OptName("dbs")).SetLimit(limit)
-			slow := dbs.AddPool(OptName("slow")).SetLimit(items)
-			fast := dbs.AddPool(OptName("fast")).SetLimit(items)
-			commit := c.AddStage(OptName("commit")).SetQueueSize(3)
+			c := New()
+			dbs := c.AddFanOut(WithName("dbs")).SetLimit(limit)
+			slow := dbs.AddPool(WithName("slow")).SetLimit(items)
+			fast := dbs.AddPool(WithName("fast")).SetLimit(items)
+			commit := c.AddStage(WithName("commit")).SetQueueSize(3)
 
 			var wg workGauge
 			runNOK(t, c, items, func(ctx context.Context, no int64) error {

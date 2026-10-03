@@ -572,7 +572,7 @@ the branch already released.
 **Shutdown** has two triggers — the `Run` context being canceled, or an item error. Both go through
 `markShutdownLocked` (under `mu`): it sets `stopCreating`, records the first `trigger` with
 `shutdownErr = &shutdownError{cause: trigger}`, cancels `run.shutdownCtx` with it, and closes `shutdownCh`.
-`watchShutdown` then asks `conveyor.drainContext` (set by `OptDrainContextFunc`, or by `OptDrainTimeout(d)` as a
+`watchShutdown` then asks `conveyor.drainContext` (set by `WithDrainContext`, or by `WithDrainTimeout(d)` as a
 deadline of `shutdownAt` + d, so a late watcher does not extend it) for the context that bounds the drain,
 passing the shutdown cause, and cancels the in-flight items once that context is done — no func, or a
 nil context from it, leaves them to finish. `drainErr` is set to that context's cause only if items are still in
@@ -620,7 +620,8 @@ static wiring or a dynamic per-item contract violation is irrelevant.
 
 - **Panic**, with unexported sentinels (`errInvalidUnit`, `errWrongScope`, `errCannotMove`, `errConveyorRunning`,
   `errConveyorFinalized`, `errStageNotEntered`, `errNothingToRetain`, `errBodyClosed`, `errWorkRetained`,
-  `errWrongEnterOrder`, `errNodeAlreadyEntered`, `errNilTaskFunc`, `errTaskReused`, `errForeignTaskGroup`): builder calls
+  `errWrongEnterOrder`, `errNodeAlreadyEntered`, `errInvalidValue`, `errNilTaskFunc`, `errTaskReused`,
+  `errForeignTaskGroup`): builder calls
   on a running or finalized conveyor; a handle from another conveyor, or one used with a context from another
   conveyor; a node outside the item's series; moving backward or re-entering a node; `Retain` / `RetainFor` / `Wait` on a node
   the item is not in, `Retain` with a context that carries no item, or `Schedule` for a fan-out the item has passed; `Schedule` / `Wait` through the item's
@@ -640,7 +641,9 @@ fan-out), or pool work's whose task group has finished, including one decoupled 
 `context.WithoutCancel` — is
 benign: a context outliving its owner, like a closed-channel receive. A **foreign** context is a mistake, but a
 cleanly declinable one, not a memory-unsafe wiring bug like a foreign *handle*. A nil callback makes the
-constructors panic.
+constructors and `RetainFor` panic (`RetainFor` checks it first, so the panic is at the call site, never in the task
+goroutine). An out-of-range value panics the setters (`SetLimit` < 1, `SetQueueSize` / `SetItemLimit` < 0, an
+unknown backpressure mode) and `NewTasks` (count < 0) with `errInvalidValue`.
 
 ## 11. Dynamic capacity
 
@@ -653,7 +656,8 @@ from any goroutine at any time, and both are **admission-only, never preemptive*
   completions.
 
 `unitHasFreeSlot` is the single place occupancy is compared against a limit, so a live change is observed uniformly
-by `canEnter`, `pump` and the branch worker's pull-next. A limit is clamped to `>= 1`, a queue size to `>= 0`.
+by `canEnter`, `pump` and the branch worker's pull-next. A limit below 1 or a negative queue size panics before the
+store.
 
 `SetBackpressure` is the third dial, on a fan-out's node unit (`unit.backpressure`), and follows the same shape
 (`setBackpressure` → `storeDial`: store under the live run's `mu`, broadcast). All three dials are stored under `mu`

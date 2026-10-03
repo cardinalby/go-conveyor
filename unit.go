@@ -125,26 +125,28 @@ type Unit interface {
 	unit() *unit
 }
 
-// AnyUnitOption configures a node at creation (AddStage, AddFanOut, AddPool, AddLane). OptName is the only one;
+// NodeOption configures a node at creation (AddStage, AddFanOut, AddPool, AddLane). WithName is the only one;
 // capacity is set separately with SetLimit and SetQueueSize.
-type AnyUnitOption interface {
-	applyToAnyUnitCfg(*anyUnitConfig)
+type NodeOption interface {
+	applyToNodeCfg(*nodeConfig)
 }
 
-type anyUnitConfig struct {
+type nodeConfig struct {
 	name string
 }
 
-func newAnyUnitConfig(opts []AnyUnitOption) anyUnitConfig {
-	var cfg anyUnitConfig
+func newNodeConfig(opts []NodeOption) nodeConfig {
+	var cfg nodeConfig
 	for _, opt := range opts {
-		opt.applyToAnyUnitCfg(&cfg)
+		opt.applyToNodeCfg(&cfg)
 	}
 	return cfg
 }
 
-// OptName names a node, so it shows up by that name in Stats and in error messages. An unnamed node falls back to
+// WithName names a node, so it shows up by that name in Stats and in error messages. An unnamed node falls back to
 // a positional name that shifts when the topology changes around it.
-type OptName string
+func WithName(name string) NodeOption { return nameOption(name) }
 
-func (o OptName) applyToAnyUnitCfg(c *anyUnitConfig) { c.name = string(o) }
+type nameOption string
+
+func (o nameOption) applyToNodeCfg(c *nodeConfig) { c.name = string(o) }

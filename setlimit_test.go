@@ -12,8 +12,8 @@ import (
 // TestSetLimitRaiseStageAdmitsWaitingItems: raising a running stage's limit admits the items already waiting at its
 // door immediately — the resize itself is the wake-up, no other event is needed.
 func TestSetLimitRaiseStageAdmitsWaitingItems(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 
 	g := &gauge{}
 	release := make(chan struct{})
@@ -53,8 +53,8 @@ func TestSetLimitRaiseStageAdmitsWaitingItems(t *testing.T) {
 // TestSetLimitLowerStageDoesNotEvict: lowering a running stage's limit never evicts the items inside it — the stage
 // shrinks as they leave, admitting nobody new until occupancy has dropped below the new limit.
 func TestSetLimitLowerStageDoesNotEvict(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetLimit(3)
+	c := New()
+	s := c.AddStage(WithName("s")).SetLimit(3)
 
 	holds := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{}), 3: make(chan struct{})}
 	var entered, left atomic.Int64
@@ -110,9 +110,9 @@ func TestSetLimitLowerStageDoesNotEvict(t *testing.T) {
 // TestSetLimitRaisePoolStartsQueuedWork: raising a running lane's limit starts the work already queued on it at
 // once.
 func TestSetLimitRaisePoolStartsQueuedWork(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")) // one task at a time
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")) // one task at a time
 
 	release := make(chan struct{})
 	g := &gauge{}
@@ -156,9 +156,9 @@ func TestSetLimitRaisePoolStartsQueuedWork(t *testing.T) {
 // running; the pool converges to the new limit as they complete, and far more tasks than its capacity still drain.
 func TestSetLimitLowerPoolDrainsOversubscribed(t *testing.T) {
 	const total = 40
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")).SetLimit(4)
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")).SetLimit(4)
 
 	gate := make(chan struct{}) // holds the first four tasks while the pool is shrunk
 	later := &gauge{}           // concurrency of the tasks started after the lower
@@ -213,10 +213,10 @@ func TestSetLimitLowerPoolDrainsOversubscribed(t *testing.T) {
 // parked at the next stage's door still occupy the node, so its occupancy grows to the new limit. Each item schedules
 // right after entering, which is what opens the door to the item behind; the raise alone admits nobody.
 func TestSetLimitRaiseFanOutAdmitsMoreItems(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	park := make(chan struct{})
 	var first atomic.Bool
@@ -264,10 +264,10 @@ func TestSetLimitRaiseFanOutAdmitsMoreItems(t *testing.T) {
 // start and 5 items exist. Phase 2 (limit 1): item 5 parks in commit and only item 6 fits inside the node, so
 // exactly 7 items exist.
 func TestSetLimitLowerFanOutDoesNotEvict(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(3)
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(3)
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	releaseFirst := make(chan struct{})
 	releaseFifth := make(chan struct{})
@@ -336,8 +336,8 @@ func TestSetLimitLowerFanOutDoesNotEvict(t *testing.T) {
 // Phase 1 (queue 3): item 1 holds the stage, items 2, 3, 4 wait in the queue and item 5 waits at the start, so 5
 // items exist. Phase 2 (queue 1): item 5 holds the stage and only item 6 fits in the queue, so exactly 7 exist.
 func TestSetQueueResizeIsAdmissionOnly(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetQueueSize(3)
+	c := New()
+	s := c.AddStage(WithName("s")).SetQueueSize(3)
 
 	queueOcc := func() int { return queueOccupancy(c, s) }
 
@@ -399,10 +399,10 @@ func TestSetQueueResizeIsAdmissionOnly(t *testing.T) {
 // TestSetLimitConcurrentWhileRunning: SetLimit is safe from any goroutine at any time (run with -race), and the
 // limit it leaves behind is one of the values that were set.
 func TestSetLimitConcurrentWhileRunning(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetLimit(2)
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	pool := fo.AddPool(OptName("pool")).SetLimit(2)
+	c := New()
+	s := c.AddStage(WithName("s")).SetLimit(2)
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	pool := fo.AddPool(WithName("pool")).SetLimit(2)
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -458,23 +458,13 @@ func TestSetLimitConcurrentWhileRunning(t *testing.T) {
 	}
 }
 
-// TestLimitsAreAlwaysAtLeastOne: a non-positive limit is clamped to 1 on every kind of node, and a pool clamped
-// that way still drains all the work it was given.
-func TestLimitsAreAlwaysAtLeastOne(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetLimit(0)
-	fo := c.AddFanOut(OptName("fo")).SetLimit(-1)
-	pool := fo.AddPool(OptName("pool")).SetLimit(-5)
-
-	if got := s.Limit(); got != 1 {
-		t.Fatalf("stage SetLimit(0): Limit = %d, want the clamp to 1", got)
-	}
-	if got := fo.Limit(); got != 1 {
-		t.Fatalf("fan-out SetLimit(-1): Limit = %d, want the clamp to 1", got)
-	}
-	if got := pool.Limit(); got != 1 {
-		t.Fatalf("pool SetLimit(-5): Limit = %d, want the clamp to 1", got)
-	}
+// TestPoolLoweredToOneDrainsQueuedWork: a pool lowered to the minimum limit, 1, while its work is still queued
+// drains all the work it was given.
+func TestPoolLoweredToOneDrainsQueuedWork(t *testing.T) {
+	c := New()
+	s := c.AddStage(WithName("s"))
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")).SetLimit(4)
 
 	const total = 12
 	var done atomic.Int64
@@ -493,7 +483,7 @@ func TestLimitsAreAlwaysAtLeastOne(t *testing.T) {
 			return err
 		}
 		w := fo.Retain(ctx)
-		pool.SetLimit(0) // clamped to 1 while the pool's work is still queued
+		pool.SetLimit(1) // while the pool's work is still queued
 		<-w.Finished()
 		return groupErr(w)
 	})
@@ -501,9 +491,9 @@ func TestLimitsAreAlwaysAtLeastOne(t *testing.T) {
 		t.Fatalf("run failed: %v", err)
 	}
 	if got := pool.Limit(); got != 1 {
-		t.Fatalf("pool Limit after SetLimit(0) = %d, want 1", got)
+		t.Fatalf("pool Limit after SetLimit(1) = %d, want 1", got)
 	}
 	if got := done.Load(); got != total {
-		t.Fatalf("%d of %d tasks ran: a clamped pool stranded queued work", got, total)
+		t.Fatalf("%d of %d tasks ran: the lowered pool stranded queued work", got, total)
 	}
 }

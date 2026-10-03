@@ -30,6 +30,19 @@ var (
 // Items see a ShutdownError too, as the cancellation cause of their context when the conveyor aborts them. There,
 // DrainError is always nil: it describes the whole shutdown and is known only when Run returns.
 //
+// To tell which event began the shutdown, use a type switch on the error Run returns:
+//
+//	switch e := err.(type) {
+//	case conveyor.ItemError: // an item failed first
+//		log.Printf("item failed at %s: %v", e.Unit(), e.Unwrap())
+//	case conveyor.ShutdownError: // the Run context was canceled first
+//		log.Printf("stopped: %v", e.Unwrap())
+//	}
+//
+// errors.As and errors.Is search the whole chain: use them to inspect causes, not to tell the kind. For example, the
+// context cause of an item aborted because an earlier item failed is a ShutdownError that wraps that ItemError, so
+// errors.As(cause, &itemErr) is true although this item did not fail.
+//
 // The interface is sealed: only the conveyor creates these errors.
 type RunError interface {
 	error
@@ -38,7 +51,7 @@ type RunError interface {
 	Unwrap() error
 	// DrainError is nil if the items in flight when the shutdown began all finished without failing. Else it is
 	// the first problem of the drain: an ItemError, if another item failed first, or the cause of the drain
-	// context (see OptDrainTimeout), e.g. context.DeadlineExceeded, if the drain timed out first and the remaining
+	// context (see WithDrainTimeout), e.g. context.DeadlineExceeded, if the drain timed out first and the remaining
 	// items were canceled. It never repeats the trigger. Items aborted by the conveyor are not failures (see
 	// Conveyor.Run).
 	DrainError() error
@@ -52,6 +65,8 @@ type RunError interface {
 // context was canceled, an earlier item failed (Unwrap gives its ItemError) or was aborted, or the drain timed
 // out. And it is the cause of an UntilShutdown context once shutdown begins. Recover it with errors.As.
 // errors.Is(err, context.Canceled) reaches the wrapped trigger.
+//
+// Its Error text is "conveyor is shutting down: <cause>".
 type ShutdownError interface {
 	RunError
 	sealedShutdownError()
@@ -60,6 +75,9 @@ type ShutdownError interface {
 // ItemError is returned by Run when an item failed and the Run context was not canceled before. Its Unwrap gives
 // the item's own error, so errors.Is and errors.As work with it. The item's error is the one the ItemProcessor
 // returned, or a TaskError of tasks it never joined.
+//
+// Its Error text names the node: "item failed at write: db timeout". When the item's error is a TaskError of that
+// same node, the node is not repeated: "item failed: write task: db timeout".
 type ItemError interface {
 	RunError
 	// Unit is the node the item was in when it failed. For an item waiting in the queue in front of a node, it is
@@ -129,7 +147,15 @@ func (e *itemError) sealedItemError()  {}
 func (e *itemError) Unit() Unit        { return e.unit }
 func (e *itemError) Unwrap() error     { return e.err }
 func (e *itemError) DrainError() error { return e.drain }
-func (e *itemError) Error() string     { return e.err.Error() + runErrorSuffix(e) }
+
+func (e *itemError) Error() string {
+	// A TaskError of the same unit already names it ("write task: ...").
+	var te TaskError
+	if errors.As(e.err, &te) && te.Unit() != nil && e.unit != nil && te.Unit().unit() == e.unit.unit() {
+		return "item failed: " + e.err.Error() + runErrorSuffix(e)
+	}
+	return fmt.Sprintf("item failed at %s: %v", e.unit, e.err) + runErrorSuffix(e)
+}
 
 // runErrorSuffix tells in the error text that the shutdown had more to report, so it shows up in logs.
 func runErrorSuffix(e RunError) string {
@@ -202,7 +228,11 @@ var (
 	// are entered once per item).
 	errNodeAlreadyEntered = errors.New("nodes are entered once per item")
 
-	// errNilTaskFunc flags a nil callback. The constructors (NewTask, NewTasks) panic with it.
+	// errInvalidValue is panicked with by the setters and constructors given a value outside their range: SetLimit
+	// below 1, SetQueueSize or SetItemLimit below 0, an unknown backpressure mode, NewTasks with a negative count.
+	errInvalidValue = errors.New("value out of range")
+
+	// errNilTaskFunc flags a nil callback. The constructors (NewTask, NewTasks) and RetainFor panic with it.
 	errNilTaskFunc = errors.New("nil callback")
 
 	// errTaskReused is panicked with by FanOut.Schedule when a Task is submitted twice (tasks are lazy, stateful and

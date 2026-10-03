@@ -21,9 +21,9 @@ import (
 	"time"
 )
 
-// Conveyor moves items through an ordered series of nodes, preserving their relative order. Create one with
-// NewConveyor, build the nodes, then call Run with an ItemProcessor. The conveyor runs one ItemProcessor per item,
-// each on its own goroutine, and handles ordering, capacity, and backpressure between nodes.
+// Conveyor moves items through an ordered series of nodes, preserving their relative order. Create one with New,
+// build the nodes, then call Run with an ItemProcessor. The conveyor runs one ItemProcessor per item, each on its own
+// goroutine, and handles ordering, capacity, and backpressure between nodes.
 //
 // A node is either a Stage (AddStage), whose code runs inline in the ItemProcessor, or a FanOut (AddFanOut), where
 // the item schedules work onto branches (Pool or Lane) that run it in parallel. An item advances between nodes with
@@ -33,17 +33,17 @@ import (
 // TaskGroup.Wait, or select on Finished. Wait returns the work's first error as a TaskError.
 type Conveyor interface {
 	// AddStage adds a Stage to the end of the conveyor, admitting one item at a time by default. Chain SetLimit and
-	// SetQueueSize to adjust its capacity, and pass OptName to name it.
+	// SetQueueSize to adjust its capacity, and pass WithName to name it.
 	//
 	// It panics if the conveyor is running or has already run.
-	AddStage(opts ...AnyUnitOption) Stage
+	AddStage(opts ...NodeOption) Stage
 
 	// AddFanOut adds a FanOut to the end of the conveyor: a node whose work runs in parallel on branches added with
 	// AddPool or AddLane. It admits one item at a time by default; chain SetLimit and SetQueueSize to adjust its
-	// capacity, and pass OptName to name it.
+	// capacity, and pass WithName to name it.
 	//
 	// It panics if the conveyor is running or has already run.
-	AddFanOut(opts ...AnyUnitOption) FanOut
+	AddFanOut(opts ...NodeOption) FanOut
 
 	// Run starts the conveyor, creating one item per itemProcessor invocation until ctx is canceled or an item
 	// fails. It blocks until every in-flight item has finished, then returns what began the shutdown, the first
@@ -52,8 +52,11 @@ type Conveyor interface {
 	//   - a ShutdownError, if ctx was canceled first. Its Unwrap is ctx's cancellation cause.
 	//   - nil, if neither happened.
 	//
+	// Tell them apart with a type switch on the returned error. errors.As searches the whole chain, and is for
+	// inspecting causes (see RunError).
+	//
 	// Both are RunErrors. RunError.DrainError tells how the items in flight finished: the first failure among them,
-	// or the drain timeout (OptDrainTimeout). To see every failure, log it where it happens (the
+	// or the drain timeout (WithDrainTimeout). To see every failure, log it where it happens (the
 	// ItemProcessor, a task, a RetainFor task). Items aborted by the conveyor are not failures and are not
 	// reported. ErrConveyorAlreadyRunning is returned as is.
 	//
@@ -71,19 +74,19 @@ type Conveyor interface {
 	// after it returns, but a concurrent second call returns ErrConveyorAlreadyRunning.
 	Run(ctx context.Context, itemProcessor ItemProcessor) error
 
-	// SetItemsLimit caps how many items may be in flight across the whole conveyor at once. One item is one
-	// ItemProcessor call, from creation to completion, so this also bounds the number of worker goroutines. A
-	// limit <= 0 means unlimited, the default. It returns the conveyor for chaining.
+	// SetItemLimit caps how many items may be in flight across the whole conveyor at once. One item is one
+	// ItemProcessor call, from creation to completion, so this also bounds the number of worker goroutines. 0
+	// means unlimited, the default; a negative n panics. It returns the conveyor for chaining.
 	//
 	// It is a global bound on top of the nodes' own limits and does not change any of them.
 	//
 	// Safe to call at any time, from any goroutine, including on a running conveyor. Lowering it never evicts an item
 	// in flight; it only stops new items from being created until the count has fallen below the new limit.
-	SetItemsLimit(n int) Conveyor
+	SetItemLimit(n int) Conveyor
 
-	// ItemsLimit returns the current cap on items in flight across the whole conveyor, or 0 if unlimited (the
+	// ItemLimit returns the current cap on items in flight across the whole conveyor, or 0 if unlimited (the
 	// default).
-	ItemsLimit() int
+	ItemLimit() int
 
 	// StartingStage returns the implicit stage every item starts in. The ItemProcessor code before the item's first
 	// MoveTo runs in it, one item at a time, and the next item is created only when it is free. It has no MoveTo
@@ -111,7 +114,7 @@ type conveyor struct {
 	*series
 
 	// drainContext is asked for the context that bounds the drain, once a shutdown begins at start (see
-	// OptDrainTimeout, OptDrainContextFunc). Nil means in-flight items are left to finish on their own.
+	// WithDrainTimeout, WithDrainContext). Nil means in-flight items are left to finish on their own.
 	drainContext func(start time.Time, cause error) (context.Context, context.CancelFunc)
 
 	// units is every capacity unit, in creation order; index 0 is the implicit start stage. Immutable after the
@@ -133,11 +136,11 @@ type conveyor struct {
 	// concurrent readers never see a torn value.
 	currentRun atomic.Pointer[run]
 
-	// itemsLimit caps how many items may be in flight across the whole conveyor at once — the root items a
+	// itemLimit caps how many items may be in flight across the whole conveyor at once — the root items a
 	// worker drives from creation to completion (see run.worker), so this is also a cap on live workers. 0 means
-	// unlimited, the default. Atomic because SetItemsLimit may change it from any goroutine while a run is
+	// unlimited, the default. Atomic because SetItemLimit may change it from any goroutine while a run is
 	// active; every read otherwise happens under run.mu (see run.hasItemsRoom).
-	itemsLimit atomic.Int64
+	itemLimit atomic.Int64
 
 	// assignHook, when set by an in-package test before Run, observes every hand-out of a branch slot (see
 	// run.grabNext). Nil in production; read without a lock, so it must be set before Run and never changed during
@@ -149,19 +152,19 @@ type conveyor struct {
 	watchHook func(delta int)
 }
 
-// Option configures a Conveyor at creation. See NewConveyor, OptDrainTimeout and OptDrainContextFunc.
+// Option configures a Conveyor at creation. See New, WithDrainTimeout and WithDrainContext.
 type Option func(c *conveyor)
 
 // DrainContextFunc produces the context that bounds the drain of a shutdown. cause is the first item error,
-// or the Run context's cancellation cause, whichever began the shutdown. See OptDrainContextFunc.
+// or the Run context's cancellation cause, whichever began the shutdown. See WithDrainContext.
 type DrainContextFunc func(cause error) (context.Context, context.CancelFunc)
 
-// OptDrainTimeout lets in-flight items run for d after a shutdown begins (the Run context is canceled, or an
+// WithDrainTimeout lets in-flight items run for d after a shutdown begins (the Run context is canceled, or an
 // ItemProcessor fails), then cancels their contexts. d <= 0 cancels them at once.
 //
-// Without this option or OptDrainContextFunc, items are left to finish on their own. Of the two options, the last
+// Without this option or WithDrainContext, items are left to finish on their own. Of the two options, the last
 // one wins.
-func OptDrainTimeout(d time.Duration) Option {
+func WithDrainTimeout(d time.Duration) Option {
 	return func(c *conveyor) {
 		// Counted from the moment shutdown begins, not from when the watcher gets to it.
 		c.drainContext = func(start time.Time, _ error) (context.Context, context.CancelFunc) {
@@ -170,7 +173,7 @@ func OptDrainTimeout(d time.Duration) Option {
 	}
 }
 
-// OptDrainContextFunc bounds how long items may keep running after a shutdown begins (the Run context is canceled,
+// WithDrainContext bounds how long items may keep running after a shutdown begins (the Run context is canceled,
 // or an ItemProcessor fails). Once shutdown starts, f is asked for a context; when that context is done, every
 // in-flight item's context is canceled. f is called once per shutdown, before Run returns, even if all items have
 // finished by then.
@@ -179,9 +182,9 @@ func OptDrainTimeout(d time.Duration) Option {
 //	return alreadyDoneCtx, nil                                       // cancel in-flight items at once
 //	return nil, nil                                                  // no limit: leave them to finish
 //
-// Without this option or OptDrainTimeout, items are left to finish on their own. Of the two options, the last one
+// Without this option or WithDrainTimeout, items are left to finish on their own. Of the two options, the last one
 // wins.
-func OptDrainContextFunc(f DrainContextFunc) Option {
+func WithDrainContext(f DrainContextFunc) Option {
 	return func(c *conveyor) {
 		if f == nil {
 			c.drainContext = nil
@@ -191,8 +194,8 @@ func OptDrainContextFunc(f DrainContextFunc) Option {
 	}
 }
 
-// NewConveyor creates a conveyor with no nodes: add them with AddStage and AddFanOut, then call Run.
-func NewConveyor(options ...Option) Conveyor {
+// New creates a conveyor with no nodes: add them with AddStage and AddFanOut, then call Run.
+func New(options ...Option) Conveyor {
 	c := &conveyor{}
 	root := &series{conveyor: c, id: 0}
 	c.series = root
@@ -208,12 +211,12 @@ func NewConveyor(options ...Option) Conveyor {
 	return c
 }
 
-// SetItemsLimit caps the items in flight across the whole conveyor (see the Conveyor interface).
-func (c *conveyor) SetItemsLimit(n int) Conveyor {
+// SetItemLimit caps the items in flight across the whole conveyor (see the Conveyor interface).
+func (c *conveyor) SetItemLimit(n int) Conveyor {
 	if n < 0 {
-		n = 0
+		panic(fmt.Errorf("SetItemLimit(%d): %w: want >= 0", n, errInvalidValue))
 	}
-	c.itemsLimit.Store(int64(n))
+	c.itemLimit.Store(int64(n))
 	if r := c.currentRun.Load(); r != nil {
 		r.mu.Lock()
 		r.cond.Broadcast() // wake the standby worker so a raise is picked up at once
@@ -222,7 +225,7 @@ func (c *conveyor) SetItemsLimit(n int) Conveyor {
 	return c
 }
 
-func (c *conveyor) ItemsLimit() int { return int(c.itemsLimit.Load()) }
+func (c *conveyor) ItemLimit() int { return int(c.itemLimit.Load()) }
 
 // startOwner names the implicit start stage in Stats and error messages.
 type startOwner struct{}

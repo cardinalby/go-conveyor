@@ -24,16 +24,16 @@ type FanOut interface {
 	Unit
 
 	// AddPool adds a Pool branch: a single step where a scheduled task runs to completion. Chain SetLimit to run
-	// several tasks at once, and pass OptName to name it.
+	// several tasks at once, and pass WithName to name it.
 	//
 	// It panics if the conveyor is running or has already run.
-	AddPool(opts ...AnyUnitOption) Pool
+	AddPool(opts ...NodeOption) Pool
 
 	// AddLane adds a Lane branch: a pipeline of its own interior nodes (AddStage, AddFanOut) through which each
-	// piece of scheduled work travels as a child item. Pass OptName to name it.
+	// piece of scheduled work travels as a child item. Pass WithName to name it.
 	//
 	// It panics if the conveyor is running or has already run.
-	AddLane(opts ...AnyUnitOption) Lane
+	AddLane(opts ...NodeOption) Lane
 
 	// MoveTo advances the item into this fan-out. It blocks until it is the item's turn and an item slot (SetLimit) is
 	// free. Pool capacity does not gate entry.
@@ -125,16 +125,16 @@ type FanOut interface {
 	// retained, or the body was closed by leaving).
 	Retain(ctx context.Context) TaskGroup
 
-	// SetLimit sets how many items may be inside this fan-out at once (default 1; a limit <= 0 means 1), and returns
-	// the fan-out for chaining. An item counts from entering until it moves into the next node or its waiting room;
-	// after Retain it counts until the retained work is done and the item has moved on. The limit does not let the item
-	// behind enter before this item's initial batch is known.
+	// SetLimit sets how many items may be inside this fan-out at once (default 1), and returns the fan-out for
+	// chaining. An item counts from entering until it moves into the next node or its waiting room; after Retain it
+	// counts until the retained work is done and the item has moved on. The limit does not let the item behind enter
+	// before this item's initial batch is known. A limit below 1 panics.
 	//
 	// Safe to call at any time, from any goroutine, including on a running conveyor.
 	SetLimit(limit int) FanOut
 
-	// SetQueueSize gives this fan-out a waiting room of size items in front of it (a size <= 0 means none), and
-	// returns the fan-out for chaining.
+	// SetQueueSize gives this fan-out a waiting room of size items in front of it (0, the default, means none), and
+	// returns the fan-out for chaining. A negative size panics.
 	//
 	// Safe to call at any time, from any goroutine, including on a running conveyor.
 	SetQueueSize(size int) FanOut
@@ -147,6 +147,7 @@ type FanOut interface {
 
 	// SetBackpressure selects when an item entering this fan-out releases the slot it held before: the previous node's
 	// slot, or its place in this fan-out's waiting room. The default is BackpressureBalanced. See FanOutBackpressure.
+	// A mode other than the three Backpressure constants panics.
 	//
 	// Safe to call at any time, from any goroutine, including on a running conveyor. It applies to items entering after
 	// the call; items already inside keep the mode they entered with.
@@ -208,20 +209,20 @@ func (m FanOutBackpressure) String() string {
 // fanOut is the FanOut implementation: one node of a series, owning one node unit plus its branches.
 type fanOut struct {
 	series   *series // the series this node belongs to
-	name     string  // optional user-given name (OptName); empty -> positional in String
+	name     string  // optional user-given name (WithName); empty -> positional in String
 	ord      int     // 1-based position among its series' nodes, for the positional name
 	node     *unit   // this node's capacity unit (items inside), plus node.queue if a queue was added
 	branches []*branch
 }
 
-func (f *fanOut) AddPool(opts ...AnyUnitOption) Pool {
+func (f *fanOut) AddPool(opts ...NodeOption) Pool {
 	b := f.addBranch(opts)
 	h := &poolHandle{b: b}
 	b.handle = h
 	return h
 }
 
-func (f *fanOut) AddLane(opts ...AnyUnitOption) Lane {
+func (f *fanOut) AddLane(opts ...NodeOption) Lane {
 	b := f.addBranch(opts)
 	h := &laneHandle{b: b}
 	b.handle = h
@@ -231,8 +232,8 @@ func (f *fanOut) AddLane(opts ...AnyUnitOption) Lane {
 // addBranch builds a branch. It is the whole of both constructors: the kinds differ only in the handle handed back,
 // which is what decides whether nodes can be added to the series every branch gets. That series is what a freed slot
 // pumps, and what a child item travels if there is anything there to travel (see unit.branchSeries, run.startWork).
-func (f *fanOut) addBranch(opts []AnyUnitOption) *branch {
-	cfg := newAnyUnitConfig(opts)
+func (f *fanOut) addBranch(opts []NodeOption) *branch {
+	cfg := newNodeConfig(opts)
 	c := f.series.conveyor
 	b := &branch{fanout: f, name: cfg.name, no: len(f.branches) + 1}
 	u := c.newUnit(b, kindStart)
@@ -456,7 +457,7 @@ func (r *run) addToBody(it *item, w *taskGroup, f *fanOut, tasks []Task, root bo
 
 // claimTasks claims the sources of tasks: from here they belong to the caller's item, whether they are queued now or
 // kept dormant. A resubmitted Task (or one listed twice) panics here, before any task of the call is claimed, so a
-// recovered misuse leaves the other tasks usable. A statically-empty task (nil source, e.g. NewTasks with count <= 0)
+// recovered misuse leaves the other tasks usable. A statically-empty task (nil source, e.g. NewTasks with count 0)
 // has nothing to claim.
 func claimTasks(tasks []Task) {
 	seen := make(map[taskSource]struct{}, len(tasks))
@@ -487,7 +488,7 @@ func (r *run) submitClaimed(it *item, w *taskGroup, f *fanOut, tasks []Task, roo
 	touched := make([]int, 0, len(f.branches))
 	for _, t := range tasks {
 		if t.src == nil {
-			continue // statically-empty task (e.g. NewTasks with count <= 0)
+			continue // statically-empty task (e.g. NewTasks with count 0)
 		}
 		branchIdx := t.branch.start.index
 		col := byBranch[branchIdx]

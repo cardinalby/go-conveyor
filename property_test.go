@@ -228,12 +228,12 @@ func (top *propTopology) newGauge(name string, limit int) *propGauge {
 // buildPropTopology draws a small random topology: 2-6 root nodes (stages with optional queues, or fan-outs with
 // 1-3 lanes, some of which have interior nodes of their own), always ending in an exclusive commit stage.
 func buildPropTopology(rnd *rand.Rand, seed int64) *propTopology {
-	top := &propTopology{c: NewConveyor(), seed: seed}
+	top := &propTopology{c: New(), seed: seed}
 	for i, n := 0, 2+rnd.Intn(5); i < n; i++ {
 		if rnd.Intn(2) == 0 {
 			name := fmt.Sprintf("stage%d", i)
 			limit := 1 + rnd.Intn(3)
-			st := top.c.AddStage(OptName(name)).SetLimit(limit)
+			st := top.c.AddStage(WithName(name)).SetLimit(limit)
 			if rnd.Intn(3) == 0 {
 				st.SetQueueSize(1 + rnd.Intn(3))
 			}
@@ -247,7 +247,7 @@ func buildPropTopology(rnd *rand.Rand, seed int64) *propTopology {
 			continue
 		}
 		name := fmt.Sprintf("fo%d", i)
-		fo := top.c.AddFanOut(OptName(name)).SetLimit(1 + rnd.Intn(3))
+		fo := top.c.AddFanOut(WithName(name)).SetLimit(1 + rnd.Intn(3))
 		if rnd.Intn(4) == 0 {
 			fo.SetQueueSize(1 + rnd.Intn(3))
 		}
@@ -264,7 +264,7 @@ func buildPropTopology(rnd *rand.Rand, seed int64) *propTopology {
 		}
 		top.nodes = append(top.nodes, propNode{fanOut: pf})
 	}
-	top.commit = top.c.AddStage(OptName("commit")) // exclusive: the order-preserving end of the flow
+	top.commit = top.c.AddStage(WithName("commit")) // exclusive: the order-preserving end of the flow
 	top.commitG = top.newGauge("commit", 1)
 	implOf(top.c).assignHook = top.onAssign
 	return top
@@ -288,7 +288,7 @@ func (top *propTopology) buildLane(rnd *rand.Rand, fo FanOut, name string, inter
 
 	if !pl.travels {
 		limit := 1 + rnd.Intn(3)
-		p := fo.AddPool(OptName(name)).SetLimit(limit)
+		p := fo.AddPool(WithName(name)).SetLimit(limit)
 		pl.branch, pl.g = p, top.newGauge(name, limit)
 		top.jitters = append(top.jitters, propJitter{
 			name: name, g: pl.g,
@@ -299,12 +299,12 @@ func (top *propTopology) buildLane(rnd *rand.Rand, fo FanOut, name string, inter
 
 	// A lane's entrance is fixed at one child at a time, so there is no limit to draw and nothing to jitter here —
 	// the tunable capacity lives on the interior nodes below.
-	l := fo.AddLane(OptName(name))
+	l := fo.AddLane(WithName(name))
 	pl.branch, pl.lane = l, l
 	pl.g = top.newGauge(name, 1)
 
 	if innerFanOut {
-		inner := l.AddFanOut(OptName(name + ".ifo")).SetLimit(1 + rnd.Intn(2))
+		inner := l.AddFanOut(WithName(name + ".ifo")).SetLimit(1 + rnd.Intn(2))
 		inner.SetBackpressure(FanOutBackpressure(rnd.Intn(3))) // Balanced/Strict: a child holds the lane's entrance until its work starts
 		pf := &propFanOut{fo: inner}
 		for j, nl := 0, 1+rnd.Intn(2); j < nl; j++ {
@@ -315,7 +315,7 @@ func (top *propTopology) buildLane(rnd *rand.Rand, fo FanOut, name string, inter
 	for k := 0; k < stages; k++ {
 		sname := fmt.Sprintf("%s.s%d", name, k)
 		slimit := 1 + rnd.Intn(3)
-		st := l.AddStage(OptName(sname)).SetLimit(slimit)
+		st := l.AddStage(WithName(sname)).SetLimit(slimit)
 		sg := top.newGauge(sname, slimit)
 		top.jitters = append(top.jitters, propJitter{
 			name: sname, g: sg,

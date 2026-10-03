@@ -144,12 +144,12 @@ type twoPoolFanOut struct {
 }
 
 func newTwoPoolFanOut(mode FanOutBackpressure, items int64) *twoPoolFanOut {
-	x := &twoPoolFanOut{c: NewConveyor(), bt: newBlockingTasks(), processorGates: map[int64]chan struct{}{}}
-	x.read = x.c.AddStage(OptName("read"))
-	x.f = x.c.AddFanOut(OptName("f")).SetLimit(100).SetBackpressure(mode)
-	x.p1 = x.f.AddPool(OptName("p1"))
-	x.p2 = x.f.AddPool(OptName("p2"))
-	x.commit = x.c.AddStage(OptName("commit")).SetLimit(10)
+	x := &twoPoolFanOut{c: New(), bt: newBlockingTasks(), processorGates: map[int64]chan struct{}{}}
+	x.read = x.c.AddStage(WithName("read"))
+	x.f = x.c.AddFanOut(WithName("f")).SetLimit(100).SetBackpressure(mode)
+	x.p1 = x.f.AddPool(WithName("p1"))
+	x.p2 = x.f.AddPool(WithName("p2"))
+	x.commit = x.c.AddStage(WithName("commit")).SetLimit(10)
 	for no := int64(1); no <= items; no++ {
 		x.bt.gate(fmt.Sprintf("%d/p1", no))
 		x.bt.gate(fmt.Sprintf("%d/p2", no))
@@ -214,11 +214,11 @@ func itemReturned(c Conveyor, no int64) bool {
 func TestBackpressure_SameItemCeilingWhenEveryPoolIsBusy(t *testing.T) {
 	for _, mode := range allModes {
 		t.Run(mode.String(), func(t *testing.T) {
-			c := NewConveyor()
-			read := c.AddStage(OptName("read")).SetLimit(3)
-			f := c.AddFanOut(OptName("f")).SetLimit(2).SetBackpressure(mode)
-			p := f.AddPool(OptName("p"))
-			commit := c.AddStage(OptName("commit")).SetLimit(10)
+			c := New()
+			read := c.AddStage(WithName("read")).SetLimit(3)
+			f := c.AddFanOut(WithName("f")).SetLimit(2).SetBackpressure(mode)
+			p := f.AddPool(WithName("p"))
+			commit := c.AddStage(WithName("commit")).SetLimit(10)
 			bt := newBlockingTasks()
 			for _, k := range []string{"1/p", "2/p", "3/p"} {
 				bt.gate(k)
@@ -294,12 +294,12 @@ func TestBackpressure_OneFastOneBusyPoolTable(t *testing.T) {
 	for _, mode := range allModes {
 		for _, tc := range rows {
 			t.Run(mode.String()+"/"+tc.work, func(t *testing.T) {
-				c := NewConveyor()
-				read := c.AddStage(OptName("read"))
-				f := c.AddFanOut(OptName("f")).SetLimit(100).SetBackpressure(mode)
-				a := f.AddPool(OptName("A"))
-				b := f.AddPool(OptName("B"))
-				commit := c.AddStage(OptName("commit")).SetLimit(10)
+				c := New()
+				read := c.AddStage(WithName("read"))
+				f := c.AddFanOut(WithName("f")).SetLimit(100).SetBackpressure(mode)
+				a := f.AddPool(WithName("A"))
+				b := f.AddPool(WithName("B"))
+				commit := c.AddStage(WithName("commit")).SetLimit(10)
 				bt := newBlockingTasks()
 				for _, k := range []string{"1/B", "2/A", "2/B"} {
 					bt.gate(k)
@@ -369,12 +369,12 @@ func TestBackpressure_OneFastOneBusyPoolTable(t *testing.T) {
 // item whose work can start passes it on the branches, and the stage before the fan-out fills with stuck items until
 // the saturated pool frees a slot. Downstream order is unchanged.
 func TestBackpressureStrict_WalkThrough(t *testing.T) {
-	c := NewConveyor()
-	read := c.AddStage(OptName("read")).SetLimit(2)
-	f := c.AddFanOut(OptName("dbsWrite")).SetLimit(100).SetBackpressure(BackpressureStrict)
-	db1 := f.AddPool(OptName("db1")).SetLimit(4)
-	db2 := f.AddPool(OptName("db2")).SetLimit(1)
-	commit := c.AddStage(OptName("commit")) // exclusive, so the recorded commit order is the admission order
+	c := New()
+	read := c.AddStage(WithName("read")).SetLimit(2)
+	f := c.AddFanOut(WithName("dbsWrite")).SetLimit(100).SetBackpressure(BackpressureStrict)
+	db1 := f.AddPool(WithName("db1")).SetLimit(4)
+	db2 := f.AddPool(WithName("db2")).SetLimit(1)
+	commit := c.AddStage(WithName("commit")) // exclusive, so the recorded commit order is the admission order
 	bt := newBlockingTasks()
 	var commitOrder numbers
 
@@ -456,12 +456,12 @@ func TestBackpressureStrict_WalkThrough(t *testing.T) {
 // when the batch is dispatched. Item 2 enters with NewTasks(100) on p (limit 2) and one task on q, where item 1's
 // task blocks: the hold survives p's first two starts and ends at q's first, with 98 tasks still queued on p.
 func TestBackpressureStrict_HoldEndsAtFirstStartPerBranch(t *testing.T) {
-	c := NewConveyor()
-	read := c.AddStage(OptName("read"))
-	f := c.AddFanOut(OptName("f")).SetLimit(100).SetBackpressure(BackpressureStrict)
-	p := f.AddPool(OptName("p")).SetLimit(2)
-	q := f.AddPool(OptName("q"))
-	commit := c.AddStage(OptName("commit")).SetLimit(10)
+	c := New()
+	read := c.AddStage(WithName("read"))
+	f := c.AddFanOut(WithName("f")).SetLimit(100).SetBackpressure(BackpressureStrict)
+	p := f.AddPool(WithName("p")).SetLimit(2)
+	q := f.AddPool(WithName("q"))
+	commit := c.AddStage(WithName("commit")).SetLimit(10)
 	bt := newBlockingTasks()
 	bt.gate("1/q")
 	bt.gate("2/q")
@@ -520,12 +520,12 @@ func TestBackpressureStrict_HoldEndsAtFirstStartPerBranch(t *testing.T) {
 // TestBackpressureBalanced_HoldEndsAtFirstStartAnywhere: the same setup under Balanced. Item 2's first start on p ends
 // the hold while its q task is still queued behind item 1.
 func TestBackpressureBalanced_HoldEndsAtFirstStartAnywhere(t *testing.T) {
-	c := NewConveyor()
-	read := c.AddStage(OptName("read"))
-	f := c.AddFanOut(OptName("f")).SetLimit(100).SetBackpressure(BackpressureBalanced)
-	p := f.AddPool(OptName("p"))
-	q := f.AddPool(OptName("q"))
-	commit := c.AddStage(OptName("commit")).SetLimit(10)
+	c := New()
+	read := c.AddStage(WithName("read"))
+	f := c.AddFanOut(WithName("f")).SetLimit(100).SetBackpressure(BackpressureBalanced)
+	p := f.AddPool(WithName("p"))
+	q := f.AddPool(WithName("q"))
+	commit := c.AddStage(WithName("commit")).SetLimit(10)
 	bt := newBlockingTasks()
 	for _, k := range []string{"1/q", "2/p", "2/q"} {
 		bt.gate(k)
@@ -574,15 +574,15 @@ func TestBackpressure_EmptyEnteringSubmissionDischarges(t *testing.T) {
 		}{
 			{"no tasks", func(Pool) []Task { return nil }},
 			{"statically empty", func(p Pool) []Task {
-				return []Task{p.NewTasks(0, func(context.Context, int) error { return nil }), p.NewTasks(-1, nil)}
+				return []Task{p.NewTasks(0, func(context.Context, int) error { return nil }), p.NewTasks(0, nil)}
 			}},
 		} {
 			t.Run(mode.String()+"/"+tc.name, func(t *testing.T) {
-				c := NewConveyor()
-				read := c.AddStage(OptName("read"))
-				f := c.AddFanOut(OptName("f")).SetBackpressure(mode)
-				p := f.AddPool(OptName("p"))
-				commit := c.AddStage(OptName("commit"))
+				c := New()
+				read := c.AddStage(WithName("read"))
+				f := c.AddFanOut(WithName("f")).SetBackpressure(mode)
+				p := f.AddPool(WithName("p"))
+				commit := c.AddStage(WithName("commit"))
 				release := make(chan struct{})
 
 				done := make(chan struct{})
@@ -620,11 +620,11 @@ func TestBackpressure_EmptyEnteringSubmissionDischarges(t *testing.T) {
 func TestBackpressure_LaterRoundsAndFollowUpsNeverHold(t *testing.T) {
 	for _, mode := range holdingModes {
 		t.Run(mode.String(), func(t *testing.T) {
-			c := NewConveyor()
-			read := c.AddStage(OptName("read"))
-			f := c.AddFanOut(OptName("f")).SetBackpressure(mode)
-			p := f.AddPool(OptName("p"))
-			commit := c.AddStage(OptName("commit"))
+			c := New()
+			read := c.AddStage(WithName("read"))
+			f := c.AddFanOut(WithName("f")).SetBackpressure(mode)
+			p := f.AddPool(WithName("p"))
+			commit := c.AddStage(WithName("commit"))
 			release := make(chan struct{})
 			roundTwo := make(chan struct{})
 			var followUpQueued atomic.Bool
@@ -677,12 +677,12 @@ func TestBackpressure_LaterRoundsAndFollowUpsNeverHold(t *testing.T) {
 // TestBackpressureStrict_UnrelatedRetainCompletionKeepsTheHeldToken: the sweep a finishing Retain triggers frees the
 // retained stage but leaves the token the hold protects.
 func TestBackpressureStrict_UnrelatedRetainCompletionKeepsTheHeldToken(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	read := c.AddStage(OptName("read"))
-	f := c.AddFanOut(OptName("f")).SetLimit(100).SetBackpressure(BackpressureStrict)
-	p1 := f.AddPool(OptName("p1"))
-	commit := c.AddStage(OptName("commit")).SetLimit(10)
+	c := New()
+	a := c.AddStage(WithName("a"))
+	read := c.AddStage(WithName("read"))
+	f := c.AddFanOut(WithName("f")).SetLimit(100).SetBackpressure(BackpressureStrict)
+	p1 := f.AddPool(WithName("p1"))
+	commit := c.AddStage(WithName("commit")).SetLimit(10)
 	bt := newBlockingTasks()
 	bt.gate("1/p1")
 	bt.gate("2/p1")
@@ -868,10 +868,10 @@ func TestBackpressure_WaitingRoomTokenIsHeld(t *testing.T) {
 func TestBackpressure_StartStageTokenThrottlesItemCreation(t *testing.T) {
 	for _, mode := range holdingModes {
 		t.Run(mode.String(), func(t *testing.T) {
-			c := NewConveyor()
-			f := c.AddFanOut(OptName("f")).SetLimit(100).SetBackpressure(mode)
-			p1 := f.AddPool(OptName("p1"))
-			commit := c.AddStage(OptName("commit")).SetLimit(10)
+			c := New()
+			f := c.AddFanOut(WithName("f")).SetLimit(100).SetBackpressure(mode)
+			p1 := f.AddPool(WithName("p1"))
+			commit := c.AddStage(WithName("commit")).SetLimit(10)
 			bt := newBlockingTasks()
 			for _, k := range []string{"1/p1", "2/p1", "3/p1"} {
 				bt.gate(k)
@@ -1135,13 +1135,13 @@ func TestBackpressureStrict_RetainThenMoveKeepsTheHold(t *testing.T) {
 // Each ends on its own batch's start, and the first fan-out's slot is freed only once both its body and the hold are
 // done.
 func TestBackpressureStrict_TwoRetainedFanOutsHoldTwoSlots(t *testing.T) {
-	c := NewConveyor()
-	read := c.AddStage(OptName("read"))
-	f1 := c.AddFanOut(OptName("f1")).SetLimit(100).SetBackpressure(BackpressureStrict)
-	p := f1.AddPool(OptName("p"))
-	f2 := c.AddFanOut(OptName("f2")).SetLimit(100).SetBackpressure(BackpressureStrict)
-	q := f2.AddPool(OptName("q"))
-	commit := c.AddStage(OptName("commit")).SetLimit(10)
+	c := New()
+	read := c.AddStage(WithName("read"))
+	f1 := c.AddFanOut(WithName("f1")).SetLimit(100).SetBackpressure(BackpressureStrict)
+	p := f1.AddPool(WithName("p"))
+	f2 := c.AddFanOut(WithName("f2")).SetLimit(100).SetBackpressure(BackpressureStrict)
+	q := f2.AddPool(WithName("q"))
+	commit := c.AddStage(WithName("commit")).SetLimit(10)
 	bt := newBlockingTasks()
 	for _, k := range []string{"1/p", "1/q", "2/p", "2/q"} {
 		bt.gate(k)
@@ -1216,8 +1216,8 @@ func TestBackpressure_HeldWaitingRoomTokenSurvivesALaterWaitingRoom(t *testing.T
 	x := newTwoPoolFanOut(BackpressureStrict, 3)
 	c := x.c
 	x.f.SetLimit(2).SetQueueSize(1)
-	s := c.AddStage(OptName("s")).SetQueueSize(2) // built after f: rank between f and commit
-	commit := c.AddStage(OptName("commit2")).SetLimit(10)
+	s := c.AddStage(WithName("s")).SetQueueSize(2) // built after f: rank between f and commit
+	commit := c.AddStage(WithName("commit2")).SetLimit(10)
 
 	done := make(chan struct{})
 	go func() {
@@ -1395,11 +1395,11 @@ func TestBackpressure_TryMoveToEntersWithBusyPools(t *testing.T) {
 // TestBackpressureStrict_PoolLimitLoweredUnderAHold: lowering a pool's limit while a held item's work is queued on it
 // evicts nothing; the work starts, and the hold ends, once occupancy has fallen below the new limit.
 func TestBackpressureStrict_PoolLimitLoweredUnderAHold(t *testing.T) {
-	c := NewConveyor()
-	read := c.AddStage(OptName("read"))
-	f := c.AddFanOut(OptName("f")).SetLimit(100).SetBackpressure(BackpressureStrict)
-	p1 := f.AddPool(OptName("p1")).SetLimit(2)
-	commit := c.AddStage(OptName("commit")).SetLimit(10)
+	c := New()
+	read := c.AddStage(WithName("read"))
+	f := c.AddFanOut(WithName("f")).SetLimit(100).SetBackpressure(BackpressureStrict)
+	p1 := f.AddPool(WithName("p1")).SetLimit(2)
+	commit := c.AddStage(WithName("commit")).SetLimit(10)
 	bt := newBlockingTasks()
 	firstOf1 := bt.gate("1/p1")
 	secondOf1 := make(chan struct{})
@@ -1459,12 +1459,12 @@ func TestBackpressureStrict_PoolLimitLoweredUnderAHold(t *testing.T) {
 func TestBackpressure_LaneHoldEndsAtChildCreation(t *testing.T) {
 	for _, mode := range holdingModes {
 		t.Run(mode.String(), func(t *testing.T) {
-			c := NewConveyor()
-			read := c.AddStage(OptName("read"))
-			f := c.AddFanOut(OptName("f")).SetLimit(100).SetBackpressure(mode)
-			lane := f.AddLane(OptName("lane"))
-			mid := lane.AddStage(OptName("mid")) // exclusive: item 2's child waits here
-			commit := c.AddStage(OptName("commit")).SetLimit(10)
+			c := New()
+			read := c.AddStage(WithName("read"))
+			f := c.AddFanOut(WithName("f")).SetLimit(100).SetBackpressure(mode)
+			lane := f.AddLane(WithName("lane"))
+			mid := lane.AddStage(WithName("mid")) // exclusive: item 2's child waits here
+			commit := c.AddStage(WithName("commit")).SetLimit(10)
 			release := make(chan struct{})
 
 			done := make(chan struct{})
@@ -1511,12 +1511,12 @@ func TestBackpressure_LaneHoldEndsAtChildCreation(t *testing.T) {
 // item 3 one too (its only pool is full); the switch back to Buffered lets item 4 release read at once while the two
 // existing holds end on their own, each by its own mode's milestone.
 func TestBackpressure_SetBackpressureOnALiveConveyor(t *testing.T) {
-	c := NewConveyor()
-	read := c.AddStage(OptName("read")).SetLimit(3)
-	f := c.AddFanOut(OptName("f")).SetLimit(100).SetBackpressure(BackpressureBuffered)
-	p1 := f.AddPool(OptName("p1"))
-	p2 := f.AddPool(OptName("p2"))
-	commit := c.AddStage(OptName("commit")).SetLimit(10)
+	c := New()
+	read := c.AddStage(WithName("read")).SetLimit(3)
+	f := c.AddFanOut(WithName("f")).SetLimit(100).SetBackpressure(BackpressureBuffered)
+	p1 := f.AddPool(WithName("p1"))
+	p2 := f.AddPool(WithName("p2"))
+	commit := c.AddStage(WithName("commit")).SetLimit(10)
 	bt := newBlockingTasks()
 	for _, k := range []string{"1/p1", "1/p2", "2/p1", "2/p2", "3/p1", "4/p1"} {
 		bt.gate(k)
@@ -1589,8 +1589,8 @@ func TestBackpressure_SetBackpressureOnALiveConveyor(t *testing.T) {
 	<-done
 }
 
-// TestFanOutBackpressure_ValuesAndString pins the getters: String for every mode, Balanced as the default, and an
-// unknown value stored as Balanced.
+// TestFanOutBackpressure_ValuesAndString pins the getters: String for every mode, Balanced as the default, and a
+// panic on an unknown value.
 func TestFanOutBackpressure_ValuesAndString(t *testing.T) {
 	for m, want := range map[FanOutBackpressure]string{
 		BackpressureBuffered:   "BackpressureBuffered",
@@ -1603,7 +1603,7 @@ func TestFanOutBackpressure_ValuesAndString(t *testing.T) {
 			t.Errorf("String() = %q, want %q", got, want)
 		}
 	}
-	f := NewConveyor().AddFanOut()
+	f := New().AddFanOut()
 	if got := f.Backpressure(); got != BackpressureBalanced {
 		t.Errorf("default Backpressure() = %v, want Balanced", got)
 	}
@@ -1612,7 +1612,5 @@ func TestFanOutBackpressure_ValuesAndString(t *testing.T) {
 			t.Errorf("Backpressure() = %v after SetBackpressure(%v)", got, m)
 		}
 	}
-	if got := f.SetBackpressure(FanOutBackpressure(7)).Backpressure(); got != BackpressureBalanced {
-		t.Errorf("Backpressure() = %v after an unknown value, want Balanced", got)
-	}
+	assertPanics(t, errInvalidValue, func() { f.SetBackpressure(FanOutBackpressure(7)) })
 }

@@ -21,10 +21,10 @@ import (
 // recorded and the item is still blocked.
 func TestWaitAfterMoveBlockedByBusySlotJoins(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	holderIn := make(chan struct{})
 	groups := make(chan TaskGroup, 1)
@@ -76,9 +76,9 @@ func TestWaitAfterMoveBlockedByBusySlotJoins(t *testing.T) {
 // the stage.
 func TestWaitOnRetainTaskGroupAfterBlockedMoveJoins(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	commit := c.AddStage(WithName("commit"))
 
 	holderIn := make(chan struct{})
 	groups := make(chan TaskGroup, 1)
@@ -136,10 +136,10 @@ func TestWaitOnUnfinishedFailedTaskGroupReturnsCause(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			boom := errors.New("boom")
 			callCause := errors.New("call canceled")
-			c := NewConveyor()
-			fo := c.AddFanOut(OptName("fo"))
-			pool := fo.AddPool(OptName("pool")).SetLimit(2)
-			commit := c.AddStage(OptName("commit"))
+			c := New()
+			fo := c.AddFanOut(WithName("fo"))
+			pool := fo.AddPool(WithName("pool")).SetLimit(2)
+			commit := c.AddStage(WithName("commit"))
 
 			release := make(chan struct{})
 			err := runOnce(t, c, func(ctx context.Context) error {
@@ -212,8 +212,8 @@ func TestWaitOnUnfinishedFailedTaskGroupReturnsCause(t *testing.T) {
 func TestUnwaitedFailedTaskGroupStillFailsCompletion(t *testing.T) {
 	errA := errors.New("a boom")
 	errB := errors.New("b boom")
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
+	c := New()
+	write := c.AddStage(WithName("write"))
 
 	err := runOnce(t, c, func(ctx context.Context) error {
 		if err := write.MoveTo(ctx); err != nil {
@@ -239,11 +239,11 @@ func TestUnwaitedFailedTaskGroupStillFailsCompletion(t *testing.T) {
 // TestWaitBeforeMoveHoldsPreviousSlot: waiting before the move keeps the item in the node it stands in. The item
 // behind cannot enter that node meanwhile, and the target is still free.
 func TestWaitBeforeMoveHoldsPreviousSlot(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	pool := fo.AddPool(OptName("pool"))
-	mid := c.AddStage(OptName("mid"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	pool := fo.AddPool(WithName("pool"))
+	mid := c.AddStage(WithName("mid"))
+	commit := c.AddStage(WithName("commit"))
 
 	release := make(chan struct{})
 	waiting := make(chan struct{})
@@ -294,10 +294,10 @@ func TestWaitBeforeMoveHoldsPreviousSlot(t *testing.T) {
 // TestWaitCallerRules: a standalone task group answers anyone with its stored error; an owned task group needs its
 // item's context.
 func TestWaitCallerRules(t *testing.T) {
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	// Standalone: Retain with a context that carries no item hands back a finished task group carrying the reason.
 	sw := write.RetainFor(context.Background(), func(context.Context) error { return nil })
@@ -344,11 +344,11 @@ func TestWaitCallerRules(t *testing.T) {
 // (see TestRetainByChildHoldsLaneInteriorStage) but not on its parent's — a task group is only meaningful to the item
 // that created it. Recovered inside the child's callback.
 func TestWaitByLaneChildOnParentsTaskGroupPanics(t *testing.T) {
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	inner := lane.AddStage(OptName("inner"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	inner := lane.AddStage(WithName("inner"))
 
 	got := make(chan error, 1)
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -385,8 +385,8 @@ func TestWaitByLaneChildOnParentsTaskGroupPanics(t *testing.T) {
 // clean, and the cancellation branch joins nothing — there is no error on the task group to join.
 func TestWaitCleanTaskGroupOnCanceledItemReturnsCause(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
+	c := New()
+	write := c.AddStage(WithName("write"))
 
 	err := runOnce(t, c, func(ctx context.Context) error {
 		if err := write.MoveTo(ctx); err != nil {
@@ -411,8 +411,8 @@ func TestWaitCleanTaskGroupOnCanceledItemReturnsCause(t *testing.T) {
 // TestWaitHonorsCallContextDeadline: a deadline the caller adds ends the wait with that deadline; the task group is not
 // joined, and a later Wait with the item's context still works.
 func TestWaitHonorsCallContextDeadline(t *testing.T) {
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
+	c := New()
+	write := c.AddStage(WithName("write"))
 
 	release := make(chan struct{})
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -447,8 +447,8 @@ func TestWaitHonorsCallContextDeadline(t *testing.T) {
 func TestWaitItemCauseWinsOverCallContextCause(t *testing.T) {
 	itemCause := errors.New("item cause")
 	callCause := errors.New("call cause")
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
+	c := New()
+	write := c.AddStage(WithName("write"))
 
 	release := make(chan struct{})
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -484,8 +484,8 @@ func TestWaitItemCauseWinsOverCallContextCause(t *testing.T) {
 // TaskError — and joins it.
 func TestWaitOnCanceledRetainTaskGroupReturnsRawError(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
+	c := New()
+	write := c.AddStage(WithName("write"))
 
 	err := runOnce(t, c, func(ctx context.Context) error {
 		if err := write.MoveTo(ctx); err != nil {
@@ -521,10 +521,10 @@ func TestWaitOnCanceledRetainTaskGroupReturnsRawError(t *testing.T) {
 func TestWaitConcurrentWaiters(t *testing.T) {
 	const n = 8
 	boom := errors.New("boom")
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	waitAll := func(ctx context.Context, w TaskGroup, park <-chan struct{}) []error {
 		errs := make([]error, n)

@@ -53,7 +53,7 @@ type run struct {
 	// shutdownBegun mirrors shutdownErr != nil for the lock-free fast path of UntilShutdown. Set with it, never
 	// cleared.
 	shutdownBegun atomic.Bool
-	shutdownAt    time.Time // when shutdownErr was set; OptDrainTimeout counts from it
+	shutdownAt    time.Time // when shutdownErr was set; WithDrainTimeout counts from it
 	// shutdownCtx is canceled with shutdownErr in the same step that sets it, and when Run returns. UntilShutdown
 	// contexts watch it.
 	shutdownCtx    context.Context
@@ -158,7 +158,7 @@ func (c *conveyor) stopRun() {
 
 // watchShutdown waits for shutdown to begin — from either trigger: the caller cancels ctx, or an item error
 // closes shutdownCh — and then bounds how long the in-flight items may keep running: it asks the configured
-// DrainContextFunc for the drain context (see OptDrainContextFunc) and cancels the items once that context is
+// DrainContextFunc for the drain context (see WithDrainContext) and cancels the items once that context is
 // done. No func, or a nil context from it, leaves the items to finish on their own.
 //
 // It exits early (without touching in-flight items, and without asking the func) if the run drains before any
@@ -307,7 +307,7 @@ func (r *run) worker() {
 }
 
 // acquireItem blocks until this worker may create the next root item — the start stage has room and the
-// items-in-flight cap (SetItemsLimit), if any, allows it — and returns it, or returns nil when the worker should
+// items-in-flight cap (SetItemLimit), if any, allows it — and returns it, or returns nil when the worker should
 // exit: the conveyor has stopped creating items, or another worker is already standing by. At most one worker
 // waits idle — extra workers retire, so the pool shrinks back after a burst instead of keeping a herd of idle
 // waiters that every cond.Broadcast wakes. When creating an item leaves nobody standing by, it spawns a

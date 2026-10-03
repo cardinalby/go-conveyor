@@ -10,8 +10,8 @@ import (
 // TestQueueDoesNotRelaxWorkExclusivity is the point of having a queue as a separate knob: SetQueueSize(k) lets k items
 // wait, but the stage's own limit still bounds how many run its code.
 func TestQueueDoesNotRelaxWorkExclusivity(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetQueueSize(3)
+	c := New()
+	s := c.AddStage(WithName("s")).SetQueueSize(3)
 
 	g := &gauge{}
 	runNOK(t, c, 15, func(ctx context.Context, no int64) error {
@@ -33,9 +33,9 @@ func TestQueueDoesNotRelaxWorkExclusivity(t *testing.T) {
 // TestQueuePreservesOrder: the waiting room is FIFO in item order, so an exclusive stage behind it still sees
 // 1..N in order.
 func TestQueuePreservesOrder(t *testing.T) {
-	c := NewConveyor()
-	first := c.AddStage(OptName("first"))
-	second := c.AddStage(OptName("second")).SetQueueSize(3)
+	c := New()
+	first := c.AddStage(WithName("first"))
+	second := c.AddStage(WithName("second")).SetQueueSize(3)
 
 	var seen numbers
 	runNOK(t, c, 20, func(ctx context.Context, no int64) error {
@@ -69,9 +69,9 @@ func TestQueueDecouplesPreviousStage(t *testing.T) {
 		{name: "queue 2", queue: 2, wantS1Ops: 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := NewConveyor()
-			s1 := c.AddStage(OptName("s1"))
-			s2 := c.AddStage(OptName("s2"))
+			c := New()
+			s1 := c.AddStage(WithName("s1"))
+			s2 := c.AddStage(WithName("s2"))
 			if tc.queue > 0 {
 				s2.SetQueueSize(tc.queue)
 			}
@@ -116,9 +116,9 @@ func TestQueueDecouplesPreviousStage(t *testing.T) {
 
 // TestQueueNeverExceedsItsLimit checks the waiting room is genuinely bounded, by watching live occupancy.
 func TestQueueNeverExceedsItsLimit(t *testing.T) {
-	c := NewConveyor()
-	s1 := c.AddStage(OptName("s1"))
-	s2 := c.AddStage(OptName("s2")).SetQueueSize(2)
+	c := New()
+	s1 := c.AddStage(WithName("s1"))
+	s2 := c.AddStage(WithName("s2")).SetQueueSize(2)
 
 	var peakQueued atomic.Int64
 	block := make(chan struct{})
@@ -165,11 +165,11 @@ func TestQueueNeverExceedsItsLimit(t *testing.T) {
 
 // TestQueueOnFanOut: a fan-out takes a waiting room the same way a stage does.
 func TestQueueOnFanOut(t *testing.T) {
-	c := NewConveyor()
-	s1 := c.AddStage(OptName("s1"))
-	fo := c.AddFanOut(OptName("fo")).SetQueueSize(2)
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	s1 := c.AddStage(WithName("s1"))
+	fo := c.AddFanOut(WithName("fo")).SetQueueSize(2)
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	if fo.QueueSize() != 2 {
 		t.Fatalf("fan-out QueueSize = %d, want 2", fo.QueueSize())
@@ -198,21 +198,17 @@ func TestQueueOnFanOut(t *testing.T) {
 	}
 }
 
-// TestQueueSizeGetters covers the reported sizes, including the clamp of a negative size to "no waiting room".
+// TestQueueSizeGetters covers the reported sizes.
 func TestQueueSizeGetters(t *testing.T) {
-	c := NewConveyor()
+	c := New()
 	plain := c.AddStage()
 	queued := c.AddStage().SetQueueSize(4)
-	clamped := c.AddStage().SetQueueSize(-2)
 
 	if got := plain.QueueSize(); got != 0 {
 		t.Fatalf("stage without a queue: QueueSize = %d, want 0", got)
 	}
 	if got := queued.QueueSize(); got != 4 {
 		t.Fatalf("QueueSize = %d, want 4", got)
-	}
-	if got := clamped.QueueSize(); got != 0 {
-		t.Fatalf("SetQueueSize(-2): QueueSize = %d, want the clamp to 0", got)
 	}
 	if got := plain.Limit(); got != 1 {
 		t.Fatalf("default stage Limit = %d, want 1", got)
@@ -222,8 +218,8 @@ func TestQueueSizeGetters(t *testing.T) {
 // TestQueueResizableAtRuntime: a waiting room is capacity, not topology, so resizing one while the conveyor runs is
 // allowed (admission-only, like SetLimit).
 func TestQueueResizableAtRuntime(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetQueueSize(1)
+	c := New()
+	s := c.AddStage(WithName("s")).SetQueueSize(1)
 
 	runNOK(t, c, 6, func(ctx context.Context, no int64) error {
 		if no == 2 {
@@ -243,9 +239,9 @@ func TestQueueResizableAtRuntime(t *testing.T) {
 // it, items step aside into the new waiting room. Observing queue occupancy rise from 0 is what proves the new
 // room is real and not just a reported number.
 func TestQueueCreatedAtRuntime(t *testing.T) {
-	c := NewConveyor()
-	prev := c.AddStage(OptName("prev"))
-	s := c.AddStage(OptName("s")) // no waiting room at build time
+	c := New()
+	prev := c.AddStage(WithName("prev"))
+	s := c.AddStage(WithName("s")) // no waiting room at build time
 
 	release := make(chan struct{})
 	var held atomic.Bool
@@ -289,8 +285,8 @@ func TestQueueCreatedAtRuntime(t *testing.T) {
 // until the stage takes them, which is what keeps a live change from stranding an item that has already given up
 // the previous node.
 func TestQueueRemovedAtRuntime(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetQueueSize(2)
+	c := New()
+	s := c.AddStage(WithName("s")).SetQueueSize(2)
 
 	release := make(chan struct{})
 	var held atomic.Bool
@@ -340,8 +336,8 @@ func TestQueueRemovedAtRuntime(t *testing.T) {
 // Item 1 holds the stage and item 2 waits in the room. Both are released at once, and item 3 — which only ever
 // tries, never waits — must be refused for as long as item 2 has not been admitted.
 func TestTryMoveToDoesNotJumpAQueuedItem(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetQueueSize(1)
+	c := New()
+	s := c.AddStage(WithName("s")).SetQueueSize(1)
 
 	release := make(chan struct{})
 	var order numbers
@@ -406,8 +402,8 @@ func TestTryMoveToDoesNotJumpAQueuedItem(t *testing.T) {
 // limit 2 and a waiting room of 2 accounts for four items — two running its code, two standing in front — and the
 // waiting room never relaxes the limit, however full it gets.
 func TestSharedStageWithWaitingRoomAdmitsLimitPlusQueue(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetLimit(2).SetQueueSize(2)
+	c := New()
+	s := c.AddStage(WithName("s")).SetLimit(2).SetQueueSize(2)
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -455,11 +451,11 @@ func TestSharedStageWithWaitingRoomAdmitsLimitPlusQueue(t *testing.T) {
 // given to a running fan-out — and the raise reaches the items already blocked at its door, which step aside at once
 // instead of waiting for the node itself.
 func TestFanOutQueueCreatedAtRuntime(t *testing.T) {
-	c := NewConveyor()
-	prev := c.AddStage(OptName("prev")).SetLimit(4)
-	fo := c.AddFanOut(OptName("fo")) // no waiting room at build time
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit")).SetLimit(4)
+	c := New()
+	prev := c.AddStage(WithName("prev")).SetLimit(4)
+	fo := c.AddFanOut(WithName("fo")) // no waiting room at build time
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit")).SetLimit(4)
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -516,8 +512,8 @@ func TestFanOutQueueCreatedAtRuntime(t *testing.T) {
 // derived call context is canceled) leaves the item standing there. Retrying the move resumes waiting for the node
 // from that spot: with room for two, the waiting room still never counts the item twice.
 func TestRetryFromWaitingRoomTakesNoSecondQueuedSlot(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetQueueSize(2)
+	c := New()
+	s := c.AddStage(WithName("s")).SetQueueSize(2)
 
 	release := make(chan struct{})
 	retrying := make(chan struct{})
@@ -563,9 +559,9 @@ func TestRetryFromWaitingRoomTakesNoSecondQueuedSlot(t *testing.T) {
 // later node instead. Stepping into that node's waiting room gives the earlier slot back — an item waits in one place
 // at a time.
 func TestWaitingRoomSlotReleasedWhenTheItemWaitsElsewhere(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a")).SetQueueSize(1)
-	b := c.AddStage(OptName("b")).SetQueueSize(2)
+	c := New()
+	a := c.AddStage(WithName("a")).SetQueueSize(1)
+	b := c.AddStage(WithName("b")).SetQueueSize(2)
 
 	release := make(chan struct{})
 	thirdQueuedAtA := make(chan struct{})

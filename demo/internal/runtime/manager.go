@@ -81,7 +81,7 @@ type Manager struct {
 	retains    *topology.Retains
 	// cancel stops the run's context: no new items are created from that point on (see CancelCtx).
 	cancel context.CancelFunc
-	// forceCancel is the drain context's own cancel func — see OptDrainContextFunc — that Stop uses to cancel
+	// forceCancel is the drain context's own cancel func — see WithDrainContext — that Stop uses to cancel
 	// every item still in flight at once. It is wired up fresh per Run and owned here rather than by the conveyor
 	// (the factory below hands back a nil CancelFunc) because it must be reachable from Stop, called independently
 	// of - and possibly long after - the shutdown that begins it.
@@ -104,12 +104,12 @@ func (m *Manager) Run(spec topology.Spec) error {
 		return errors.New("already running: stop it first")
 	}
 
-	// forceCtx is the drain context Stop uses to cancel in-flight items at once (see OptDrainContextFunc). It
+	// forceCtx is the drain context Stop uses to cancel in-flight items at once (see WithDrainContext). It
 	// starts out live: CancelCtx alone never touches it, so items left running after a graceful shutdown keep going
 	// exactly as before, unbounded, until Stop cancels it — immediately if the run isn't shutting down yet, or as
 	// an escalation if CancelCtx already started a graceful one.
 	forceCtx, forceCancel := context.WithCancel(context.Background())
-	built, err := topology.Build(spec, conveyor.OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
+	built, err := topology.Build(spec, conveyor.WithDrainContext(func(error) (context.Context, context.CancelFunc) {
 		return forceCtx, nil // Manager owns forceCancel directly; nothing for the conveyor to release itself
 	}))
 	if err != nil {
@@ -158,7 +158,7 @@ func (m *Manager) Run(spec topology.Spec) error {
 
 // CancelCtx cancels the active run's context — the graceful trigger: no new items are created from that point on,
 // but every item already in flight keeps running and is left to finish its own journey on its own schedule, exactly
-// as if Stop were never called (see Run's OptDrainContextFunc wiring). State.Running only drops once they all have.
+// as if Stop were never called (see Run's WithDrainContext wiring). State.Running only drops once they all have.
 // It is a no-op if nothing is running or a shutdown (graceful or forced) is already under way.
 func (m *Manager) CancelCtx() {
 	m.mu.Lock()
@@ -171,7 +171,7 @@ func (m *Manager) CancelCtx() {
 }
 
 // Stop force-stops the active run: on top of everything CancelCtx does, it also cancels the drain context
-// handed to the conveyor via OptDrainContextFunc, which cancels every item still in flight at once instead of
+// handed to the conveyor via WithDrainContext, which cancels every item still in flight at once instead of
 // leaving it to finish on its own — whether that shutdown started right now or was already under way from an
 // earlier CancelCtx.
 // It is a no-op if nothing is running or Stop was already called.
@@ -317,6 +317,9 @@ func (m *Manager) SetLimit(id string, value int) error {
 	if err != nil {
 		return err
 	}
+	if err := topology.CheckCapacity(value, 0); err != nil {
+		return fmt.Errorf("node %q: %w", id, err)
+	}
 	switch h := u.(type) {
 	case conveyor.Stage:
 		h.SetLimit(value)
@@ -339,6 +342,9 @@ func (m *Manager) SetQueueSize(id string, value int) error {
 	u, err := m.handleLocked(id)
 	if err != nil {
 		return err
+	}
+	if err := topology.CheckCapacity(1, value); err != nil {
+		return fmt.Errorf("node %q: %w", id, err)
 	}
 	switch h := u.(type) {
 	case conveyor.Stage:
@@ -444,16 +450,19 @@ func (m *Manager) retainableLocked(id string) error {
 	return nil
 }
 
-// SetItemsLimit adjusts the active run's items-in-flight cap immediately (see conveyor.Conveyor.SetItemsLimit —
+// SetItemLimit adjusts the active run's items-in-flight cap immediately (see conveyor.Conveyor.SetItemLimit —
 // safe on a live conveyor by design). Unlike SetLimit/SetQueueSize/SetDelay it names no node: the cap is global to
 // the conveyor. It errors if nothing is running.
-func (m *Manager) SetItemsLimit(value int) error {
+func (m *Manager) SetItemLimit(value int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.running || m.built == nil {
 		return errors.New("not running")
 	}
-	m.built.Conveyor.SetItemsLimit(value)
+	if value < 0 {
+		return fmt.Errorf("item limit %d: want >= 0", value)
+	}
+	m.built.Conveyor.SetItemLimit(value)
 	return nil
 }
 

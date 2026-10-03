@@ -39,16 +39,16 @@ func assertShutdownCause(t *testing.T, what string, err error, want error) {
 	}
 }
 
-// TestGracefulShutdownFinishesInFlightItems: with no OptDrainTimeout, cancelling the Run context only stops
+// TestGracefulShutdownFinishesInFlightItems: with no WithDrainTimeout, cancelling the Run context only stops
 // item creation — every item already in flight finishes its whole journey, background work included.
 func TestGracefulShutdownFinishesInFlightItems(t *testing.T) {
 	const perItem = 2
 	cause := errors.New("time to stop")
-	c := NewConveyor() // nothing bounds the in-flight items
-	gate := c.AddStage(OptName("gate")).SetLimit(4)
-	fo := c.AddFanOut(OptName("fo")).SetLimit(4)
-	pool := fo.AddPool(OptName("pool")).SetLimit(2)
-	commit := c.AddStage(OptName("commit"))
+	c := New() // nothing bounds the in-flight items
+	gate := c.AddStage(WithName("gate")).SetLimit(4)
+	fo := c.AddFanOut(WithName("fo")).SetLimit(4)
+	pool := fo.AddPool(WithName("pool")).SetLimit(2)
+	commit := c.AddStage(WithName("commit"))
 
 	release := make(chan struct{})
 	var created, bg atomic.Int64
@@ -108,10 +108,10 @@ func TestGracefulShutdownFinishesInFlightItems(t *testing.T) {
 // cause.
 func TestDrainContextAlreadyDoneCancelsInFlight(t *testing.T) {
 	cause := errors.New("stop now")
-	c := NewConveyor(OptDrainTimeout(0))
-	fo := c.AddFanOut(OptName("fo")).SetLimit(4)
-	pool := fo.AddPool(OptName("pool")).SetLimit(2)
-	commit := c.AddStage(OptName("commit")) // exclusive: the items behind block in MoveTo
+	c := New(WithDrainTimeout(0))
+	fo := c.AddFanOut(WithName("fo")).SetLimit(4)
+	pool := fo.AddPool(WithName("pool")).SetLimit(2)
+	commit := c.AddStage(WithName("commit")) // exclusive: the items behind block in MoveTo
 
 	var laneStarted, laneUnwound atomic.Int64
 	var mu sync.Mutex
@@ -176,9 +176,9 @@ func TestDrainContextAlreadyDoneCancelsInFlight(t *testing.T) {
 // timeout are never canceled and complete their journey normally.
 func TestShutdownDrainTimeoutLetsItemsDrain(t *testing.T) {
 	cause := errors.New("time to stop")
-	c := NewConveyor(OptDrainTimeout(5 * time.Second)) // generous: the items below drain at once
-	gate := c.AddStage(OptName("gate")).SetLimit(4)
-	commit := c.AddStage(OptName("commit"))
+	c := New(WithDrainTimeout(5 * time.Second)) // generous: the items below drain at once
+	gate := c.AddStage(WithName("gate")).SetLimit(4)
+	commit := c.AddStage(WithName("commit"))
 
 	release := make(chan struct{})
 	var created, arrived, canceledEarly atomic.Int64
@@ -232,8 +232,8 @@ func TestShutdownDrainTimeoutLetsItemsDrain(t *testing.T) {
 // context canceled with a ShutdownError carrying the Run context's cause — not the expiry.
 func TestShutdownDrainTimeoutOverrunCancelsItems(t *testing.T) {
 	cause := errors.New("time to stop")
-	c := NewConveyor(OptDrainTimeout(20 * time.Millisecond)) // tiny: the item below overruns it
-	hold := c.AddStage(OptName("hold"))                      // exclusive: the item behind blocks in MoveTo
+	c := New(WithDrainTimeout(20 * time.Millisecond)) // tiny: the item below overruns it
+	hold := c.AddStage(WithName("hold"))              // exclusive: the item behind blocks in MoveTo
 
 	var mu sync.Mutex
 	seen := map[int64]error{}
@@ -279,13 +279,13 @@ func TestShutdownDrainTimeoutOverrunCancelsItems(t *testing.T) {
 func TestErrorShutdownIsBoundedByDrainContext(t *testing.T) {
 	boom := errors.New("boom")
 	askedCause := make(chan error, 1)
-	c := NewConveyor(OptDrainContextFunc(func(cause error) (context.Context, context.CancelFunc) {
+	c := New(WithDrainContext(func(cause error) (context.Context, context.CancelFunc) {
 		askedCause <- cause
 		shutdownCtx, cancel := context.WithCancel(context.Background())
 		cancel() // at once: item 1 below never returns on its own
 		return shutdownCtx, cancel
 	}))
-	gate := c.AddStage(OptName("gate")).SetLimit(2) // both items below are in flight at the same time
+	gate := c.AddStage(WithName("gate")).SetLimit(2) // both items below are in flight at the same time
 
 	var blocked atomic.Bool
 	var item1Err atomic.Value
@@ -339,12 +339,12 @@ func TestDrainContextCancelsItemsLater(t *testing.T) {
 
 	askedCause := make(chan error, 1)
 	asked := make(chan struct{})
-	c := NewConveyor(OptDrainContextFunc(func(c error) (context.Context, context.CancelFunc) {
+	c := New(WithDrainContext(func(c error) (context.Context, context.CancelFunc) {
 		askedCause <- c
 		close(asked)
 		return forceCtx, nil // the caller owns it; no CancelFunc to hand over
 	}))
-	hold := c.AddStage(OptName("hold")) // exclusive: the item behind blocks in MoveTo
+	hold := c.AddStage(WithName("hold")) // exclusive: the item behind blocks in MoveTo
 
 	var item1Err atomic.Value
 	ctx, cancel := context.WithCancelCause(context.Background())
@@ -386,11 +386,11 @@ func TestDrainContextCancelsItemsLater(t *testing.T) {
 // like configuring no drain context func at all.
 func TestDrainContextNilMeansNoLimit(t *testing.T) {
 	asked := make(chan struct{})
-	c := NewConveyor(OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
+	c := New(WithDrainContext(func(error) (context.Context, context.CancelFunc) {
 		close(asked)
 		return nil, nil
 	}))
-	commit := c.AddStage(OptName("commit"))
+	commit := c.AddStage(WithName("commit"))
 
 	var committed atomic.Bool
 	ctx, cancel := context.WithCancel(context.Background())
@@ -423,7 +423,7 @@ func TestDrainContextNilMeansNoLimit(t *testing.T) {
 func TestDrainContextCancelFuncCalledBeforeRunReturns(t *testing.T) {
 	asked := make(chan struct{})
 	var released atomic.Bool
-	c := NewConveyor(OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
+	c := New(WithDrainContext(func(error) (context.Context, context.CancelFunc) {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), testTimeout) // outlives the run
 		close(asked)
 		return shutdownCtx, func() {
@@ -431,7 +431,7 @@ func TestDrainContextCancelFuncCalledBeforeRunReturns(t *testing.T) {
 			cancel()
 		}
 	}))
-	s := c.AddStage(OptName("s"))
+	s := c.AddStage(WithName("s"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -456,7 +456,7 @@ func TestDrainContextCancelFuncCalledBeforeRunReturns(t *testing.T) {
 // born done, after the only item has failed) is no overrun: DrainError is nil.
 func TestDrainTimeoutNoDrainErrorWhenNothingInFlight(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor(OptDrainTimeout(0)).SetItemsLimit(1) // the failing item is the only one, and no later one is made
+	c := New(WithDrainTimeout(0)).SetItemLimit(1) // the failing item is the only one, and no later one is made
 	err := c.Run(context.Background(), func(ic context.Context) error { return boom })
 	var re RunError
 	if !errors.As(err, &re) || !errors.Is(err, boom) {
@@ -467,12 +467,12 @@ func TestDrainTimeoutNoDrainErrorWhenNothingInFlight(t *testing.T) {
 	}
 }
 
-// TestDrainTimeoutCountsFromShutdownStart: the drain context a run uses with OptDrainTimeout(d) ends d after
+// TestDrainTimeoutCountsFromShutdownStart: the drain context a run uses with WithDrainTimeout(d) ends d after
 // the moment shutdown began (here, an item error), not after the moment the watcher asks for it.
 func TestDrainTimeoutCountsFromShutdownStart(t *testing.T) {
 	const d = time.Hour
 	boom := errors.New("boom")
-	c := NewConveyor(OptDrainTimeout(d)).SetItemsLimit(1)
+	c := New(WithDrainTimeout(d)).SetItemLimit(1)
 	ci := implOf(c)
 	drainFunc := ci.drainContext
 	var deadline, askedAt time.Time
@@ -515,9 +515,9 @@ func TestProcessorErrorCancelsOnlyLaterItems(t *testing.T) {
 	const failing = 3
 	const inGate = 5
 	boom := errors.New("boom")
-	c := NewConveyor()
-	gate := c.AddStage(OptName("gate")).SetLimit(inGate)
-	commit := c.AddStage(OptName("commit")) // exclusive: nobody may commit past the failing item
+	c := New()
+	gate := c.AddStage(WithName("gate")).SetLimit(inGate)
+	commit := c.AddStage(WithName("commit")) // exclusive: nobody may commit past the failing item
 
 	release := make(chan struct{})
 	var arrived atomic.Int64
@@ -583,8 +583,8 @@ func TestProcessorErrorCancelsOnlyLaterItems(t *testing.T) {
 func TestFirstItemErrorWins(t *testing.T) {
 	first := errors.New("first")
 	second := errors.New("second")
-	c := NewConveyor()
-	gate := c.AddStage(OptName("gate")).SetLimit(2)
+	c := New()
+	gate := c.AddStage(WithName("gate")).SetLimit(2)
 
 	reached2 := make(chan struct{})
 	var failedSecond atomic.Bool
@@ -624,11 +624,11 @@ func TestFailureStartsShutdownBeforeBackgroundWorkEnds(t *testing.T) {
 	first := errors.New("first")
 	second := errors.New("second")
 	var drainAsked atomic.Bool
-	c := NewConveyor(OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
+	c := New(WithDrainContext(func(error) (context.Context, context.CancelFunc) {
 		drainAsked.Store(true)
 		return nil, nil // no limit: the retained work is left to finish
 	}))
-	gate := c.AddStage(OptName("gate")).SetLimit(2)
+	gate := c.AddStage(WithName("gate")).SetLimit(2)
 
 	reached2 := make(chan struct{})
 	bgRelease := make(chan struct{})
@@ -679,8 +679,8 @@ func TestFailureStartsShutdownBeforeBackgroundWorkEnds(t *testing.T) {
 // ShutdownError a node call handed it does not make Run fail — Run still reports the Run context's cause.
 func TestShutdownErrorFromProcessorIsNotAFailure(t *testing.T) {
 	cause := errors.New("stop now")
-	c := NewConveyor(OptDrainTimeout(0))
-	hold := c.AddStage(OptName("hold")) // exclusive: the item behind blocks in MoveTo
+	c := New(WithDrainTimeout(0))
+	hold := c.AddStage(WithName("hold")) // exclusive: the item behind blocks in MoveTo
 
 	var wrapped atomic.Int64
 
@@ -723,10 +723,10 @@ func TestShutdownErrorFromProcessorIsNotAFailure(t *testing.T) {
 func TestGracefulShutdownJoinsChildren(t *testing.T) {
 	const children = 4
 	cause := errors.New("time to stop")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	inner := lane.AddStage(OptName("inner")).SetLimit(children)
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	inner := lane.AddStage(WithName("inner")).SetLimit(children)
 
 	release := make(chan struct{})
 	var started, finished atomic.Int64
@@ -780,11 +780,11 @@ func TestGracefulShutdownJoinsChildren(t *testing.T) {
 func TestShutdownCancelsChildren(t *testing.T) {
 	const children = 4
 	cause := errors.New("stop now")
-	c := NewConveyor(OptDrainTimeout(0))
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	inner := lane.AddStage(OptName("inner")).SetLimit(children)
-	commit := c.AddStage(OptName("commit"))
+	c := New(WithDrainTimeout(0))
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	inner := lane.AddStage(WithName("inner")).SetLimit(children)
+	commit := c.AddStage(WithName("commit"))
 
 	var started, unwound atomic.Int64
 	var childErr, joinErr atomic.Value
@@ -848,11 +848,11 @@ func TestShutdownCancelsChildren(t *testing.T) {
 func TestRunReusableAfterShutdown(t *testing.T) {
 	const want = 6
 	const perItem = 2
-	c := NewConveyor()
-	a := c.AddStage(OptName("a")).SetLimit(2)
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	pool := fo.AddPool(OptName("pool")).SetLimit(2)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	a := c.AddStage(WithName("a")).SetLimit(2)
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	pool := fo.AddPool(WithName("pool")).SetLimit(2)
+	commit := c.AddStage(WithName("commit"))
 
 	assertIdle := func(round int) {
 		s := c.Stats()
@@ -901,13 +901,13 @@ func TestRunReusableAfterShutdown(t *testing.T) {
 // TestRunLeavesNoGoroutines: a full run over a fan-out's pools and a lane's child items unwinds every goroutine it started.
 func TestRunLeavesNoGoroutines(t *testing.T) {
 	const want = 40
-	c := NewConveyor()
-	a := c.AddStage(OptName("a")).SetLimit(2)
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	plain := fo.AddPool(OptName("plain")).SetLimit(3) // work that cannot travel
-	kids := fo.AddLane(OptName("kids"))               // work that becomes child items
-	inner := kids.AddStage(OptName("inner")).SetLimit(2)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	a := c.AddStage(WithName("a")).SetLimit(2)
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	plain := fo.AddPool(WithName("plain")).SetLimit(3) // work that cannot travel
+	kids := fo.AddLane(WithName("kids"))               // work that becomes child items
+	inner := kids.AddStage(WithName("inner")).SetLimit(2)
+	commit := c.AddStage(WithName("commit"))
 
 	before := runtime.NumGoroutine()
 	var done atomic.Int64

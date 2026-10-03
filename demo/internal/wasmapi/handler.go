@@ -162,7 +162,7 @@ func (h *handler) applyItemsLimit(body json.RawMessage) (any, error) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, err
 	}
-	if err := h.manager.SetItemsLimit(req.Value); err != nil {
+	if err := h.manager.SetItemLimit(req.Value); err != nil {
 		return nil, err
 	}
 	return h.manager.State(), nil

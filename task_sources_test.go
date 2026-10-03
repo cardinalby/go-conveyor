@@ -10,9 +10,9 @@ import (
 // TestNewTaskRunsExactlyOneCallback: NewTask is one callback = one slot's worth of work, and the callback receives a
 // usable item context.
 func TestNewTaskRunsExactlyOneCallback(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	var runs atomic.Int64
 	var ctxUsable atomic.Bool
@@ -48,9 +48,9 @@ func TestNewTaskRunsExactlyOneCallback(t *testing.T) {
 // one has been pulled.
 func TestNewTasksAreBuiltLazilyOnePerFreedSlot(t *testing.T) {
 	const count = 5
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")) // limit 1
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")) // limit 1
 
 	var order numbers
 	g := &gauge{}
@@ -101,15 +101,15 @@ func TestNewTasksAreBuiltLazilyOnePerFreedSlot(t *testing.T) {
 	}
 }
 
-// TestNewTasksNonPositiveCountIsNoOp: a count <= 0 yields an empty task — no callback is built and the task group is
-// born finished.
-func TestNewTasksNonPositiveCountIsNoOp(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+// TestNewTasksZeroCountIsNoOp: a count of 0 yields an empty task — no callback is built and the task group is born
+// finished.
+func TestNewTasksZeroCountIsNoOp(t *testing.T) {
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
-	for _, count := range []int{0, -1, -7} {
+	for _, count := range []int{0} {
 		var runs atomic.Int64
 		var bornFinished atomic.Bool
 		err := runOnce(t, c, func(ctx context.Context) error {
@@ -146,9 +146,9 @@ func TestNewTasksNonPositiveCountIsNoOp(t *testing.T) {
 // TestMixedSourcesOnOnePoolConsumeInSubmissionOrder: several sources submitted for one pool in a single MoveTo are
 // one collection — consumed in submission order, and all covered by the one task group.
 func TestMixedSourcesOnOnePoolConsumeInSubmissionOrder(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")) // limit 1: the order is total
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")) // limit 1: the order is total
 
 	var events recorder
 	want := []string{"single", "count-0", "count-1", "single-2", "count2-0", "count2-1"}
@@ -190,11 +190,11 @@ func TestMixedSourcesOnOnePoolConsumeInSubmissionOrder(t *testing.T) {
 // TestMixedSourcesAcrossPoolsInOneSchedule: sources for different pools submitted in one Schedule each become that
 // pool's collection, and the single task group covers all of them.
 func TestMixedSourcesAcrossPoolsInOneSchedule(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	a := fo.AddPool(OptName("a"))
-	b := fo.AddPool(OptName("b"))
-	d := fo.AddPool(OptName("d"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	a := fo.AddPool(WithName("a"))
+	b := fo.AddPool(WithName("b"))
+	d := fo.AddPool(WithName("d"))
 
 	var aEvents, bEvents, dEvents numbers
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -230,11 +230,11 @@ func TestMixedSourcesAcrossPoolsInOneSchedule(t *testing.T) {
 // the lane's interior stages.
 func TestMixedSourcesFeedLaneWithInteriorStages(t *testing.T) {
 	const items, perSource = 2, 3
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid")) // exclusive interior stage
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid")) // exclusive interior stage
+	commit := c.AddStage(WithName("commit"))
 
 	midGauge := &gauge{}
 	var children atomic.Int64
@@ -272,9 +272,9 @@ func TestMixedSourcesFeedLaneWithInteriorStages(t *testing.T) {
 // completions, whichever source they came from.
 func TestOverSubscribedPoolDrains(t *testing.T) {
 	const each = 20
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")).SetLimit(2)
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")).SetLimit(2)
 
 	g := &gauge{}
 	err := runOnce(t, c, func(ctx context.Context) error {

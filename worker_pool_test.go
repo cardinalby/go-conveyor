@@ -28,8 +28,8 @@ func recordMax(dst *atomic.Int64, v int64) {
 func TestWorkerPoolGrowsWithItemsInFlight(t *testing.T) {
 	const gateLimit = 8
 	const inFlight = gateLimit + 1 // the extra item holds the start stage while it waits for a gate slot
-	c := NewConveyor()
-	gate := c.AddStage(OptName("gate")).SetLimit(gateLimit)
+	c := New()
+	gate := c.AddStage(WithName("gate")).SetLimit(gateLimit)
 
 	release := make(chan struct{})
 	var arrived, peak atomic.Int64
@@ -76,8 +76,8 @@ func TestWorkerPoolShrinksAfterBurst(t *testing.T) {
 	const gateLimit = 8
 	const grown = gateLimit + 1
 	const shrunk = 4 // one worker parked at the start stage, one running the current item, plus slack
-	c := NewConveyor()
-	gate := c.AddStage(OptName("gate")).SetLimit(gateLimit)
+	c := New()
+	gate := c.AddStage(WithName("gate")).SetLimit(gateLimit)
 
 	release := make(chan struct{})
 	var drained atomic.Bool
@@ -136,9 +136,9 @@ func TestWorkerPoolRegrowsAfterShrinking(t *testing.T) {
 		idle
 		burst2
 	)
-	c := NewConveyor()
-	gate1 := c.AddStage(OptName("gate1")).SetLimit(gateLimit)
-	gate2 := c.AddStage(OptName("gate2")).SetLimit(gateLimit)
+	c := New()
+	gate1 := c.AddStage(WithName("gate1")).SetLimit(gateLimit)
+	gate2 := c.AddStage(WithName("gate2")).SetLimit(gateLimit)
 
 	release1, release2 := make(chan struct{}), make(chan struct{})
 	var phase atomic.Int32
@@ -214,12 +214,12 @@ func TestWorkerPoolRegrowsAfterShrinking(t *testing.T) {
 // item-holding slots the topology declares, and leaves nothing behind.
 func TestWorkerPoolChurnStaysBounded(t *testing.T) {
 	const want = 300
-	c := NewConveyor()
-	a := c.AddStage(OptName("a")).SetLimit(2)
-	b := c.AddStage(OptName("b")).SetLimit(3).SetQueueSize(2)
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	pool := fo.AddPool(OptName("pool")).SetLimit(2)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	a := c.AddStage(WithName("a")).SetLimit(2)
+	b := c.AddStage(WithName("b")).SetLimit(3).SetQueueSize(2)
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	pool := fo.AddPool(WithName("pool")).SetLimit(2)
+	commit := c.AddStage(WithName("commit"))
 
 	// Every in-flight root item holds at least one slot of the root series, so this is the ceiling on items in
 	// flight; the slack covers workers between an item's completion and their retirement.
@@ -284,7 +284,7 @@ func TestWorkerPoolChurnStaysBounded(t *testing.T) {
 func TestWorkerPoolDoesNotSpawnPerItem(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 
-	c := NewConveyor() // no nodes at all: every item is created, runs, and finishes at the start stage
+	c := New() // no nodes at all: every item is created, runs, and finishes at the start stage
 	before := runtime.NumGoroutine()
 
 	var peak atomic.Int64

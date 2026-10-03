@@ -16,9 +16,9 @@ import (
 // TestUntilShutdownBeforeShutdown: before shutdown the context is not done, keeps the item's values and drives node
 // methods. Repeated calls for the item's own context return the same context.
 func TestUntilShutdownBeforeShutdown(t *testing.T) {
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	commit := c.AddStage(WithName("commit"))
 	err := runOnce(t, c, func(ic context.Context) error {
 		pre := UntilShutdown(ic)
 		if pre.Err() != nil {
@@ -58,7 +58,7 @@ func TestUntilShutdownForeignContext(t *testing.T) {
 // unwraps to the Run context's cause, while the item's own context stays alive.
 func TestUntilShutdownOnRunCancel(t *testing.T) {
 	cause := errors.New("stop")
-	c := NewConveyor()
+	c := New()
 	ready := make(chan struct{})
 	got := make(chan error, 2)
 	cancel, done := runAsync(c, func(ic context.Context) error {
@@ -90,8 +90,8 @@ func TestUntilShutdownOnRunCancel(t *testing.T) {
 // ShutdownError that unwraps to the failure.
 func TestUntilShutdownOnItemError(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetLimit(2)
+	c := New()
+	s := c.AddStage(WithName("s")).SetLimit(2)
 	inS := make(chan struct{})
 	got := make(chan error, 1)
 	_, done := runAsync(c, func(ic context.Context) error {
@@ -128,8 +128,8 @@ func TestUntilShutdownOnItemError(t *testing.T) {
 // from an earlier call and for a derived context. Node methods fail with it even when its cancellation is stripped.
 func TestUntilShutdownBornDone(t *testing.T) {
 	cause := errors.New("stop")
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
+	c := New()
+	write := c.AddStage(WithName("write"))
 	ready := make(chan struct{})
 	res := make(chan error, 1)
 	cancel, done := runAsync(c, func(ic context.Context) error {
@@ -186,10 +186,10 @@ func TestUntilShutdownBornDone(t *testing.T) {
 func TestUntilShutdownItemCanceled(t *testing.T) {
 	t.Run("failed body of a lane child", func(t *testing.T) {
 		errTask := errors.New("task failed")
-		c := NewConveyor()
-		fo := c.AddFanOut(OptName("fo"))
-		pool := fo.AddPool(OptName("pool"))
-		lane := fo.AddLane(OptName("lane"))
+		c := New()
+		fo := c.AddFanOut(WithName("fo"))
+		pool := fo.AddPool(WithName("pool"))
+		lane := fo.AddLane(WithName("lane"))
 		childReady := make(chan struct{})
 		var cause, joinErr error
 		err := runOnce(t, c, func(ic context.Context) error {
@@ -227,7 +227,7 @@ func TestUntilShutdownItemCanceled(t *testing.T) {
 		}
 	})
 	t.Run("item over", func(t *testing.T) {
-		c := NewConveyor()
+		c := New()
 		var pre, derived context.Context
 		err := runOnce(t, c, func(ic context.Context) error {
 			pre = UntilShutdown(ic)
@@ -250,9 +250,9 @@ func TestUntilShutdownMoveToBlocked(t *testing.T) {
 	for _, usePre := range []bool{true, false} {
 		t.Run(fmt.Sprintf("pre=%v", usePre), func(t *testing.T) {
 			cause := errors.New("stop")
-			c := NewConveyor()
-			write := c.AddStage(OptName("write")).SetQueueSize(1)
-			commit := c.AddStage(OptName("commit"))
+			c := New()
+			write := c.AddStage(WithName("write")).SetQueueSize(1)
+			commit := c.AddStage(WithName("commit"))
 
 			inWrite, release := make(chan struct{}), make(chan struct{})
 			errs := make(chan error, 2)
@@ -334,10 +334,10 @@ func TestUntilShutdownMoveToBlocked(t *testing.T) {
 // batch using its own context and returns nil: no error, and a younger item is not canceled.
 func TestUntilShutdownPartialBatch(t *testing.T) {
 	cause := errors.New("stop")
-	c := NewConveyor()
-	read := c.AddStage(OptName("read"))
-	write := c.AddStage(OptName("write"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	read := c.AddStage(WithName("read"))
+	write := c.AddStage(WithName("write"))
+	commit := c.AddStage(WithName("commit"))
 
 	input := make(chan int)
 	reading, item1Done := make(chan struct{}), make(chan struct{})
@@ -447,7 +447,7 @@ func TestUntilShutdownWrappedCanceled(t *testing.T) {
 	for _, returnCause := range []bool{false, true} {
 		t.Run(fmt.Sprintf("run canceled/return cause=%v", returnCause), func(t *testing.T) {
 			cause := errors.New("stop")
-			c := NewConveyor()
+			c := New()
 			ready := make(chan struct{})
 			cancel, done := runAsync(c, func(ic context.Context) error {
 				if itemNo(ic) != 1 {
@@ -465,8 +465,8 @@ func TestUntilShutdownWrappedCanceled(t *testing.T) {
 		})
 		t.Run(fmt.Sprintf("item failed/return cause=%v", returnCause), func(t *testing.T) {
 			boom := errors.New("boom")
-			c := NewConveyor()
-			s := c.AddStage(OptName("s")).SetLimit(2)
+			c := New()
+			s := c.AddStage(WithName("s")).SetLimit(2)
 			inS := make(chan struct{})
 			_, done := runAsync(c, func(ic context.Context) error {
 				switch itemNo(ic) {
@@ -496,9 +496,9 @@ func TestUntilShutdownWrappedCanceled(t *testing.T) {
 	}
 	t.Run("canceled by the conveyor", func(t *testing.T) {
 		boom := errors.New("boom")
-		c := NewConveyor()
-		s := c.AddStage(OptName("s")).SetLimit(2)
-		w := c.AddStage(OptName("w"))
+		c := New()
+		s := c.AddStage(WithName("s")).SetLimit(2)
+		w := c.AddStage(WithName("w"))
 		inW := make(chan struct{})
 		moveErr := make(chan error, 1)
 		_, done := runAsync(c, func(ic context.Context) error {
@@ -538,7 +538,7 @@ func TestUntilShutdownWrappedCanceled(t *testing.T) {
 		assertShutdownCause(t, "item 2 MoveTo", recvErr(t, "item 2", moveErr), boom)
 	})
 	t.Run("no shutdown", func(t *testing.T) {
-		c := NewConveyor()
+		c := New()
 		err := runOnce(t, c, func(ic context.Context) error {
 			return fmt.Errorf("own: %w", context.Canceled)
 		})
@@ -557,9 +557,9 @@ func TestUntilShutdownAbortCascade(t *testing.T) {
 	for _, returnCause := range []bool{true, false} {
 		t.Run(fmt.Sprintf("return cause=%v", returnCause), func(t *testing.T) {
 			cause := errors.New("stop")
-			c := NewConveyor()
-			read := c.AddStage(OptName("read")).SetLimit(2)
-			write := c.AddStage(OptName("write"))
+			c := New()
+			read := c.AddStage(WithName("read")).SetLimit(2)
+			write := c.AddStage(WithName("write"))
 
 			inRead := make(chan struct{})
 			youngerErr := make(chan error, 1)
@@ -624,8 +624,8 @@ func TestUntilShutdownCascadeSameStage(t *testing.T) {
 	for _, returnErr := range []bool{true, false} {
 		t.Run(fmt.Sprintf("return error=%v", returnErr), func(t *testing.T) {
 			cause := errors.New("stop")
-			c := NewConveyor()
-			s := c.AddStage(OptName("s")).SetLimit(2)
+			c := New()
+			s := c.AddStage(WithName("s")).SetLimit(2)
 
 			inS, youngerInS, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			youngerErr := make(chan error, 1)
@@ -701,10 +701,10 @@ func TestUntilShutdownNoGap(t *testing.T) {
 	for i := 0; i < iterations; i++ {
 		seed := int64(7_000 + i)
 		rnd := rand.New(rand.NewSource(seed))
-		c := NewConveyor()
-		read := c.AddStage(OptName("read")).SetLimit(4)
-		write := c.AddStage(OptName("write")).SetQueueSize(rnd.Intn(2))
-		commit := c.AddStage(OptName("commit")).SetLimit(2)
+		c := New()
+		read := c.AddStage(WithName("read")).SetLimit(4)
+		write := c.AddStage(WithName("write")).SetQueueSize(rnd.Intn(2))
+		commit := c.AddStage(WithName("commit")).SetLimit(2)
 		writeIdx := write.unit().index
 
 		var mu sync.Mutex
@@ -808,10 +808,10 @@ func TestUntilShutdownNoGap(t *testing.T) {
 // shutdown with a ShutdownError, and Schedule with it then fails. The task returns nil, so the item goes on.
 func TestUntilShutdownPoolTask(t *testing.T) {
 	cause := errors.New("stop")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	write := c.AddStage(OptName("write"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	write := c.AddStage(WithName("write"))
 
 	running := make(chan struct{})
 	res := make(chan error, 1)
@@ -866,10 +866,10 @@ func TestUntilShutdownPoolTask(t *testing.T) {
 // a ShutdownError, while the child inside the node, using its own context, finishes.
 func TestUntilShutdownLaneChild(t *testing.T) {
 	cause := errors.New("stop")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	laneStage := lane.AddStage(OptName("lane stage"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	laneStage := lane.AddStage(WithName("lane stage"))
 
 	inLane, release := make(chan struct{}), make(chan struct{})
 	res := make(chan error, 2)
@@ -926,12 +926,12 @@ func TestUntilShutdownWorkReturn(t *testing.T) {
 		for _, returnErr := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/return error=%v", kind, returnErr), func(t *testing.T) {
 				cause := errors.New("stop")
-				c := NewConveyor()
-				fo := c.AddFanOut(OptName("fo"))
-				pool := fo.AddPool(OptName("pool")).SetLimit(2)
-				lane := fo.AddLane(OptName("lane"))
-				laneStage := lane.AddStage(OptName("lane stage")).SetLimit(2) // past the lane's start, both run at once
-				write := c.AddStage(OptName("write"))
+				c := New()
+				fo := c.AddFanOut(WithName("fo"))
+				pool := fo.AddPool(WithName("pool")).SetLimit(2)
+				lane := fo.AddLane(WithName("lane"))
+				laneStage := lane.AddStage(WithName("lane stage")).SetLimit(2) // past the lane's start, both run at once
+				write := c.AddStage(WithName("write"))
 
 				reading, siblingRunning, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
 				siblingErr, itemErr, moveErr := make(chan error, 1), make(chan error, 1), make(chan error, 1)
@@ -1036,10 +1036,10 @@ func TestUntilShutdownDrainTimeoutItems(t *testing.T) {
 	drainCtx, endDrain := context.WithCancel(context.Background())
 	defer endDrain()
 	var drainOver atomic.Bool
-	c := NewConveyor(OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
+	c := New(WithDrainContext(func(error) (context.Context, context.CancelFunc) {
 		return drainCtx, nil
 	}))
-	s := c.AddStage(OptName("s")).SetLimit(2)
+	s := c.AddStage(WithName("s")).SetLimit(2)
 
 	inS, waiting := make(chan struct{}), make(chan struct{})
 	preErr, ctxErr := make(chan error, 1), make(chan error, 1)
@@ -1080,12 +1080,12 @@ func TestUntilShutdownDrainTimeoutItems(t *testing.T) {
 	assertShutdownCause(t, "Run", recvErr(t, "Run", done), cause)
 }
 
-// TestOptDrainTimeout: items are canceled once the drain times out (at once for d <= 0), and DrainError reports it.
-func TestOptDrainTimeout(t *testing.T) {
+// TestWithDrainTimeout: items are canceled once the drain times out (at once for d <= 0), and DrainError reports it.
+func TestWithDrainTimeout(t *testing.T) {
 	for _, d := range []time.Duration{-time.Second, 0, 50 * time.Millisecond} {
 		t.Run(d.String(), func(t *testing.T) {
 			cause := errors.New("stop")
-			c := NewConveyor(OptDrainTimeout(d))
+			c := New(WithDrainTimeout(d))
 			ready := make(chan struct{})
 			var canceledAfter time.Duration
 			var begun time.Time
@@ -1114,21 +1114,21 @@ func TestOptDrainTimeout(t *testing.T) {
 	}
 }
 
-// TestOptDrainTimeoutLastWins: OptDrainTimeout and OptDrainContextFunc override each other; the last one wins.
-func TestOptDrainTimeoutLastWins(t *testing.T) {
+// TestWithDrainTimeoutLastWins: WithDrainTimeout and WithDrainContext override each other; the last one wins.
+func TestWithDrainTimeoutLastWins(t *testing.T) {
 	for _, funcLast := range []bool{false, true} {
 		t.Run(fmt.Sprintf("func last=%v", funcLast), func(t *testing.T) {
 			asked := make(chan struct{})
-			noLimit := OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
+			noLimit := WithDrainContext(func(error) (context.Context, context.CancelFunc) {
 				signal(asked)
 				return nil, nil
 			})
-			opts := []Option{noLimit, OptDrainTimeout(0)}
+			opts := []Option{noLimit, WithDrainTimeout(0)}
 			if funcLast {
-				opts = []Option{OptDrainTimeout(0), noLimit}
+				opts = []Option{WithDrainTimeout(0), noLimit}
 			}
 			cause := errors.New("stop")
-			c := NewConveyor(opts...)
+			c := New(opts...)
 			ready := make(chan struct{})
 			got := make(chan error, 1)
 			cancel, done := runAsync(c, func(ic context.Context) error {
@@ -1140,7 +1140,7 @@ func TestOptDrainTimeoutLastWins(t *testing.T) {
 				select {
 				case <-asked:
 					if !funcLast {
-						got <- errors.New("the drain context func was asked although OptDrainTimeout came last")
+						got <- errors.New("the drain context func was asked although WithDrainTimeout came last")
 						return nil
 					}
 					// The func declined a limit, so the watcher cancels nothing after that.
@@ -1169,8 +1169,8 @@ func TestOptDrainTimeoutLastWins(t *testing.T) {
 // ones leave no goroutine behind once the run is over. TestUntilShutdownWatchFreed checks the watches.
 func TestUntilShutdownNoLeak(t *testing.T) {
 	base := runtime.NumGoroutine()
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
+	c := New()
+	write := c.AddStage(WithName("write"))
 	err := runOnce(t, c, func(ic context.Context) error {
 		first := UntilShutdown(ic)
 		for i := 0; i < 10_000; i++ {
@@ -1193,7 +1193,7 @@ func TestUntilShutdownNoLeak(t *testing.T) {
 // shutdown, so in a live item the watches do not grow with the number of such contexts.
 func TestUntilShutdownWatchFreed(t *testing.T) {
 	const n = 1000
-	c := NewConveyor()
+	c := New()
 	var watches atomic.Int64
 	implOf(c).watchHook = func(delta int) { watches.Add(int64(delta)) }
 	err := runOnce(t, c, func(ic context.Context) error {
@@ -1230,7 +1230,7 @@ func TestUntilShutdownWatchFreed(t *testing.T) {
 // TestUntilShutdownFastPath: before shutdown, a call with an UntilShutdown context (or a value derivation of it)
 // returns that context without taking the run's lock.
 func TestUntilShutdownFastPath(t *testing.T) {
-	c := NewConveyor()
+	c := New()
 	err := runOnce(t, c, func(ic context.Context) error {
 		r := itemOf(ic).run
 		own := UntilShutdown(ic)
@@ -1272,11 +1272,11 @@ func TestUntilShutdownAbortCancelsOwnWork(t *testing.T) {
 		for _, abort := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/abort=%v", kind, abort), func(t *testing.T) {
 				cause := errors.New("stop")
-				c := NewConveyor()
-				hold := c.AddStage(OptName("hold"))
-				fo := c.AddFanOut(OptName("fo"))
-				pool := fo.AddPool(OptName("pool"))
-				write := c.AddStage(OptName("write"))
+				c := New()
+				hold := c.AddStage(WithName("hold"))
+				fo := c.AddFanOut(WithName("fo"))
+				pool := fo.AddPool(WithName("pool"))
+				write := c.AddStage(WithName("write"))
 
 				running, release := make(chan struct{}), make(chan struct{})
 				workCause := make(chan error, 1)
@@ -1352,7 +1352,7 @@ func TestUntilShutdownAbortCancelsOwnWork(t *testing.T) {
 // ShutdownError, and returns every other error, nil included, as is.
 func TestShutdownCauseMapsOnlyErrorsCausedByPre(t *testing.T) {
 	other := errors.New("other")
-	c := NewConveyor()
+	c := New()
 	reached := make(chan struct{})
 	type result struct{ before, nilErr, mapped, unrelated, ownDeadline error }
 	var got result

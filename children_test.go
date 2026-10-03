@@ -11,12 +11,12 @@ import (
 // child item travelling the lane's interior stages, and the commit joins them all.
 func TestBatchSplitsIntoChildJourneys(t *testing.T) {
 	const batch = 6
-	c := NewConveyor()
-	read := c.AddStage(OptName("read"))
-	fo := c.AddFanOut(OptName("split")).SetLimit(2)
-	lane := fo.AddLane(OptName("messages"))
-	enrich := lane.AddStage(OptName("enrich")) // exclusive interior stage
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	read := c.AddStage(WithName("read"))
+	fo := c.AddFanOut(WithName("split")).SetLimit(2)
+	lane := fo.AddLane(WithName("messages"))
+	enrich := lane.AddStage(WithName("enrich")) // exclusive interior stage
+	commit := c.AddStage(WithName("commit"))
 
 	var enriched numbers
 	enrichGauge := &gauge{}
@@ -69,10 +69,10 @@ func TestBatchSplitsIntoChildJourneys(t *testing.T) {
 // into an interior stage is what lets the next one start — and more children end up inside the lane than the one its
 // entrance holds.
 func TestChildReleasesLaneEntranceOnFirstMove(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane")) // a lane entrance always admits one child at a time
-	mid := lane.AddStage(OptName("mid"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane")) // a lane entrance always admits one child at a time
+	mid := lane.AddStage(WithName("mid"))
 
 	inLane := &gauge{}
 	proceed := make(chan struct{})
@@ -122,11 +122,11 @@ func TestChildReleasesLaneEntranceOnFirstMove(t *testing.T) {
 // TestChildrenPreserveOrderAcrossItems: children start in index order within an item, and all of an older item's
 // children start before any of a younger item's.
 func TestChildrenPreserveOrderAcrossItems(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(3)
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(3)
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid"))
+	commit := c.AddStage(WithName("commit"))
 
 	var order recorder
 	var itemOrder numbers
@@ -171,11 +171,11 @@ func TestChildrenPreserveOrderAcrossItems(t *testing.T) {
 // order at an exclusive interior stage is: older item first, then submission order, then index within a task.
 func TestChildTicketOrderAcrossTasksAndItems(t *testing.T) {
 	const items = 3
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(items) // let several items have work here at once
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid")) // exclusive: the order is total, so it is observable
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(items) // let several items have work here at once
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid")) // exclusive: the order is total, so it is observable
+	commit := c.AddStage(WithName("commit"))
 
 	var order recorder
 	runNOK(t, c, items, func(ctx context.Context, no int64) error {
@@ -235,13 +235,13 @@ func TestChildTicketOrderAcrossTasksAndItems(t *testing.T) {
 // interior. Both scopes are non-root, so this exercises a comparison neither of the others does, and each lane's
 // interior stays private to the children born on it.
 func TestChildCannotMoveIntoASiblingLane(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	laneA := fo.AddLane(OptName("laneA"))
-	midA := laneA.AddStage(OptName("midA"))
-	laneB := fo.AddLane(OptName("laneB"))
-	midB := laneB.AddStage(OptName("midB"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	laneA := fo.AddLane(WithName("laneA"))
+	midA := laneA.AddStage(WithName("midA"))
+	laneB := fo.AddLane(WithName("laneB"))
+	midB := laneB.AddStage(WithName("midB"))
+	commit := c.AddStage(WithName("commit"))
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -279,11 +279,11 @@ func TestChildCannotMoveIntoASiblingLane(t *testing.T) {
 // TestChildErrorFailsItemAndRun: a child's error escalates through the task group to its item and then to the run.
 func TestChildErrorFailsItemAndRun(t *testing.T) {
 	boom := errors.New("child boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid"))
+	commit := c.AddStage(WithName("commit"))
 
 	var committed atomic.Bool
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -323,10 +323,10 @@ func TestChildErrorFailsItemAndRun(t *testing.T) {
 // children blocked in their own work.
 func TestChildSeesParentCancellation(t *testing.T) {
 	boom := errors.New("sibling boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid")).SetLimit(3)
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid")).SetLimit(3)
 
 	released := make(chan struct{})
 	waiting := make(chan struct{}) // closed once both siblings are parked on their own ctx
@@ -372,11 +372,11 @@ func TestChildSeesParentCancellation(t *testing.T) {
 
 // TestChildInheritsItemNumber: numbers identify the conveyor item, so a child reports its parent's.
 func TestChildInheritsItemNumber(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid"))
+	commit := c.AddStage(WithName("commit"))
 
 	var mismatch atomic.Int64
 	runNOK(t, c, 4, func(ctx context.Context, no int64) error {
@@ -402,11 +402,11 @@ func TestChildInheritsItemNumber(t *testing.T) {
 // TestInFlightCountsItemsNotChildren: Stats.InFlight stays bounded by the conveyor's own nodes however many
 // children a lane runs.
 func TestInFlightCountsItemsNotChildren(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")) // limit 1
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid")).SetLimit(4)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")) // limit 1
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid")).SetLimit(4)
+	commit := c.AddStage(WithName("commit"))
 
 	var maxInFlight atomic.Int64
 	runNOK(t, c, 6, func(ctx context.Context, no int64) error {
@@ -437,11 +437,11 @@ func TestInFlightCountsItemsNotChildren(t *testing.T) {
 
 // TestChildCannotMoveOutsideItsLane: a child may only move through its own lane's nodes.
 func TestChildCannotMoveOutsideItsLane(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid"))
+	commit := c.AddStage(WithName("commit"))
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -475,10 +475,10 @@ func TestChildCannotMoveOutsideItsLane(t *testing.T) {
 
 // TestItemCannotMoveIntoALane: the mirror image — the conveyor's own item may not reach into a lane's nodes.
 func TestItemCannotMoveIntoALane(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid"))
 
 	err := runOnce(t, c, func(ctx context.Context) error {
 		assertPanics(t, errWrongScope, func() {
@@ -495,10 +495,10 @@ func TestItemCannotMoveIntoALane(t *testing.T) {
 // item that scheduled the work. Waiting is refused for the same reason; scheduling more work at the pool's own
 // fan-out is allowed.
 func TestNonTravellingWorkCannotMove(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")) // no interior nodes
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")) // no interior nodes
+	commit := c.AddStage(WithName("commit"))
 
 	var checked atomic.Bool
 	var spawned atomic.Bool
@@ -542,13 +542,13 @@ func TestNonTravellingWorkCannotMove(t *testing.T) {
 
 // TestNestedFanOutInsideLane: a pool's interior may itself fan out — the model recurses.
 func TestNestedFanOutInsideLane(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("outer")).SetLimit(2)
-	lane := fo.AddLane(OptName("outerLane"))
-	inner := lane.AddFanOut(OptName("inner"))
-	innerPool := inner.AddPool(OptName("innerPool")).SetLimit(2)
-	after := lane.AddStage(OptName("after"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("outer")).SetLimit(2)
+	lane := fo.AddLane(WithName("outerLane"))
+	inner := lane.AddFanOut(WithName("inner"))
+	innerPool := inner.AddPool(WithName("innerPool")).SetLimit(2)
+	after := lane.AddStage(WithName("after"))
+	commit := c.AddStage(WithName("commit"))
 
 	var innerRuns, afterRuns atomic.Int64
 	runNOK(t, c, 3, func(ctx context.Context, no int64) error {
@@ -589,13 +589,13 @@ func TestNestedFanOutInsideLane(t *testing.T) {
 // TestNestedTaskGroupErrorFailsEverything: an error deep inside a lane's own fan-out reaches the run.
 func TestNestedTaskGroupErrorFailsEverything(t *testing.T) {
 	boom := errors.New("nested boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("outer"))
-	lane := fo.AddLane(OptName("outerLane"))
-	inner := lane.AddFanOut(OptName("inner"))
-	innerPool := inner.AddPool(OptName("innerPool"))
-	after := lane.AddStage(OptName("after"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("outer"))
+	lane := fo.AddLane(WithName("outerLane"))
+	inner := lane.AddFanOut(WithName("inner"))
+	innerPool := inner.AddPool(WithName("innerPool"))
+	after := lane.AddStage(WithName("after"))
+	commit := c.AddStage(WithName("commit"))
 
 	var afterRan atomic.Bool
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -634,12 +634,12 @@ func TestNestedTaskGroupErrorFailsEverything(t *testing.T) {
 
 // TestInteriorStageWithQueue: a lane's interior nodes take the same knobs as the conveyor's.
 func TestInteriorStageWithQueue(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	first := lane.AddStage(OptName("first"))
-	second := lane.AddStage(OptName("second")).SetQueueSize(2)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	first := lane.AddStage(WithName("first"))
+	second := lane.AddStage(WithName("second")).SetQueueSize(2)
+	commit := c.AddStage(WithName("commit"))
 
 	g := &gauge{}
 	var done atomic.Int64
@@ -683,14 +683,14 @@ func TestGrandchildJourneysThroughANestedLane(t *testing.T) {
 		children      = 2
 		grandchildren = 2
 	)
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("outer")).SetLimit(2)
-	lane := fo.AddLane(OptName("outerLane"))
-	inner := lane.AddFanOut(OptName("inner")) // built inside the lane, so its lanes are the lane's own
-	innerLane := inner.AddLane(OptName("innerLane"))
-	deep := innerLane.AddStage(OptName("deep")) // gives innerLane an interior => its work travels
-	after := lane.AddStage(OptName("after")).SetLimit(2)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("outer")).SetLimit(2)
+	lane := fo.AddLane(WithName("outerLane"))
+	inner := lane.AddFanOut(WithName("inner")) // built inside the lane, so its lanes are the lane's own
+	innerLane := inner.AddLane(WithName("innerLane"))
+	deep := innerLane.AddStage(WithName("deep")) // gives innerLane an interior => its work travels
+	after := lane.AddStage(WithName("after")).SetLimit(2)
+	commit := c.AddStage(WithName("commit"))
 
 	var deepRuns atomic.Int64
 	var wrongNo atomic.Int64

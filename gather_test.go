@@ -11,10 +11,10 @@ import (
 // TestFanOutWorkIsJoinedOnTheWayOut: the tasks are the node's body, so the move that leaves the fan-out returns only
 // once every one of them has finished — with no task group named anywhere.
 func TestFanOutWorkIsJoinedOnTheWayOut(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")).SetLimit(3)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")).SetLimit(3)
+	commit := c.AddStage(WithName("commit"))
 
 	var events recorder
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -48,10 +48,10 @@ func TestFanOutWorkIsJoinedOnTheWayOut(t *testing.T) {
 // TestFanOutOverlapsLocalWorkWithItsTasks: MoveTo returns once the tasks are scheduled, so the code that follows runs
 // alongside them. That is the window the design buys by joining on the way out rather than on the way in.
 func TestFanOutOverlapsLocalWorkWithItsTasks(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	taskRunning := make(chan struct{})
 	localDone := make(chan struct{})
@@ -84,10 +84,10 @@ func TestFanOutOverlapsLocalWorkWithItsTasks(t *testing.T) {
 // standing in it has released the previous node but scheduled nothing, so the node's limit still bounds the work in
 // flight. With limit 1 and two items queued, exactly one task may be running at any time.
 func TestFanOutWaitingRoomStartsNoWork(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(1).SetQueueSize(2)
-	pool := fo.AddPool(OptName("pool")).SetLimit(4) // never the constraint
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(1).SetQueueSize(2)
+	pool := fo.AddPool(WithName("pool")).SetLimit(4) // never the constraint
+	commit := c.AddStage(WithName("commit"))
 
 	var live, peak atomic.Int64
 	release := make(chan struct{})
@@ -144,11 +144,11 @@ func TestFanOutWaitingRoomStartsNoWork(t *testing.T) {
 // TestFanOutToFanOutJoinsTheFirst: entering another fan-out is a way out of this one too, so the first node's work is
 // joined before the second node's is scheduled.
 func TestFanOutToFanOutJoinsTheFirst(t *testing.T) {
-	c := NewConveyor()
-	first := c.AddFanOut(OptName("first"))
-	firstPool := first.AddPool(OptName("firstPool"))
-	second := c.AddFanOut(OptName("second"))
-	secondPool := second.AddPool(OptName("secondPool"))
+	c := New()
+	first := c.AddFanOut(WithName("first"))
+	firstPool := first.AddPool(WithName("firstPool"))
+	second := c.AddFanOut(WithName("second"))
+	secondPool := second.AddPool(WithName("secondPool"))
 
 	var events recorder
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -185,9 +185,9 @@ func TestFanOutToFanOutJoinsTheFirst(t *testing.T) {
 // the work explicitly — completing the item does, and an error nobody observed still fails the run.
 func TestFanOutWorkJoinedWhenTheProcessorReturns(t *testing.T) {
 	boom := errors.New("late boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	var ran atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -212,10 +212,10 @@ func TestFanOutWorkJoinedWhenTheProcessorReturns(t *testing.T) {
 // the item does not enter the next stage — unlike a named join, which is awaited after entry.
 func TestFanOutWorkErrorSurfacesFromTheMoveOut(t *testing.T) {
 	boom := errors.New("task boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	var moveErr error
 	var entered atomic.Bool
@@ -250,10 +250,10 @@ func TestFanOutWorkErrorSurfacesFromTheMoveOut(t *testing.T) {
 // TestTryMoveToDeclinesWhileFanOutWorkRuns: the non-blocking move will not wait for the item's own tasks either, so it
 // declines until they are done — which is what makes polling it a way to do other work meanwhile.
 func TestTryMoveToDeclinesWhileFanOutWorkRuns(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	release := make(chan struct{})
 	var declines atomic.Int64
@@ -291,10 +291,10 @@ func TestTryMoveToDeclinesWhileFanOutWorkRuns(t *testing.T) {
 // failure is reported instead — with entered false, since the item did not move.
 func TestTryMoveToReportsFinishedFanOutFailure(t *testing.T) {
 	boom := errors.New("try boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	var tryErr error
 	var tryEntered atomic.Bool
@@ -328,10 +328,10 @@ func TestTryMoveToReportsFinishedFanOutFailure(t *testing.T) {
 // node, and admission is in item order — so a waiting room in front changes nothing about the order the pools see.
 func TestFanOutWorkPerPoolOrderSurvivesTheWaitingRoom(t *testing.T) {
 	const items = 6
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetQueueSize(3)
-	pool := fo.AddPool(OptName("pool")) // limit 1: strictly ordered
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetQueueSize(3)
+	pool := fo.AddPool(WithName("pool")) // limit 1: strictly ordered
+	commit := c.AddStage(WithName("commit"))
 
 	var order recorder
 	runNOK(t, c, items, func(ctx context.Context, no int64) error {
@@ -362,10 +362,10 @@ func TestFanOutWorkPerPoolOrderSurvivesTheWaitingRoom(t *testing.T) {
 // shutdown that cancels in-flight items reaches it there — the wait is not a hole in the cancellation story.
 func TestShutdownReleasesAnItemWaitingForItsWork(t *testing.T) {
 	cause := errors.New("shutting down")
-	c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items at once
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New(WithDrainTimeout(0)) // cancel in-flight items at once
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	inWork := make(chan struct{})
 	var moveErr atomic.Value
@@ -407,13 +407,13 @@ func TestShutdownReleasesAnItemWaitingForItsWork(t *testing.T) {
 // nodes — including a nested fan-out of their own. Nothing a child needs may depend on the parent moving on.
 func TestTravellingLaneWorkCompletesWhileTheItemWaits(t *testing.T) {
 	const items, children = 6, 3
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")) // limit 1: the parent blocks here until every child is done
-	lane := fo.AddLane(OptName("lane"))
-	inner := lane.AddStage(OptName("inner"))            // limit 1: children serialize here
-	nested := lane.AddFanOut(OptName("nested"))         // a fan-out inside the lane
-	nestedPool := nested.AddPool(OptName("nestedPool")) // limit 1
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")) // limit 1: the parent blocks here until every child is done
+	lane := fo.AddLane(WithName("lane"))
+	inner := lane.AddStage(WithName("inner"))            // limit 1: children serialize here
+	nested := lane.AddFanOut(WithName("nested"))         // a fan-out inside the lane
+	nestedPool := nested.AddPool(WithName("nestedPool")) // limit 1
+	commit := c.AddStage(WithName("commit"))
 
 	var done atomic.Int64
 	runNOK(t, c, items, func(ctx context.Context, no int64) error {

@@ -79,9 +79,9 @@ type NodeSpec struct {
 // implicit start stage is not part of Nodes — every conveyor has exactly one, automatically — but StartDelayMs
 // configures the simulated time an item spends there before its first move, same as any other node's delay.
 //
-// ItemsLimit is global rather than keyed to one node (see conveyor.Conveyor.SetItemsLimit): it caps how many items
-// may be in flight across the whole conveyor at once, on top of whatever capacity the nodes themselves admit. A
-// value <= 0 means unlimited.
+// ItemsLimit is global rather than keyed to one node (see conveyor.Conveyor.SetItemLimit): it caps how many items
+// may be in flight across the whole conveyor at once, on top of whatever capacity the nodes themselves admit. 0 means
+// unlimited.
 type Spec struct {
 	Nodes        []NodeSpec `json:"nodes"`
 	StartDelayMs int        `json:"startDelayMs"`

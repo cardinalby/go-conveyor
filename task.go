@@ -24,7 +24,7 @@ type TaskFunc = func(ctx context.Context) error
 // A Task is single-use: submitting the same Task twice panics.
 type Task struct {
 	branch *branch
-	src    taskSource // nil for a statically-empty task (e.g. NewTasks with count <= 0)
+	src    taskSource // nil for a statically-empty task (e.g. NewTasks with count 0)
 }
 
 // branchName names a task's branch for panic messages, tolerating a zero Task.

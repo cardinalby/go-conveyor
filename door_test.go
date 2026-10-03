@@ -39,10 +39,10 @@ func TestDoorOpensOnlyWhenTheItemAheadPublishes(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := NewConveyor()
-			fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-			pool := fo.AddPool(OptName("pool"))
-			commit := c.AddStage(OptName("commit")).SetLimit(2)
+			c := New()
+			fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+			pool := fo.AddPool(WithName("pool"))
+			commit := c.AddStage(WithName("commit")).SetLimit(2)
 
 			firstInside := make(chan struct{})
 			act := make(chan struct{})
@@ -101,11 +101,11 @@ func TestDoorOpensOnlyWhenTheItemAheadPublishes(t *testing.T) {
 // TestDoorClosedItemMayUseTheWaitingRoom: admission to a fan-out publishes the waiting room's rank, so the item behind
 // may step into the waiting room — freeing the node it came from — while the door itself stays closed.
 func TestDoorClosedItemMayUseTheWaitingRoom(t *testing.T) {
-	c := NewConveyor()
-	prev := c.AddStage(OptName("prev"))
+	c := New()
+	prev := c.AddStage(WithName("prev"))
 	// Buffered: item 1 blocks before its Schedule, and under the default it would keep prev meanwhile.
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2).SetQueueSize(1).SetBackpressure(BackpressureBuffered)
-	pool := fo.AddPool(OptName("pool"))
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2).SetQueueSize(1).SetBackpressure(BackpressureBuffered)
+	pool := fo.AddPool(WithName("pool"))
 
 	firstInside := make(chan struct{})
 	thirdAtPrev := make(chan struct{})
@@ -188,10 +188,10 @@ func assertClosedBodyRefusesEverything(t *testing.T, ctx context.Context, fo Fan
 // (no waiting room there) leaves the item inside the fan-out, still holding its slot, with a closed body. A later
 // MoveTo to the same node succeeds once it frees.
 func TestDoorFailedLeaveBeforeTheWaitingRoom(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	pool := fo.AddPool(OptName("pool"))
-	s := c.AddStage(OptName("s")) // exclusive, no waiting room: item 2 blocks at its door
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	pool := fo.AddPool(WithName("pool"))
+	s := c.AddStage(WithName("s")) // exclusive, no waiting room: item 2 blocks at its door
 
 	firstInS := make(chan struct{})
 	releaseFirst := make(chan struct{})
@@ -238,10 +238,10 @@ func TestDoorFailedLeaveBeforeTheWaitingRoom(t *testing.T) {
 // the fan-out slot — and a call context canceled there leaves it standing there with a closed body. The retried MoveTo
 // resumes waiting from that spot and never counts the item in the waiting room twice.
 func TestDoorFailedLeaveAfterTheWaitingRoom(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	pool := fo.AddPool(OptName("pool"))
-	s := c.AddStage(OptName("s")).SetQueueSize(2)
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	pool := fo.AddPool(WithName("pool"))
+	s := c.AddStage(WithName("s")).SetQueueSize(2)
 
 	firstInS := make(chan struct{})
 	releaseFirst := make(chan struct{})

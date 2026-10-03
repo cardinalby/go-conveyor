@@ -21,20 +21,24 @@ type Built struct {
 // branch's own interior series) — both expose the identical AddStage/AddFanOut shape, so one recursive function
 // builds either.
 type nodeHost interface {
-	AddStage(opts ...conveyor.AnyUnitOption) conveyor.Stage
-	AddFanOut(opts ...conveyor.AnyUnitOption) conveyor.FanOut
+	AddStage(opts ...conveyor.NodeOption) conveyor.Stage
+	AddFanOut(opts ...conveyor.NodeOption) conveyor.FanOut
 }
 
 // Build interprets spec into a fresh Conveyor: one AddStage/AddFanOut/AddPool/AddLane call per node/branch,
-// recursing into a lane's own interior nodes exactly like the top level, with OptName/SetLimit/SetQueueSize applied
+// recursing into a lane's own interior nodes exactly like the top level, with WithName/SetLimit/SetQueueSize applied
 // from the spec, plus whatever options the caller passes through — see runtime.Manager.Run, which supplies
-// OptDrainContextFunc so its own force-stop button can cancel in-flight items on demand instead of leaving them to
+// WithDrainContext so its own force-stop button can cancel in-flight items on demand instead of leaving them to
 // finish on their own.
 //
-// It returns an error for a malformed spec (a blank, reserved or duplicate id, an unknown Kind) rather than letting
-// the conveyor package panic on a handle mix-up later, in ItemProcessor.
+// It returns an error for a malformed spec (a blank, reserved or duplicate id, an unknown Kind, a limit or queue size
+// out of range) rather than letting the conveyor package panic on a handle mix-up later, in ItemProcessor, or on an
+// out-of-range value in its setters.
 func Build(spec Spec, options ...conveyor.Option) (*Built, error) {
-	c := conveyor.NewConveyor(options...).SetItemsLimit(spec.ItemsLimit)
+	if spec.ItemsLimit < 0 {
+		return nil, fmt.Errorf("itemsLimit %d: want >= 0", spec.ItemsLimit)
+	}
+	c := conveyor.New(options...).SetItemLimit(spec.ItemsLimit)
 	built := &Built{
 		Conveyor: c,
 		Handles:  map[string]conveyor.Unit{StartID: c.StartingStage()},
@@ -58,6 +62,18 @@ func Build(spec Spec, options ...conveyor.Option) (*Built, error) {
 		return nil, err
 	}
 	return built, nil
+}
+
+// CheckCapacity reports a limit or queue size the conveyor's setters would panic on: a limit below 1, a negative
+// queue size.
+func CheckCapacity(limit, queueSize int) error {
+	switch {
+	case limit < 1:
+		return fmt.Errorf("limit %d: want >= 1", limit)
+	case queueSize < 0:
+		return fmt.Errorf("queue size %d: want >= 0", queueSize)
+	}
+	return nil
 }
 
 // BackpressureMode maps a Spec's Backpressure to the library's mode. An empty value is BackpressureBalanced (the
@@ -94,16 +110,19 @@ func buildNodes(nodes []NodeSpec, host nodeHost, depth int, built *Built, claim 
 		if err := claim(n.ID); err != nil {
 			return err
 		}
+		if err := CheckCapacity(n.Limit, n.QueueSize); err != nil {
+			return fmt.Errorf("node %q: %w", n.ID, err)
+		}
 		switch n.Kind {
 		case KindStage:
-			built.Handles[n.ID] = host.AddStage(conveyor.OptName(n.Name)).SetLimit(n.Limit).SetQueueSize(n.QueueSize)
+			built.Handles[n.ID] = host.AddStage(conveyor.WithName(n.Name)).SetLimit(n.Limit).SetQueueSize(n.QueueSize)
 			built.Depth[n.ID] = depth
 		case KindFanOut:
 			mode, err := BackpressureMode(n.Backpressure)
 			if err != nil {
 				return fmt.Errorf("node %q: %w", n.ID, err)
 			}
-			f := host.AddFanOut(conveyor.OptName(n.Name)).SetLimit(n.Limit).SetQueueSize(n.QueueSize).SetBackpressure(mode)
+			f := host.AddFanOut(conveyor.WithName(n.Name)).SetLimit(n.Limit).SetQueueSize(n.QueueSize).SetBackpressure(mode)
 			built.Handles[n.ID] = f
 			built.Depth[n.ID] = depth
 			for _, br := range n.Branches {
@@ -112,10 +131,13 @@ func buildNodes(nodes []NodeSpec, host nodeHost, depth int, built *Built, claim 
 				}
 				switch br.Kind {
 				case KindPool:
-					built.Handles[br.ID] = f.AddPool(conveyor.OptName(br.Name)).SetLimit(br.Limit)
+					if err := CheckCapacity(br.Limit, 0); err != nil {
+						return fmt.Errorf("branch %q: %w", br.ID, err)
+					}
+					built.Handles[br.ID] = f.AddPool(conveyor.WithName(br.Name)).SetLimit(br.Limit)
 					built.Depth[br.ID] = depth + 1
 				case KindLane:
-					lane := f.AddLane(conveyor.OptName(br.Name))
+					lane := f.AddLane(conveyor.WithName(br.Name))
 					built.Handles[br.ID] = lane
 					built.Depth[br.ID] = depth + 1
 					if err := buildNodes(br.Nodes, lane, depth+1, built, claim); err != nil {

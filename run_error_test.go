@@ -19,8 +19,8 @@ func runErrorKinds(err error) (shutdown, item bool) {
 // TestRunErrorItemFailure: a failed item makes Run return an ItemError (and not a ShutdownError) that unwraps to
 // the item's error and names the node the item was in.
 func TestRunErrorItemFailure(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 	boom := errors.New("boom")
 
 	err := runOnce(t, c, func(ic context.Context) error {
@@ -50,7 +50,7 @@ func TestRunErrorItemFailure(t *testing.T) {
 // TestRunErrorContextCancellation: cancelling the Run context makes Run return a ShutdownError that unwraps to the
 // context's cause.
 func TestRunErrorContextCancellation(t *testing.T) {
-	c := NewConveyor()
+	c := New()
 	cause := errors.New("stop")
 	ctx, cancel := context.WithCancelCause(context.Background())
 	cancel(cause)
@@ -70,7 +70,7 @@ func TestRunErrorContextCancellation(t *testing.T) {
 
 // TestRunErrorAlreadyRunningIsPlain: ErrConveyorAlreadyRunning is returned as is, not as a RunError.
 func TestRunErrorAlreadyRunningIsPlain(t *testing.T) {
-	c := NewConveyor()
+	c := New()
 	started := make(chan struct{})
 	release := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -100,8 +100,8 @@ func TestRunErrorAlreadyRunningIsPlain(t *testing.T) {
 // TestRunErrorFirstEventWins: when the Run context is canceled first, a later failure of an item in flight does not
 // replace the ShutdownError; it is the DrainError, an ItemError with the item's unit and error.
 func TestRunErrorFirstEventWins(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 	boom := errors.New("boom")
 	cause := errors.New("stop")
 
@@ -135,7 +135,7 @@ func TestRunErrorFirstEventWins(t *testing.T) {
 	if !errors.As(re.DrainError(), &ie) || ie.Unwrap() != boom || ie.Unit() != Unit(s) {
 		t.Fatalf("DrainError = %v, want an ItemError with %v in %v", re.DrainError(), boom, s)
 	}
-	if want := "conveyor is shutting down: stop (drain: boom)"; err.Error() != want {
+	if want := "conveyor is shutting down: stop (drain: item failed at s: boom)"; err.Error() != want {
 		t.Fatalf("Error() = %q, want %q", err.Error(), want)
 	}
 }
@@ -154,8 +154,8 @@ func runStopped(c Conveyor) bool {
 // TestRunErrorItemsSeeTheTrigger: after an item failure, aborted items get a ShutdownError that unwraps to the same
 // ItemError Run returns.
 func TestRunErrorItemsSeeTheTrigger(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 	boom := errors.New("boom")
 	secondReady := make(chan struct{})
 	seen := make(chan error, 1)
@@ -200,9 +200,9 @@ func TestRunErrorItemsSeeTheTrigger(t *testing.T) {
 // TestRunErrorLateFailureDoesNotReplaceTriggerForLaterItems: when the Run context is canceled first, a later item
 // failure does not change the cause of the items after it. They still see the Run context's cause.
 func TestRunErrorLateFailureDoesNotReplaceTriggerForLaterItems(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
-	w := c.AddStage(OptName("w"))
+	c := New()
+	s := c.AddStage(WithName("s"))
+	w := c.AddStage(WithName("w"))
 	boom := errors.New("boom")
 	stop := errors.New("stop")
 	firstInW := make(chan struct{})
@@ -253,10 +253,10 @@ func TestRunErrorItemSideCauseIsNotFilledByRun(t *testing.T) {
 	boom := errors.New("boom")
 	late := errors.New("late")
 	drainCause := errors.New("drain timed out")
-	c := NewConveyor(OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
+	c := New(WithDrainContext(func(error) (context.Context, context.CancelFunc) {
 		return context.WithTimeoutCause(context.Background(), 20*time.Millisecond, drainCause)
 	}))
-	s := c.AddStage(OptName("s"))
+	s := c.AddStage(WithName("s"))
 	secondReady := make(chan struct{})
 	kept := make(chan error, 1)
 
@@ -301,7 +301,7 @@ func TestRunErrorItemSideCauseIsNotFilledByRun(t *testing.T) {
 // TestRunErrorDrainTimeout: when the drain context expires before the items finish, DrainError reports its cause.
 func TestRunErrorDrainTimeout(t *testing.T) {
 	drainCause := errors.New("drain timed out")
-	c := NewConveyor(OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
+	c := New(WithDrainContext(func(error) (context.Context, context.CancelFunc) {
 		return context.WithTimeoutCause(context.Background(), 20*time.Millisecond, drainCause)
 	}))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -324,7 +324,7 @@ func TestRunErrorDrainTimeout(t *testing.T) {
 
 // TestRunErrorNoDrainErrorWhenItemsFinish: items that finish inside the drain timeout leave DrainError nil.
 func TestRunErrorNoDrainErrorWhenItemsFinish(t *testing.T) {
-	c := NewConveyor(OptDrainTimeout(testTimeout))
+	c := New(WithDrainTimeout(testTimeout))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -348,8 +348,8 @@ func TestAbortedItemReturningAnyErrorIsNotAFailure(t *testing.T) {
 	for _, ret := range []error{context.Canceled, errors.New("driver: connection closed")} {
 		t.Run(ret.Error(), func(t *testing.T) {
 			boom := errors.New("boom")
-			c := NewConveyor()
-			s := c.AddStage(OptName("s")).SetLimit(2)
+			c := New()
+			s := c.AddStage(WithName("s")).SetLimit(2)
 			inS, waiting := make(chan struct{}), make(chan struct{})
 			returned := make(chan error, 1)
 
@@ -389,7 +389,7 @@ func TestAbortedItemReturningAnyErrorIsNotAFailure(t *testing.T) {
 // processor returns afterwards (from a call context of its own) does not turn into an abort: the item fails with what
 // the processor returned, not with the joined task error.
 func TestPlainCancelAfterTaskFailureStaysAFailure(t *testing.T) {
-	c := NewConveyor()
+	c := New()
 	boom := errors.New("boom")
 
 	err := runOnce(t, c, func(ic context.Context) error {
@@ -440,9 +440,9 @@ func runFirstItem(t *testing.T, c Conveyor, proc ItemProcessor) error {
 
 // TestItemErrorUnitLastStage: an item failing in its last stage is reported in that stage.
 func TestItemErrorUnitLastStage(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 	boom := errors.New("boom")
 
 	err := runOnce(t, c, func(ic context.Context) error {
@@ -462,8 +462,8 @@ func TestItemErrorUnitLastStage(t *testing.T) {
 
 // TestItemErrorUnitBeforeAnyMove: an item failing before its first MoveTo is in the starting stage.
 func TestItemErrorUnitBeforeAnyMove(t *testing.T) {
-	c := NewConveyor()
-	c.AddStage(OptName("a"))
+	c := New()
+	c.AddStage(WithName("a"))
 	boom := errors.New("boom")
 
 	err := runOnce(t, c, func(context.Context) error { return boom })
@@ -476,9 +476,9 @@ func TestItemErrorUnitBeforeAnyMove(t *testing.T) {
 // TestItemErrorUnitBlockedWithoutQueue: an item whose MoveTo fails while it waits with no waiting room stays in
 // the node it was in.
 func TestItemErrorUnitBlockedWithoutQueue(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 	holding := make(chan struct{})
 	release := make(chan struct{})
 	waitErr := errors.New("gave up waiting")
@@ -524,9 +524,9 @@ func TestItemErrorUnitBlockedWithoutQueue(t *testing.T) {
 // TestItemErrorUnitWaitingInQueue: an item that failed while waiting in the queue of b is reported in b, the node it
 // waits in front of.
 func TestItemErrorUnitWaitingInQueue(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b")).SetQueueSize(1)
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b")).SetQueueSize(1)
 	holding := make(chan struct{})
 	release := make(chan struct{})
 	waitErr := errors.New("gave up waiting")
@@ -571,9 +571,9 @@ func TestItemErrorUnitWaitingInQueue(t *testing.T) {
 
 // TestItemErrorUnitTaskFailsAfterMovingOn: a RetainFor task of a fails after the item moved on to b.
 func TestItemErrorUnitTaskFailsAfterMovingOn(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 	gate := make(chan struct{})
 	boom := errors.New("boom")
 
@@ -604,10 +604,10 @@ func TestItemErrorUnitTaskFailsAfterMovingOn(t *testing.T) {
 // TestItemErrorUnitFanOutTaskFailure: a task of a fan-out failing while the item is in the fan-out is reported in
 // the fan-out, not in one of its branches.
 func TestItemErrorUnitFanOutTaskFailure(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 	boom := errors.New("boom")
 
 	err := runOnce(t, c, func(ic context.Context) error {
@@ -634,10 +634,10 @@ func TestItemErrorUnitFanOutTaskFailure(t *testing.T) {
 // TestItemErrorUnitFanOutRetainedTaskFailsAfterMovingOn: same as the stage case, for FanOut.Retain: the item is in
 // b when the task it left running in fo fails.
 func TestItemErrorUnitFanOutRetainedTaskFailsAfterMovingOn(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	b := c.AddStage(WithName("b"))
 	gate := make(chan struct{})
 	boom := errors.New("boom")
 
@@ -682,7 +682,7 @@ func drainErrOf(c Conveyor) error {
 func drainByTest(t *testing.T) (Option, context.CancelCauseFunc) {
 	ctx, end := context.WithCancelCause(context.Background())
 	t.Cleanup(func() { end(nil) })
-	return OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) { return ctx, nil }), end
+	return WithDrainContext(func(error) (context.Context, context.CancelFunc) { return ctx, nil }), end
 }
 
 // TestRunErrorDrainFailureBeforeDrainTimeout: the first event of the drain wins: an item failure before the drain times
@@ -692,8 +692,8 @@ func TestRunErrorDrainFailureBeforeDrainTimeout(t *testing.T) {
 	stop := errors.New("stop")
 	errDrain := errors.New("drain timed out")
 	opt, endDrain := drainByTest(t)
-	c := NewConveyor(opt)
-	s := c.AddStage(OptName("s")).SetLimit(2)
+	c := New(opt)
+	s := c.AddStage(WithName("s")).SetLimit(2)
 	inS, secondInS, fail := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	olderCause := make(chan error, 1)
 
@@ -743,7 +743,7 @@ func TestRunErrorFailureAfterDrainTimeoutIsAnAbort(t *testing.T) {
 	stop := errors.New("stop")
 	errDrain := errors.New("drain timed out")
 	opt, endDrain := drainByTest(t)
-	c := NewConveyor(opt)
+	c := New(opt)
 	ready, failRetain, canceled := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	joined := make(chan error, 1)
 
@@ -784,8 +784,8 @@ func TestRunErrorFailureAfterDrainTimeoutIsAnAbort(t *testing.T) {
 func TestRunErrorDrainFailureAfterItemTrigger(t *testing.T) {
 	boom := errors.New("boom")
 	second := errors.New("second")
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetLimit(3)
+	c := New()
+	s := c.AddStage(WithName("s")).SetLimit(3)
 	firstInS, secondInS, thirdInS := make(chan struct{}), make(chan struct{}), make(chan struct{})
 
 	_, done := runAsync(c, func(ic context.Context) error {
@@ -831,7 +831,7 @@ func TestRunErrorDrainFailureAfterItemTrigger(t *testing.T) {
 	if !errors.As(ie.DrainError(), &de) || de.Unwrap() != second || de.Unit() != Unit(s) {
 		t.Fatalf("DrainError = %v, want an ItemError with %v in %v", ie.DrainError(), second, s)
 	}
-	if want := "boom (drain: second)"; err.Error() != want {
+	if want := "item failed at s: boom (drain: item failed at s: second)"; err.Error() != want {
 		t.Fatalf("Error() = %q, want %q", err.Error(), want)
 	}
 }
@@ -842,7 +842,7 @@ func TestRunErrorDrainFailureBeforeJoin(t *testing.T) {
 	boom := errors.New("boom")
 	stop := errors.New("stop")
 	opt, endDrain := drainByTest(t)
-	c := NewConveyor(opt)
+	c := New(opt)
 	ready, release := make(chan struct{}), make(chan struct{})
 	var first atomic.Pointer[item]
 

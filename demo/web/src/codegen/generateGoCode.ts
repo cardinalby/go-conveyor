@@ -186,7 +186,7 @@ function emitBody(
  * Takes the editable Pipeline rather than the wire Spec because those two implicit names are display-only and so are
  * deliberately absent from the Spec, which mirrors Go's schema.go (see ../types/topology). */
 export function generateGoCode(pipeline: Pipeline): string {
-  const newConveyor = pipeline.itemsLimit > 0 ? `c := conveyor.NewConveyor().SetItemsLimit(${pipeline.itemsLimit})` : "c := conveyor.NewConveyor()";
+  const newConveyor = pipeline.itemsLimit > 0 ? `c := conveyor.New().SetItemLimit(${pipeline.itemsLimit})` : "c := conveyor.New()";
   const declLines: string[] = [newConveyor];
   const usedIdents = new Set<string>();
   const varById = new Map<string, string>();

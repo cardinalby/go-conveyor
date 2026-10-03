@@ -26,11 +26,11 @@ func runFirstFails(c Conveyor, proc ItemProcessor) error {
 // it may move on and finish cleanly: returning nil skips the failure (e.g. after dead-lettering the message).
 func TestFailedBodyCancelsSiblingsNotItem(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	failing := fo.AddPool(OptName("failing"))
-	waiting := fo.AddPool(OptName("waiting"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	failing := fo.AddPool(WithName("failing"))
+	waiting := fo.AddPool(WithName("waiting"))
+	commit := c.AddStage(WithName("commit"))
 
 	var siblingCause, leaveErr, itemCause error
 	var committed bool
@@ -84,9 +84,9 @@ func TestFailedBodyCancelsSiblingsNotItem(t *testing.T) {
 // TaskError and the task never runs. An item that joined the failure and returns nil does not fail.
 func TestFailedBodyRefusesMoreWork(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	var waitErr, againErr, schedErr error
 	var ran bool
@@ -124,9 +124,9 @@ func TestFailedBodyRefusesMoreWork(t *testing.T) {
 // of a later round the processor never joins fails the item.
 func TestNewRoundAfterCleanWaitMustBeJoinedAgain(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	err := runFirstFails(c, func(ctx context.Context) error {
 		if err := fo.MoveTo(ctx); err != nil {
@@ -154,8 +154,8 @@ func TestNewRoundAfterCleanWaitMustBeJoinedAgain(t *testing.T) {
 // TaskError naming the stage.
 func TestUnjoinedRetainForFailsItem(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 
 	err := runFirstFails(c, func(ctx context.Context) error {
 		if err := s.MoveTo(ctx); err != nil {
@@ -178,8 +178,8 @@ func TestUnjoinedRetainForFailsItem(t *testing.T) {
 // shutdown begins and later items are canceled before the item's background work is over.
 func TestUnjoinedFailureDuringJoinStartsShutdownAtOnce(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 
 	reached2 := make(chan struct{})
 	returned1 := make(chan struct{})
@@ -233,10 +233,10 @@ func TestDrainFailureDuringJoinBeatsLaterDrainTimeout(t *testing.T) {
 	boom := errors.New("boom")
 	drainCtx, drainCancel := context.WithCancel(context.Background())
 	defer drainCancel()
-	c := NewConveyor(OptDrainContextFunc(func(error) (context.Context, context.CancelFunc) {
+	c := New(WithDrainContext(func(error) (context.Context, context.CancelFunc) {
 		return drainCtx, nil
 	}))
-	s := c.AddStage(OptName("s"))
+	s := c.AddStage(WithName("s"))
 
 	returned1 := make(chan struct{})
 	failNow := make(chan struct{})
@@ -279,11 +279,11 @@ func TestDrainFailureDuringJoinBeatsLaterDrainTimeout(t *testing.T) {
 // with the body's TaskError, and the leave reports the TaskError naming the lane.
 func TestFailedLaneChildCancelsItsBody(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid")).SetLimit(2)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid")).SetLimit(2)
+	commit := c.AddStage(WithName("commit"))
 
 	inMid := make(chan struct{})
 	var siblingCause, leaveErr error
@@ -333,10 +333,10 @@ func TestFailedLaneChildCancelsItsBody(t *testing.T) {
 // reports the ShutdownError, not a TaskError, and the item that returns it is an abort, not a failure of the drain:
 // DrainError is the drain timeout itself.
 func TestTasksStoppedByShutdownAreAnAbort(t *testing.T) {
-	c := NewConveyor(OptDrainTimeout(0))
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New(WithDrainTimeout(0))
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	running := make(chan struct{})
 	var leaveErr error

@@ -14,7 +14,7 @@ to keep it:
 runs:
 
 ```go
-c := conveyor.NewConveyor()
+c := conveyor.New()
 stage1 := c.AddStage()
 fanOut := c.AddFanOut()
 pool1 := fanOut.AddPool()
@@ -61,7 +61,7 @@ Here the item finishes some work in the previous stage while it already works in
 enters the previous stage meanwhile:
 
 ```go
-c := conveyor.NewConveyor()
+c := conveyor.New()
 db1 := c.AddStage()
 db2 := c.AddStage()
 commit := c.AddStage()

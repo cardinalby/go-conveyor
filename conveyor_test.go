@@ -11,9 +11,9 @@ import (
 // TestLinearPipelinePreservesOrder is the flagship shape: read -> write -> commit, all exclusive. Every stage
 // must see items 1..N in order, and the three stages must overlap (a saturated pipeline).
 func TestLinearPipelinePreservesOrder(t *testing.T) {
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	commit := c.AddStage(WithName("commit"))
 
 	var writes, commits numbers
 	writeGauge, commitGauge := &gauge{}, &gauge{}
@@ -53,10 +53,10 @@ func TestLinearPipelinePreservesOrder(t *testing.T) {
 // TestPipelineOverlaps proves the stages actually run concurrently: with 3 exclusive stages, three different
 // items must be inside them at the same time at some point.
 func TestPipelineOverlaps(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
-	cc := c.AddStage(OptName("c"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
+	cc := c.AddStage(WithName("c"))
 
 	var inside atomic.Int64
 	var peak atomic.Int64
@@ -92,9 +92,9 @@ func TestPipelineOverlaps(t *testing.T) {
 
 // TestSharedStageBoundedConcurrency: SetLimit(n) admits exactly n items concurrently, no more.
 func TestSharedStageBoundedConcurrency(t *testing.T) {
-	c := NewConveyor()
-	shared := c.AddStage(OptName("shared")).SetLimit(3)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	shared := c.AddStage(WithName("shared")).SetLimit(3)
+	commit := c.AddStage(WithName("commit"))
 
 	g := &gauge{}
 	// The first three items block until all three are inside, proving the stage really runs them concurrently;
@@ -132,9 +132,9 @@ func TestSharedStageBoundedConcurrency(t *testing.T) {
 // TestItemMayReturnEarly: an item that skips the rest of the pipeline releases its slots and does not stall the
 // items behind it.
 func TestItemMayReturnEarly(t *testing.T) {
-	c := NewConveyor()
-	mid := c.AddStage(OptName("mid"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	mid := c.AddStage(WithName("mid"))
+	commit := c.AddStage(WithName("commit"))
 
 	var commits numbers
 	runNOK(t, c, 10, func(ctx context.Context, no int64) error {
@@ -165,9 +165,9 @@ func TestItemMayReturnEarly(t *testing.T) {
 
 // TestStageSkippedEntirely: a stage nobody enters must not block the pipeline.
 func TestStageSkippedEntirely(t *testing.T) {
-	c := NewConveyor()
-	_ = c.AddStage(OptName("never"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	_ = c.AddStage(WithName("never"))
+	commit := c.AddStage(WithName("commit"))
 
 	var commits numbers
 	runNOK(t, c, 8, func(ctx context.Context, no int64) error {
@@ -185,8 +185,8 @@ func TestStageSkippedEntirely(t *testing.T) {
 // rather than counting in user code — by the time the processor could decrement a counter, MoveTo has already
 // released the slot and the next item may legitimately hold it.
 func TestStartStageGatesCreation(t *testing.T) {
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
+	c := New()
+	write := c.AddStage(WithName("write"))
 
 	var startPeak, startLimit atomic.Int64
 	runNOK(t, c, 15, func(ctx context.Context, no int64) error {
@@ -213,9 +213,9 @@ func TestStartStageGatesCreation(t *testing.T) {
 // TestItemErrorShutsDownGracefully: a failing item becomes Run's error, earlier items finish, later ones abort.
 func TestItemErrorShutsDownGracefully(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	work := c.AddStage(OptName("work"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	work := c.AddStage(WithName("work"))
+	commit := c.AddStage(WithName("commit"))
 
 	var commits numbers
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -251,7 +251,7 @@ func TestItemErrorShutsDownGracefully(t *testing.T) {
 
 // TestRunReturnsContextCause: a clean shutdown reports the run context's cause, not an item error.
 func TestRunReturnsContextCause(t *testing.T) {
-	c := NewConveyor()
+	c := New()
 	s := c.AddStage()
 	cause := errors.New("time to stop")
 
@@ -270,7 +270,7 @@ func TestRunReturnsContextCause(t *testing.T) {
 
 // TestAlreadyRunning: a second concurrent Run is refused.
 func TestAlreadyRunning(t *testing.T) {
-	c := NewConveyor()
+	c := New()
 
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
@@ -299,7 +299,7 @@ func TestAlreadyRunning(t *testing.T) {
 
 // TestRunAgainAfterReturn: the conveyor is reusable, with fresh per-run state.
 func TestRunAgainAfterReturn(t *testing.T) {
-	c := NewConveyor()
+	c := New()
 	s := c.AddStage()
 
 	for round := 0; round < 3; round++ {
@@ -322,11 +322,11 @@ func TestRunAgainAfterReturn(t *testing.T) {
 // children and UntilShutdown contexts, while its cancellation stays a graceful shutdown.
 func TestRunContextValuesReachItems(t *testing.T) {
 	type key struct{}
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid"))
 
 	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), key{}, "v"))
 	defer cancel()

@@ -37,7 +37,7 @@ type RetainableStage interface {
 	// on ctx or on its own context — fn does not run and the returned task group is already finished, carrying the
 	// cancellation cause.
 	//
-	// It panics on misuse: a handle from another conveyor, or a stage the item is not in now.
+	// It panics on misuse: a nil fn, a handle from another conveyor, or a stage the item is not in now.
 	RetainFor(ctx context.Context, fn TaskFunc) TaskGroup
 }
 
@@ -68,16 +68,16 @@ type Stage interface {
 	// and returns (false, the TaskError) on a task error. It panics on the same misuse as MoveTo.
 	TryMoveTo(ctx context.Context) (entered bool, err error)
 
-	// SetLimit sets how many items may run this stage's code at once (default 1; a limit <= 0 means 1), and
-	// returns the stage for chaining. Item order through the stage is only guaranteed at limit 1.
+	// SetLimit sets how many items may run this stage's code at once (default 1), and returns the stage for
+	// chaining. Item order through the stage is only guaranteed at limit 1. A limit below 1 panics.
 	//
 	// Safe to call at any time, from any goroutine, including on a running conveyor; it never evicts items already
 	// admitted.
 	SetLimit(limit int) Stage
 
-	// SetQueueSize gives this stage a waiting room of size items in front of it (a size <= 0 means none), and
+	// SetQueueSize gives this stage a waiting room of size items in front of it (0, the default, means none), and
 	// returns the stage for chaining. An item that cannot enter the stage directly waits here instead, freeing the
-	// previous node. Only MoveTo uses the waiting room; TryMoveTo never does.
+	// previous node. Only MoveTo uses the waiting room; TryMoveTo never does. A negative size panics.
 	//
 	// Safe to call at any time, from any goroutine, including on a running conveyor; it never evicts items already
 	// waiting.
@@ -94,7 +94,7 @@ type Stage interface {
 // across Run invocations (its waiting room is a capacity dial on that unit, not a node of its own).
 type stage struct {
 	series *series
-	name   string // optional user-given name (OptName); empty -> positional in String
+	name   string // optional user-given name (WithName); empty -> positional in String
 	ord    int    // 1-based position among its series' nodes, for the positional name
 	work   *unit
 }
@@ -189,6 +189,10 @@ func (c *conveyor) retain(ctx context.Context, u *unit) func() {
 // retainFor hands the slot of stage unit u to the task fn: the body of RetainFor on a stage, the starting stage and a
 // lane.
 func (c *conveyor) retainFor(ctx context.Context, u *unit, fn TaskFunc) TaskGroup {
+	if fn == nil {
+		// First, so misuse panics here in every case — also on a canceled or finished item — not in the task goroutine.
+		panic(fmt.Errorf("%s.RetainFor: %w", u, errNilTaskFunc))
+	}
 	// checkCancel is false: a canceled item is answered with a task group of this item's own (below), not an error,
 	// which needs the lock this call takes.
 	it, r, err := c.actingItem(ctx, "retain", u, false)

@@ -21,8 +21,8 @@ func idleOf(c Conveyor) int {
 // TestStartingStageRetainDelaysNextItem: item 1 retains the starting stage and moves on to s. While the bgOp runs,
 // a worker is parked for the start stage and still only one item exists; once it returns, item 2 is created.
 func TestStartingStageRetainDelaysNextItem(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 	start := c.StartingStage()
 
 	release := make(chan struct{})
@@ -61,8 +61,8 @@ func TestStartingStageRetainDelaysNextItem(t *testing.T) {
 // TestStartingStageRetainAfterFirstMovePanics: the item leaves the starting stage on its first MoveTo, so Retain
 // after it is misuse.
 func TestStartingStageRetainAfterFirstMovePanics(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 	panicsInItem(t, c, errStageNotEntered, func(ctx context.Context) {
 		if err := s.MoveTo(ctx); err != nil {
 			panic(err)
@@ -74,8 +74,8 @@ func TestStartingStageRetainAfterFirstMovePanics(t *testing.T) {
 // TestStartingStageRetainUnobservedErrorFailsRun: a bgOp error nobody joined still fails the run.
 func TestStartingStageRetainUnobservedErrorFailsRun(t *testing.T) {
 	boom := errors.New("start retain boom")
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -92,10 +92,10 @@ func TestStartingStageRetainUnobservedErrorFailsRun(t *testing.T) {
 
 // TestStartingStageRetainByChildPanics: the starting stage belongs to root items; a lane child must use its lane.
 func TestStartingStageRetainByChildPanics(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid"))
 
 	var got error
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -121,10 +121,10 @@ func TestStartingStageRetainByChildPanics(t *testing.T) {
 // TestLaneRetainDelaysNextChild: child 0 retains the lane's entrance and moves on to mid. The lane creates child 1
 // only after the bgOp returns, although mid has room for both.
 func TestLaneRetainDelaysNextChild(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid")).SetLimit(2)
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid")).SetLimit(2)
 
 	inMid := make(chan struct{})
 	var started atomic.Int64
@@ -178,10 +178,10 @@ func TestLaneRetainDelaysNextChild(t *testing.T) {
 
 // TestLaneRetainByRootItemPanics: the lane's entrance belongs to its children, not to the ItemProcessor.
 func TestLaneRetainByRootItemPanics(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	lane.AddStage(OptName("mid"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	lane.AddStage(WithName("mid"))
 	panicsInItem(t, c, errWrongScope, func(ctx context.Context) {
 		lane.RetainFor(ctx, func(context.Context) error { return nil })
 	})
@@ -190,10 +190,10 @@ func TestLaneRetainByRootItemPanics(t *testing.T) {
 // TestLaneRetainAfterFirstMovePanics: a child leaves the lane's entrance on its first MoveTo, so Retain after it
 // is misuse.
 func TestLaneRetainAfterFirstMovePanics(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid"))
 
 	var got error
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -222,9 +222,9 @@ func TestLaneRetainAfterFirstMovePanics(t *testing.T) {
 // TestLaneRetainWithoutNodesPanics: a lane with no interior nodes runs its tasks like a pool, with no child item,
 // so there is nothing to move on and Retain is refused.
 func TestLaneRetainWithoutNodesPanics(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
 
 	var got error
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -251,11 +251,11 @@ func TestLaneRetainWithoutNodesPanics(t *testing.T) {
 // child's Retain of an interior stage.
 func TestLaneRetainUnobservedErrorFailsRun(t *testing.T) {
 	boom := errors.New("lane retain boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid"))
+	commit := c.AddStage(WithName("commit"))
 
 	err := runUntil(t, c, 3, func(ctx context.Context, no int64) error {
 		err := fo.MoveTo(ctx)

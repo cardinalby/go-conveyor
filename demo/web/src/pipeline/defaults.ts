@@ -17,7 +17,7 @@ export const MAX_LANES = 6;
 export const MIN_TASKS_PER_ITEM = 1;
 export const MAX_TASKS_PER_ITEM = 10;
 
-// 0 means unlimited (see conveyor.Conveyor.SetItemsLimit) — global to the conveyor, not a per-node dial, so it gets
+// 0 means unlimited (see conveyor.Conveyor.SetItemLimit) — global to the conveyor, not a per-node dial, so it gets
 // a much larger ceiling than the per-node limits above.
 export const MIN_ITEMS_LIMIT = 0;
 export const MAX_ITEMS_LIMIT = 9999;

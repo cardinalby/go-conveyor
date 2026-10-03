@@ -24,10 +24,10 @@ var (
 // back from FanOut.Branches, so a type assertion tells the kinds apart and cannot reach the other kind's methods
 // (nodes on a pool, SetLimit on a lane).
 func TestPoolAndLaneAreDistinguishableByTypeAssertion(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	var pool Branch = fo.AddPool(OptName("pool"))
-	var lane Branch = fo.AddLane(OptName("lane"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	var pool Branch = fo.AddPool(WithName("pool"))
+	var lane Branch = fo.AddLane(WithName("lane"))
 
 	if _, ok := pool.(Lane); ok {
 		t.Error("a Pool asserts to Lane")
@@ -35,7 +35,7 @@ func TestPoolAndLaneAreDistinguishableByTypeAssertion(t *testing.T) {
 	if _, ok := lane.(Pool); ok {
 		t.Error("a Lane asserts to Pool")
 	}
-	if _, ok := pool.(interface{ AddStage(...AnyUnitOption) Stage }); ok {
+	if _, ok := pool.(interface{ AddStage(...NodeOption) Stage }); ok {
 		t.Error("a Pool has AddStage")
 	}
 	bs := fo.Branches()
@@ -58,17 +58,17 @@ func TestBranchServesBothKindsUniformly(t *testing.T) {
 		name  string
 		build func(FanOut) (Branch, Stage)
 	}{
-		{"pool", func(fo FanOut) (Branch, Stage) { return fo.AddPool(OptName("b")).SetLimit(2), nil }},
+		{"pool", func(fo FanOut) (Branch, Stage) { return fo.AddPool(WithName("b")).SetLimit(2), nil }},
 		{"lane", func(fo FanOut) (Branch, Stage) {
-			l := fo.AddLane(OptName("b"))
-			return l, l.AddStage(OptName("inner")).SetLimit(2)
+			l := fo.AddLane(WithName("b"))
+			return l, l.AddStage(WithName("inner")).SetLimit(2)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := NewConveyor()
-			fo := c.AddFanOut(OptName("fo"))
+			c := New()
+			fo := c.AddFanOut(WithName("fo"))
 			b, inner := tc.build(fo)
-			commit := c.AddStage(OptName("commit"))
+			commit := c.AddStage(WithName("commit"))
 
 			const tasks = 3
 			var ran atomic.Int64
@@ -109,12 +109,12 @@ func TestBranchServesBothKindsUniformly(t *testing.T) {
 //   - the parallelism is on the interior stages instead, so once the children move in, all of them are inside at once.
 func TestLaneEntranceAdmitsOneChildAtATime(t *testing.T) {
 	const children = 4
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
 	// Room for every child, so the entrance is the only thing that can possibly pace them.
-	inner := lane.AddStage(OptName("inner")).SetLimit(children)
-	commit := c.AddStage(OptName("commit"))
+	inner := lane.AddStage(WithName("inner")).SetLimit(children)
+	commit := c.AddStage(WithName("commit"))
 
 	inInner := &gauge{}
 	release := make(chan struct{})
@@ -184,10 +184,10 @@ func TestLaneEntranceAdmitsOneChildAtATime(t *testing.T) {
 // sharp end is that its work takes the non-travelling path, so it cannot move.
 func TestLaneWithoutInteriorNodesActsAsAPool(t *testing.T) {
 	const tasks = 4
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane")) // deliberately never given interior nodes
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane")) // deliberately never given interior nodes
+	commit := c.AddStage(WithName("commit"))
 
 	g := &gauge{}
 	var moveErr atomic.Value
@@ -234,10 +234,10 @@ func TestLaneWithoutInteriorNodesActsAsAPool(t *testing.T) {
 // sources are drained front to back, so the order they were listed is the order their work starts in — across
 // constructors, not just within one.
 func TestPoolTasksStartInSubmissionOrder(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")) // limit 1: the order is total, so it is observable
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")) // limit 1: the order is total, so it is observable
+	commit := c.AddStage(WithName("commit"))
 
 	rec := &recorder{}
 	err := runOnce(t, c, func(ctx context.Context) error {

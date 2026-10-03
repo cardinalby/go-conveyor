@@ -36,7 +36,8 @@ type Branch interface {
 	NewTask(fn TaskFunc) Task
 
 	// NewTasks creates a task of count independent callbacks fn(ctx, 0)..fn(ctx, count-1), each one slot's worth
-	// of work on this branch. A count <= 0 yields a no-op task; a nil fn with count > 0 panics.
+	// of work on this branch. A count of 0 yields a no-op task. A negative count panics, and so does a nil fn with
+	// count > 0.
 	NewTasks(count int, fn func(ctx context.Context, index int) error) Task
 }
 
@@ -52,8 +53,8 @@ type Branch interface {
 type Pool interface {
 	Branch
 
-	// SetLimit sets how many of this pool's tasks may run at once (default 1; a limit <= 0 means 1), and returns
-	// the pool for chaining.
+	// SetLimit sets how many of this pool's tasks may run at once (default 1), and returns the pool for chaining.
+	// A limit below 1 panics.
 	//
 	// Safe to call at any time, from any goroutine, including on a running conveyor.
 	SetLimit(limit int) Pool
@@ -65,8 +66,8 @@ type Pool interface {
 	NewTask(fn TaskFunc) Task
 
 	// NewTasks creates a task of count independent callbacks fn(ctx, 0)..fn(ctx, count-1), each one slot's worth
-	// of work on this pool, built lazily as slots free up. A count <= 0 yields a no-op task; a nil fn with
-	// count > 0 panics.
+	// of work on this pool, built lazily as slots free up. A count of 0 yields a no-op task. A negative count
+	// panics, and so does a nil fn with count > 0.
 	NewTasks(count int, fn func(ctx context.Context, index int) error) Task
 }
 
@@ -91,18 +92,18 @@ type Lane interface {
 	RetainableStage
 
 	// AddStage adds an interior Stage to this lane. Chain SetLimit to let several children run its code at once.
-	AddStage(opts ...AnyUnitOption) Stage
+	AddStage(opts ...NodeOption) Stage
 
 	// AddFanOut adds an interior FanOut to this lane, so a child item may itself scatter work onto its own
 	// branches.
-	AddFanOut(opts ...AnyUnitOption) FanOut
+	AddFanOut(opts ...NodeOption) FanOut
 
 	// NewTask creates a task of one callback — one child journey through this lane. A nil fn panics.
 	NewTask(fn TaskFunc) Task
 
 	// NewTasks creates a task of count independent callbacks fn(ctx, 0)..fn(ctx, count-1), each one child journey
-	// through this lane, admitted in index order. A count <= 0 yields a no-op task; a nil fn with count > 0
-	// panics.
+	// through this lane, admitted in index order. A count of 0 yields a no-op task. A negative count panics, and
+	// so does a nil fn with count > 0.
 	//
 	// The ctx each callback receives is the child's own — pass it to the lane's stages, not the item's.
 	NewTasks(count int, fn func(ctx context.Context, index int) error) Task
@@ -116,7 +117,7 @@ type branch struct {
 
 	fanout *fanOut
 	handle Branch // the *poolHandle or *laneHandle handed out for this branch
-	name   string // optional user-given name (OptName); empty -> positional in String
+	name   string // optional user-given name (WithName); empty -> positional in String
 	no     int    // 1-based position among its fan-out's branches, for the positional name
 }
 
@@ -143,7 +144,10 @@ func (b *branch) NewTask(fn TaskFunc) Task {
 }
 
 func (b *branch) NewTasks(count int, fn func(ctx context.Context, index int) error) Task {
-	if count <= 0 {
+	if count < 0 {
+		panic(fmt.Errorf("%s.NewTasks(%d): %w: want >= 0", b, count, errInvalidValue))
+	}
+	if count == 0 {
 		return Task{branch: b}
 	}
 	if fn == nil {
@@ -177,9 +181,9 @@ type laneHandle struct{ b *branch }
 func (l *laneHandle) String() string { return l.b.String() }
 func (l *laneHandle) unit() *unit    { return l.b.start }
 
-func (l *laneHandle) AddStage(opts ...AnyUnitOption) Stage { return l.b.series.AddStage(opts...) }
+func (l *laneHandle) AddStage(opts ...NodeOption) Stage { return l.b.series.AddStage(opts...) }
 
-func (l *laneHandle) AddFanOut(opts ...AnyUnitOption) FanOut { return l.b.series.AddFanOut(opts...) }
+func (l *laneHandle) AddFanOut(opts ...NodeOption) FanOut { return l.b.series.AddFanOut(opts...) }
 
 // Retain keeps the lane's entrance slot until the returned release is called (see the Lane and RetainableStage
 // interfaces).

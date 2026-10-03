@@ -36,8 +36,8 @@ func queuedOf(c Conveyor, u Unit) int { return queueOccupancy(c, u) }
 // TestStatsZeroOutsideRun: Stats reports runtime state, and outside a run — before the first one and after the last
 // has returned — there is none, so it is the zero value rather than a stale snapshot.
 func TestStatsZeroOutsideRun(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 
 	if got := c.Stats(); !reflect.DeepEqual(got, Stats{}) {
 		t.Fatalf("Stats before the first run = %+v, want the zero Stats", got)
@@ -53,13 +53,13 @@ func TestStatsZeroOutsideRun(t *testing.T) {
 // TestStatsOneEntryPerNodeAndBranch: a snapshot has exactly one entry per node and per lane, in creation order, and a
 // queue is folded into the node it fronts instead of getting an entry of its own.
 func TestStatsOneEntryPerNodeAndBranch(t *testing.T) {
-	c := NewConveyor()
-	s1 := c.AddStage(OptName("s1")).SetQueueSize(2)
-	fo := c.AddFanOut(OptName("fo")).SetQueueSize(3)
-	l1 := fo.AddLane(OptName("l1"))
-	l2 := fo.AddPool(OptName("l2"))
-	in := l1.AddStage(OptName("in"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	s1 := c.AddStage(WithName("s1")).SetQueueSize(2)
+	fo := c.AddFanOut(WithName("fo")).SetQueueSize(3)
+	l1 := fo.AddLane(WithName("l1"))
+	l2 := fo.AddPool(WithName("l2"))
+	in := l1.AddStage(WithName("in"))
+	commit := c.AddStage(WithName("commit"))
 
 	var got Stats
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -109,9 +109,9 @@ func TestStatsOneEntryPerNodeAndBranch(t *testing.T) {
 // TestStatsSeparatesNodeAndQueueOccupancy: Occupied/Limit describe the node itself and Queued its waiting room, so a
 // jammed stage is reported as one item working with the queue full behind it.
 func TestStatsSeparatesNodeAndQueueOccupancy(t *testing.T) {
-	c := NewConveyor()
-	s1 := c.AddStage(OptName("s1"))
-	s2 := c.AddStage(OptName("s2")).SetQueueSize(2)
+	c := New()
+	s1 := c.AddStage(WithName("s1"))
+	s2 := c.AddStage(WithName("s2")).SetQueueSize(2)
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -165,9 +165,9 @@ func TestStatsSeparatesNodeAndQueueOccupancy(t *testing.T) {
 // TestStatsWindowCapturesTransientsAndResets is the point of the windowed gauges: an occupancy that came and went
 // between two reads is still reported by Max, even though Last is 0 at read time — and the window restarts there.
 func TestStatsWindowCapturesTransientsAndResets(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
-	after := c.AddStage(OptName("after"))
+	c := New()
+	s := c.AddStage(WithName("s"))
+	after := c.AddStage(WithName("after"))
 
 	var transient, reset Stats
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -207,12 +207,12 @@ func TestStatsWindowCapturesTransientsAndResets(t *testing.T) {
 // TestStatsInFlightCountsOwnItemsOnly: InFlight counts the conveyor's own items, so a lane turning each item into
 // many child journeys must not inflate it; LiveWorkers reports the pool that runs those items.
 func TestStatsInFlightCountsOwnItemsOnly(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")) // limit 1
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid")).SetLimit(4)
-	tail := lane.AddStage(OptName("tail")).SetLimit(4)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")) // limit 1
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid")).SetLimit(4)
+	tail := lane.AddStage(WithName("tail")).SetLimit(4)
+	commit := c.AddStage(WithName("commit"))
 
 	var maxInFlight, minWorkers atomic.Int64
 	minWorkers.Store(-1)
@@ -260,11 +260,11 @@ func TestStatsInFlightCountsOwnItemsOnly(t *testing.T) {
 // Occupied pins at the limit either way — and, because a collection leaves the queue as soon as its work is handed
 // out, the backlog counts unstarted work rather than work still running.
 func TestStatsReportsPoolBacklog(t *testing.T) {
-	c := NewConveyor()
+	c := New()
 	// Three items may be inside, so three may enqueue. Buffered: under the default, an item whose batch waits for the
 	// pool would keep its start slot, and no third item would be created.
-	fo := c.AddFanOut(OptName("fo")).SetLimit(3).SetBackpressure(BackpressureBuffered)
-	pool := fo.AddPool(OptName("pool")) // limit 1: one piece of work at a time
+	fo := c.AddFanOut(WithName("fo")).SetLimit(3).SetBackpressure(BackpressureBuffered)
+	pool := fo.AddPool(WithName("pool")) // limit 1: one piece of work at a time
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -315,10 +315,10 @@ func TestStatsReportsPoolBacklog(t *testing.T) {
 // backlog like any other queued collection — one entry per Schedule call — and the gauge returns to 0 once it is
 // handed out.
 func TestStatsQueuedCountsSpawnedCollections(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")) // limit 1: the spawns queue behind the spawner
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")) // limit 1: the spawns queue behind the spawner
+	commit := c.AddStage(WithName("commit"))
 
 	release := make(chan struct{})
 	sampled := make(chan struct{})
@@ -371,10 +371,10 @@ func TestStatsQueuedCountsSpawnedCollections(t *testing.T) {
 // TestStatsFanOutOccupancyCountsAnEmptyVisit: an item inside a fan-out that has scheduled nothing still holds a slot,
 // and the fan-out's Occupied says so.
 func TestStatsFanOutOccupancyCountsAnEmptyVisit(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	release := make(chan struct{})
 	sampled := make(chan struct{})

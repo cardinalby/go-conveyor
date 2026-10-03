@@ -12,7 +12,7 @@ import (
 // consequences as MoveTo (so a second attempt is the once-per-node misuse).
 func TestTryMoveToEntersWhenFree(t *testing.T) {
 	t.Parallel()
-	c := NewConveyor()
+	c := New()
 	st := c.AddStage()
 
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -38,7 +38,7 @@ func TestTryMoveToEntersWhenFree(t *testing.T) {
 // for, the item is left exactly where it was, and the declined stage stays enterable by a later blocking MoveTo.
 func TestTryMoveToDeclinesWhenFullAndRetries(t *testing.T) {
 	t.Parallel()
-	c := NewConveyor()
+	c := New()
 	busy := c.AddStage() // limit 1
 
 	tried := make(chan struct{}) // item 2 has had its try declined
@@ -81,7 +81,7 @@ func TestTryMoveToDeclinesWhenFullAndRetries(t *testing.T) {
 // scheduled once the item really enters (tasks are otherwise single-use).
 func TestTryMoveToFanOutDeclinedLeavesItemInPlace(t *testing.T) {
 	t.Parallel()
-	c := NewConveyor()
+	c := New()
 	fan := c.AddFanOut() // limit 1: one item inside at a time
 	pool := fan.AddPool()
 	after := c.AddStage()
@@ -141,9 +141,9 @@ func TestTryMoveToFanOutDeclinedLeavesItemInPlace(t *testing.T) {
 // the item is in, the wait for the named work happens inside the target, and by the time it returns the work is done.
 func TestTryMoveToThenWaitOnEntry(t *testing.T) {
 	t.Parallel()
-	c := NewConveyor()
-	first := c.AddStage(OptName("first"))
-	second := c.AddStage(OptName("second"))
+	c := New()
+	first := c.AddStage(WithName("first"))
+	second := c.AddStage(WithName("second"))
 
 	var bgDone atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -181,9 +181,9 @@ func TestTryMoveToThenWaitOnEntry(t *testing.T) {
 func TestTryMoveToEnteredThenWaitFails(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
-	c := NewConveyor()
-	first := c.AddStage(OptName("first"))
-	second := c.AddStage(OptName("second"))
+	c := New()
+	first := c.AddStage(WithName("first"))
+	second := c.AddStage(WithName("second"))
 
 	err := runOnce(t, c, func(ctx context.Context) error {
 		if err := first.MoveTo(ctx); err != nil {
@@ -219,10 +219,10 @@ func TestTryMoveToEnteredThenWaitFails(t *testing.T) {
 func TestTryMoveToFanOutThenWaitFailsKeepsBodyOpen(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
-	c := NewConveyor()
-	first := c.AddStage(OptName("first"))
-	fan := c.AddFanOut(OptName("fan"))
-	pool := fan.AddPool(OptName("pool"))
+	c := New()
+	first := c.AddStage(WithName("first"))
+	fan := c.AddFanOut(WithName("fan"))
+	pool := fan.AddPool(WithName("pool"))
 
 	var ran atomic.Int64
 	err := runOnce(t, c, func(ctx context.Context) error {

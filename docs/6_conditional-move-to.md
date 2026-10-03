@@ -5,7 +5,7 @@ Sometimes a stage is **optional**: you want it if it's free, but you'd rather sk
 with a `default` case — it never waits, and tells you whether the item got in.
 
 ```go
-c := conveyor.NewConveyor()
+c := conveyor.New()
 enrich := c.AddStage().SetLimit(4) // optional: asks a slow metadata service
 write := c.AddStage()
 commit := c.AddStage()

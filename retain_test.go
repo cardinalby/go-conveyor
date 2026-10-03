@@ -11,9 +11,9 @@ import (
 // TestRetainKeepsStageOccupiedAfterMovingOn: the retained slot is not given up when the item moves on. While the
 // task runs, the stage stays occupied and no other item may enter it.
 func TestRetainKeepsStageOccupiedAfterMovingOn(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 
 	release := make(chan struct{}) // lets the task return
 	inB := make(chan struct{})     // item 1 has moved on to b
@@ -70,9 +70,9 @@ func TestRetainKeepsStageOccupiedAfterMovingOn(t *testing.T) {
 // TestRetainSlotHeldUntilItemMovesOn is the other half of the contract: when the task returns while the item is
 // still inside the retained stage, the slot stays held until the item actually moves on.
 func TestRetainSlotHeldUntilItemMovesOn(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 
 	g := &gauge{}
 	var created, enteredA atomic.Int64
@@ -120,9 +120,9 @@ func TestRetainSlotHeldUntilItemMovesOn(t *testing.T) {
 // TestRetainJoinWaitsForBgOp: a retain task group is joined like any other — Wait in a later node blocks until the
 // background work has finished, so that node's work observes its effect.
 func TestRetainJoinWaitsForBgOp(t *testing.T) {
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	commit := c.AddStage(WithName("commit"))
 
 	release := make(chan struct{})
 	var bgDone, joined atomic.Bool
@@ -165,9 +165,9 @@ func TestRetainJoinWaitsForBgOp(t *testing.T) {
 // TestRetainJoinObservesBackgroundEffect: by the time TaskGroup.Wait returns nil, the retained work's effect is visible
 // to the code that runs in that stage.
 func TestRetainJoinObservesBackgroundEffect(t *testing.T) {
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	commit := c.AddStage(WithName("commit"))
 
 	var mu sync.Mutex
 	effects := map[int64]bool{}
@@ -202,9 +202,9 @@ func TestRetainJoinObservesBackgroundEffect(t *testing.T) {
 // work after the join does not run.
 func TestRetainJoinReturnsBgOpError(t *testing.T) {
 	boom := errors.New("retain boom")
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	commit := c.AddStage(WithName("commit"))
 
 	var joinErr error
 	var committed atomic.Bool
@@ -241,9 +241,9 @@ func TestRetainJoinReturnsBgOpError(t *testing.T) {
 // it, so the item fails with it.
 func TestRetainErrorDoesNotCancelItem(t *testing.T) {
 	boom := errors.New("retain boom")
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	mid := c.AddStage(OptName("mid"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	mid := c.AddStage(WithName("mid"))
 
 	var ctxErr, moveErr, joinErr error
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -280,9 +280,9 @@ func TestRetainErrorDoesNotCancelItem(t *testing.T) {
 // processor returns nil. The item's error is the TaskError, which names the retained stage.
 func TestRetainUnjoinedErrorFailsItemWithTaskError(t *testing.T) {
 	boom := errors.New("unjoined retain boom")
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	mid := c.AddStage(OptName("mid"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	mid := c.AddStage(WithName("mid"))
 
 	_, done := runFirstItemAsync(c, func(ctx context.Context) error {
 		if err := write.MoveTo(ctx); err != nil {
@@ -301,14 +301,17 @@ func TestRetainUnjoinedErrorFailsItemWithTaskError(t *testing.T) {
 	if ie.Unit() != Unit(mid) {
 		t.Fatalf("ItemError unit = %v, want %s", ie.Unit(), mid)
 	}
+	if got, want := err.Error(), "item failed at mid: write task: unjoined retain boom"; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
 }
 
 // TestRetainUnobservedErrorFailsRun is the safety net: a retain failure nobody joined and nobody read still fails
 // the run when the item completes.
 func TestRetainUnobservedErrorFailsRun(t *testing.T) {
 	boom := errors.New("unobserved retain boom")
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
+	c := New()
+	write := c.AddStage(WithName("write"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -325,14 +328,18 @@ func TestRetainUnobservedErrorFailsRun(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("Run error = %v, want the unobserved %v", err, boom)
 	}
+	// The item failed at write, the unit its TaskError names: the text does not repeat it.
+	if got, want := err.Error(), "item failed: write task: unobserved retain boom"; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
 }
 
 // TestRetainJoinedErrorDoesNotFailRun: after Wait has reported the RetainFor error, the processor decides. It returns
 // nil here, so the same failure is not reported again at item completion.
 func TestRetainJoinedErrorDoesNotFailRun(t *testing.T) {
 	boom := errors.New("joined retain boom")
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
+	c := New()
+	write := c.AddStage(WithName("write"))
 
 	var got error
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -355,8 +362,8 @@ func TestRetainJoinedErrorDoesNotFailRun(t *testing.T) {
 // finished and its error recorded is not a join, so the error still fails the item.
 func TestRetainReadingErrorWithoutJoinStillFailsRun(t *testing.T) {
 	boom := errors.New("read retain boom")
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
+	c := New()
+	write := c.AddStage(WithName("write"))
 
 	var got error
 	_, done := runFirstItemAsync(c, func(ctx context.Context) error {
@@ -385,9 +392,9 @@ func TestRetainReadingErrorWithoutJoinStillFailsRun(t *testing.T) {
 //
 //	next(item 1) <- shared full (retain + items 2,3) <- start(item 4) <- item 5 never created
 func TestRetainOnSharedStageHoldsOneSlot(t *testing.T) {
-	c := NewConveyor()
-	shared := c.AddStage(OptName("shared")).SetLimit(3)
-	next := c.AddStage(OptName("next"))
+	c := New()
+	shared := c.AddStage(WithName("shared")).SetLimit(3)
+	next := c.AddStage(WithName("next"))
 
 	release := make(chan struct{}) // lets the task return
 	park := make(chan struct{})    // keeps item 1 inside next
@@ -443,8 +450,8 @@ func TestRetainOnSharedStageHoldsOneSlot(t *testing.T) {
 // time), the task is not run and the returned task group is born finished carrying the cancellation cause.
 func TestRetainOnCanceledItemSkipsTask(t *testing.T) {
 	cause := errors.New("stop")
-	c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
-	s := c.AddStage(OptName("s"))
+	c := New(WithDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
+	s := c.AddStage(WithName("s"))
 
 	inS := make(chan struct{})
 	var ran atomic.Bool
@@ -496,8 +503,8 @@ func TestRetainOnCanceledItemSkipsTask(t *testing.T) {
 // shutdown that cancels the item reaches the running task with the item's ShutdownError cause.
 func TestRetainTaskContextCanceledByShutdown(t *testing.T) {
 	cause := errors.New("stop")
-	c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
-	s := c.AddStage(OptName("s"))
+	c := New(WithDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
+	s := c.AddStage(WithName("s"))
 
 	running := make(chan struct{})
 	var taskCause, itemCause error
@@ -535,11 +542,11 @@ func TestRetainTaskContextCanceledByShutdown(t *testing.T) {
 // TestRetainTaskContextCannotDriveTheItem: the context handed to a RetainFor task is marked as a background task's.
 // Node calls with it, and a wait for the task's own task group, panic with errCannotMove instead of acting for the item.
 func TestRetainTaskContextCannotDriveTheItem(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
-	next := c.AddStage(OptName("next"))
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	c := New()
+	s := c.AddStage(WithName("s"))
+	next := c.AddStage(WithName("next"))
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
 
 	groups := make(chan TaskGroup, 1)
 	got := map[string]error{}
@@ -578,10 +585,10 @@ func TestRetainTaskContextCannotDriveTheItem(t *testing.T) {
 // TestRetainSeveralStagesJoinedTogether: an item may retain every stage it occupies at once; each stage stays held
 // until its own task returns, and each is joined by its own Wait in a later stage.
 func TestRetainSeveralStagesJoinedTogether(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
+	commit := c.AddStage(WithName("commit"))
 
 	releaseA := make(chan struct{})
 	releaseB := make(chan struct{})
@@ -645,10 +652,10 @@ func TestRetainSeveralStagesJoinedTogether(t *testing.T) {
 // TestRetainTwiceOnSameStageBothJoined: two retains on one stage are two independent task groups, and waiting for both
 // in a later stage waits for both.
 func TestRetainTwiceOnSameStageBothJoined(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
+	commit := c.AddStage(WithName("commit"))
 
 	release := make(chan struct{})
 	var fastDone, slowDone atomic.Bool
@@ -699,8 +706,8 @@ func TestRetainTwiceOnSameStageBothJoined(t *testing.T) {
 // TestRetainCompletionWaitsForBgOp: an item that returns without moving on still waits for its retained work, and
 // the slot it kept is released only then.
 func TestRetainCompletionWaitsForBgOp(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
+	c := New()
+	a := c.AddStage(WithName("a"))
 
 	release := make(chan struct{})
 	var created, enteredA atomic.Int64
@@ -753,12 +760,12 @@ func TestRetainCompletionWaitsForBgOp(t *testing.T) {
 // on the conveyor: the slot stays held while the task runs, the child moves on without it, and the next child cannot
 // enter until the task returns.
 func TestRetainByChildHoldsLaneInteriorStage(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))  // entrance admits one child at a time; mid/tail carry the concurrency
-	mid := lane.AddStage(OptName("mid")) // exclusive: one child inside at a time
-	tail := lane.AddStage(OptName("tail")).SetLimit(2)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))  // entrance admits one child at a time; mid/tail carry the concurrency
+	mid := lane.AddStage(WithName("mid")) // exclusive: one child inside at a time
+	tail := lane.AddStage(WithName("tail")).SetLimit(2)
+	commit := c.AddStage(WithName("commit"))
 
 	var started atomic.Int64
 	var bgRan atomic.Bool
@@ -828,11 +835,11 @@ func TestRetainByChildHoldsLaneInteriorStage(t *testing.T) {
 // can fail the run. Nothing joins it here, so it travels the unobserved path the whole way.
 func TestRetainByChildUnobservedErrorFailsRun(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid"))
+	commit := c.AddStage(WithName("commit"))
 
 	err := runUntil(t, c, 3, func(ctx context.Context, no int64) error {
 		err := fo.MoveTo(ctx)

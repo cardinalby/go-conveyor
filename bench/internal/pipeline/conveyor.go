@@ -30,20 +30,20 @@ type conveyorPipeline struct {
 
 // NewConveyor builds a Pipeline backed by a conveyor.Conveyor from spec.
 func NewConveyor(spec Spec, obs *Observer) Pipeline {
-	c := conveyor.NewConveyor()
+	c := conveyor.New()
 	p := &conveyorPipeline{c: c, obs: obs}
 	for _, s := range spec.Stages {
 		switch s.Kind {
 		case Exclusive:
 			p.nodes = append(p.nodes, conveyorNode{
 				kind:  Exclusive,
-				stage: c.AddStage(conveyor.OptName(s.Name)),
+				stage: c.AddStage(conveyor.WithName(s.Name)),
 				rt:    obs.runtime(s.Name, s.Work),
 			})
 		case Shared:
 			p.nodes = append(p.nodes, conveyorNode{
 				kind:  Shared,
-				stage: c.AddStage(conveyor.OptName(s.Name)).SetLimit(s.Limit),
+				stage: c.AddStage(conveyor.WithName(s.Name)).SetLimit(s.Limit),
 				rt:    obs.runtime(s.Name, s.Work),
 			})
 		case FanOut:
@@ -60,10 +60,10 @@ func NewConveyor(spec Spec, obs *Observer) Pipeline {
 					itemsInside = b.Limit
 				}
 			}
-			f := c.AddFanOut(conveyor.OptName(s.Name)).SetLimit(itemsInside)
+			f := c.AddFanOut(conveyor.WithName(s.Name)).SetLimit(itemsInside)
 			node := conveyorNode{kind: FanOut, fanout: f}
 			for _, b := range s.Branches {
-				node.lanes = append(node.lanes, f.AddPool(conveyor.OptName(b.Name)).SetLimit(b.Limit))
+				node.lanes = append(node.lanes, f.AddPool(conveyor.WithName(b.Name)).SetLimit(b.Limit))
 				node.laneRt = append(node.laneRt, obs.runtime(b.Name, b.Work))
 			}
 			p.nodes = append(p.nodes, node)

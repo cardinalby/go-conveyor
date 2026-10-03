@@ -277,7 +277,7 @@ function App() {
   );
 
   // Global, unlike every other numeric edit above — it caps items in flight across the whole conveyor rather than
-  // belonging to one node (see conveyor.Conveyor.SetItemsLimit), which is why it is a standalone corner control
+  // belonging to one node (see conveyor.Conveyor.SetItemLimit), which is why it is a standalone corner control
   // rather than a dial on some node's box.
   const handleEditItemsLimit = useCallback(
     (value: number) => {
@@ -290,7 +290,7 @@ function App() {
   );
 
   // Click-to-rename on a node/branch title (see EditableTitle) — build-mode config only, like a node's name has
-  // always been: go-conveyor bakes a unit's name in at Build time (OptName), so a live conveyor has no rename call
+  // always been: go-conveyor bakes a unit's name in at Build time (WithName), so a live conveyor has no rename call
   // to make, unlike the numeric dials above. An empty commit clears back to the positional default (see
   // pipeline/resolve's `n.name || positionalName` fallback), never writes it out as a literal "custom" name.
   const handleRenameNode = useCallback((id: string, name: string) => {
@@ -307,14 +307,14 @@ function App() {
   }, []);
 
   // The implicit start stage is not one of Pipeline.nodes, so renaming it is a plain field write. It is the one name
-  // that stays purely cosmetic even at Build time: go-conveyor's start unit is always "start" and takes no OptName
+  // that stays purely cosmetic even at Build time: go-conveyor's start unit is always "start" and takes no WithName
   // (see conveyor.Conveyor.StartingStage), so nothing carries this into the Spec or the generated code.
   const handleRenameStart = useCallback((name: string) => {
     setPipeline((p) => ({ ...p, startName: name }));
   }, []);
 
   // A lane's entrance, like the conveyor's own start, is not a node of Pipeline.nodes — it belongs to the lane branch
-  // that owns it. Also display-only: a lane's entrance unit is go-conveyor's own and takes no OptName.
+  // that owns it. Also display-only: a lane's entrance unit is go-conveyor's own and takes no WithName.
   const handleRenameEntrance = useCallback((laneId: string, name: string) => {
     setPipeline((p) => ({
       ...p,
@@ -500,7 +500,7 @@ function App() {
         />
       )}
       <div className="items-limit-control" title="Caps how many items may be in flight across the whole conveyor at once (0 = unlimited)">
-        <label htmlFor="items-limit-input">ItemsLimit</label>
+        <label htmlFor="items-limit-input">ItemLimit</label>
         <input
           id="items-limit-input"
           type="number"

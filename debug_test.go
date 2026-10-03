@@ -30,8 +30,8 @@ func occupantsOf(t *testing.T, list []UnitOccupants, u Unit) UnitOccupants {
 
 // TestDebugUnitOccupantsNilOutsideRun: like Stats, DebugUnitOccupants reports nothing outside a run.
 func TestDebugUnitOccupantsNilOutsideRun(t *testing.T) {
-	c := NewConveyor()
-	c.AddStage(OptName("s"))
+	c := New()
+	c.AddStage(WithName("s"))
 
 	if got := c.DebugUnitOccupants(); got != nil {
 		t.Fatalf("DebugUnitOccupants before the first run = %v, want nil", got)
@@ -45,13 +45,13 @@ func TestDebugUnitOccupantsNilOutsideRun(t *testing.T) {
 // TestDebugUnitOccupantsOneEntryPerNodeAndBranch mirrors TestStatsOneEntryPerNodeAndBranch: one entry per node and per
 // lane, in creation order, matching Stats' own shape.
 func TestDebugUnitOccupantsOneEntryPerNodeAndBranch(t *testing.T) {
-	c := NewConveyor()
-	s1 := c.AddStage(OptName("s1")).SetQueueSize(2)
-	fo := c.AddFanOut(OptName("fo")).SetQueueSize(3)
-	l1 := fo.AddLane(OptName("l1"))
-	l2 := fo.AddPool(OptName("l2"))
-	in := l1.AddStage(OptName("in"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	s1 := c.AddStage(WithName("s1")).SetQueueSize(2)
+	fo := c.AddFanOut(WithName("fo")).SetQueueSize(3)
+	l1 := fo.AddLane(WithName("l1"))
+	l2 := fo.AddPool(WithName("l2"))
+	in := l1.AddStage(WithName("in"))
+	commit := c.AddStage(WithName("commit"))
 
 	var got []UnitOccupants
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -89,8 +89,8 @@ func TestDebugUnitOccupantsOneEntryPerNodeAndBranch(t *testing.T) {
 // TestDebugUnitOccupantsStartingStage: an item occupies the implicit start stage's body from creation until its first
 // move, and DebugUnitOccupants reports it there.
 func TestDebugUnitOccupantsStartingStage(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 
 	release := make(chan struct{})
 	sampled := make(chan struct{})
@@ -120,9 +120,9 @@ func TestDebugUnitOccupantsStartingStage(t *testing.T) {
 // TestDebugUnitOccupantsBodyAndQueueOrder mirrors TestStatsSeparatesNodeAndQueueOccupancy's setup, but checks item
 // identity rather than counts: the item running s2's code, and the two behind it in FIFO order in its waiting room.
 func TestDebugUnitOccupantsBodyAndQueueOrder(t *testing.T) {
-	c := NewConveyor()
-	s1 := c.AddStage(OptName("s1"))
-	s2 := c.AddStage(OptName("s2")).SetQueueSize(2)
+	c := New()
+	s1 := c.AddStage(WithName("s1"))
+	s2 := c.AddStage(WithName("s2")).SetQueueSize(2)
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -170,8 +170,8 @@ func TestDebugUnitOccupantsBodyAndQueueOrder(t *testing.T) {
 // TestDebugUnitOccupantsSharedStageOrder: a shared stage admits items in arrival order even though several may be
 // inside at once, and DebugUnitOccupants reports InBody in that same order.
 func TestDebugUnitOccupantsSharedStageOrder(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetLimit(3)
+	c := New()
+	s := c.AddStage(WithName("s")).SetLimit(3)
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -209,11 +209,11 @@ func TestDebugUnitOccupantsSharedStageOrder(t *testing.T) {
 // item whose task is running on the lane, and the two behind it whose batches are queued, in FIFO order. Each
 // queued item contributes one entry (one scheduled batch), matching how the lane's Queued gauge counts.
 func TestDebugUnitOccupantsPoolBodyAndQueue(t *testing.T) {
-	c := NewConveyor()
+	c := New()
 	// Three items may be inside, so three may enqueue. Buffered: under the default, an item whose batch waits for the
 	// pool would keep its start slot, and no third item would be created.
-	fo := c.AddFanOut(OptName("fo")).SetLimit(3).SetBackpressure(BackpressureBuffered)
-	pool := fo.AddPool(OptName("pool")) // limit 1: one piece of work at a time
+	fo := c.AddFanOut(WithName("fo")).SetLimit(3).SetBackpressure(BackpressureBuffered)
+	pool := fo.AddPool(WithName("pool")) // limit 1: one piece of work at a time
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()

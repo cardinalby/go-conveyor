@@ -19,7 +19,7 @@ in creation order.
 It's a push-based sub-conveyor.
 
 ```go
-c := conveyor.NewConveyor()
+c := conveyor.New()
 split := c.AddFanOut().SetLimit(2)
 
 // A lane, not a pool: each message travels two steps with different capacities

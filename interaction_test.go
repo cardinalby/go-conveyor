@@ -12,9 +12,9 @@ import (
 // dropped rather than invoked with a dead context — for every source kind. The task group
 // still resolves, so a joiner is never left hanging.
 func TestCanceledItemsQueuedWorkIsSkipped(t *testing.T) {
-	c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")) // limit 1: the tasks run strictly one at a time
+	c := New(WithDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")) // limit 1: the tasks run strictly one at a time
 
 	const scheduled = 10
 	var ran atomic.Int64
@@ -76,11 +76,11 @@ func TestCanceledItemsQueuedWorkIsSkipped(t *testing.T) {
 // The test proves it structurally: item 1 will not proceed until item 2 has entered `write`, which can only happen if
 // the retained slot was freed at the right moment.
 func TestRetainReleasesWhileItemSitsInFanOut(t *testing.T) {
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	releaseBg := make(chan struct{})
 	item2InWrite := make(chan struct{})
@@ -159,10 +159,10 @@ func TestRetainReleasesWhileItemSitsInFanOut(t *testing.T) {
 // position and can be entered (releasing the previous node under Buffered). An empty visit never schedules, so it
 // holds the item behind at the door until the visitor leaves: the node behaves as if its limit were one.
 func TestEmptyFanOutIsAUsableNode(t *testing.T) {
-	c := NewConveyor()
-	write := c.AddStage(OptName("write"))
-	empty := c.AddFanOut(OptName("empty")).SetLimit(4).SetBackpressure(BackpressureBuffered)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	write := c.AddStage(WithName("write"))
+	empty := c.AddFanOut(WithName("empty")).SetLimit(4).SetBackpressure(BackpressureBuffered)
+	commit := c.AddStage(WithName("commit"))
 
 	secondInWrite := make(chan struct{}) // item 2 left the start: item 1 is inside empty and released write
 	release := make(chan struct{})
@@ -209,9 +209,9 @@ func TestEmptyFanOutIsAUsableNode(t *testing.T) {
 // TestSeveralRetainsOnOneStageKeepItHeld: two Retains share the stage's one slot, so the first bgOp to return must
 // not release it — the stage stays exclusive until the last live retain is done.
 func TestSeveralRetainsOnOneStageKeepItHeld(t *testing.T) {
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 
 	release := make(chan struct{})
 	var enteredA atomic.Int64
@@ -257,8 +257,8 @@ func TestSeveralRetainsOnOneStageKeepItHeld(t *testing.T) {
 // TestQueueRaiseAdmitsWaitingItemsImmediately: resizing a waiting room follows the same admission-only contract as
 // SetLimit, so a raise must let items in at once rather than waiting for some other event to wake them.
 func TestQueueRaiseAdmitsWaitingItemsImmediately(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetQueueSize(1)
+	c := New()
+	s := c.AddStage(WithName("s")).SetQueueSize(1)
 
 	held := make(chan struct{})
 	release := make(chan struct{})
@@ -296,9 +296,9 @@ func TestQueueRaiseAdmitsWaitingItemsImmediately(t *testing.T) {
 // front of it. Both must hold at once — the retained slot still bounds who runs the stage's code, and the waiting room
 // still lets the followers release the node behind them — and the queue must drain the moment the bgOp returns.
 func TestRetainedStageFillsItsWaitingRoom(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetQueueSize(2) // limit 1, plus room for two to wait
-	after := c.AddStage(OptName("after")).SetLimit(4)
+	c := New()
+	s := c.AddStage(WithName("s")).SetQueueSize(2) // limit 1, plus room for two to wait
+	after := c.AddStage(WithName("after")).SetLimit(4)
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()

@@ -21,11 +21,11 @@ func dormantCount(ctx context.Context) int {
 // TestScheduleBeforeEntry_NothingRunsBeforeAdmission: prepared work takes no capacity, stands in no queue, and none
 // of its callbacks runs until the item enters.
 func TestScheduleBeforeEntry_NothingRunsBeforeAdmission(t *testing.T) {
-	c := NewConveyor()
-	read := c.AddStage(OptName("read"))
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")).SetLimit(3)
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	read := c.AddStage(WithName("read"))
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool")).SetLimit(3)
+	commit := c.AddStage(WithName("commit"))
 
 	var ran atomic.Int32
 	prepared := make(chan struct{})
@@ -78,11 +78,11 @@ func TestScheduleBeforeEntry_NothingRunsBeforeAdmission(t *testing.T) {
 // TestScheduleBeforeEntry_WorkStartsBeforeMoveToReturns: activation is part of admission, so with a free pool the
 // prepared task is dispatched — the pool slot taken, a Balanced hold already over — by the time MoveTo returns.
 func TestScheduleBeforeEntry_WorkStartsBeforeMoveToReturns(t *testing.T) {
-	c := NewConveyor()
-	read := c.AddStage(OptName("read"))
-	fo := c.AddFanOut(OptName("fo")).SetBackpressure(BackpressureBalanced)
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	read := c.AddStage(WithName("read"))
+	fo := c.AddFanOut(WithName("fo")).SetBackpressure(BackpressureBalanced)
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	release := make(chan struct{})
 	var checked atomic.Bool
@@ -212,11 +212,11 @@ func TestScheduleBeforeEntry_ExplicitEmptyIsAKnownBatch(t *testing.T) {
 }
 
 func testScheduleBeforeEntryEmptyBatch(t *testing.T, static bool) {
-	c := NewConveyor()
-	read := c.AddStage(OptName("read")).SetLimit(2)
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2).SetBackpressure(BackpressureStrict)
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit")).SetLimit(2)
+	c := New()
+	read := c.AddStage(WithName("read")).SetLimit(2)
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2).SetBackpressure(BackpressureStrict)
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit")).SetLimit(2)
 
 	release := make(chan struct{})
 	done := make(chan struct{})
@@ -254,11 +254,11 @@ func testScheduleBeforeEntryEmptyBatch(t *testing.T, static bool) {
 // TestScheduleBeforeEntry_DeclinedTryMoveToKeepsTheWork: a declined TryMoveTo touches nothing — the prepared work
 // stays prepared and unrun — and a later MoveTo activates it.
 func TestScheduleBeforeEntry_DeclinedTryMoveToKeepsTheWork(t *testing.T) {
-	c := NewConveyor()
-	read := c.AddStage(OptName("read")).SetLimit(2)
-	fo := c.AddFanOut(OptName("fo")) // limit 1: item 1 inside keeps item 2 out
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit")).SetLimit(2)
+	c := New()
+	read := c.AddStage(WithName("read")).SetLimit(2)
+	fo := c.AddFanOut(WithName("fo")) // limit 1: item 1 inside keeps item 2 out
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit")).SetLimit(2)
 
 	var ran atomic.Int32
 	item1Inside := make(chan struct{})
@@ -312,11 +312,11 @@ func TestScheduleBeforeEntry_DeclinedTryMoveToKeepsTheWork(t *testing.T) {
 // TestScheduleBeforeEntry_SkippingTheFanOutDiscardsTheWork: moving past a prepared fan-out drops the work — no
 // callback runs, and the leave is not a join.
 func TestScheduleBeforeEntry_SkippingTheFanOutDiscardsTheWork(t *testing.T) {
-	c := NewConveyor()
-	read := c.AddStage(OptName("read"))
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	read := c.AddStage(WithName("read"))
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	var ran atomic.Int32
 	countTask := pool.NewTasks(2, func(context.Context, int) error { ran.Add(1); return nil })
@@ -353,10 +353,10 @@ func TestScheduleBeforeEntry_SkippingTheFanOutDiscardsTheWork(t *testing.T) {
 func TestScheduleBeforeEntry_ReturningDiscardsTheWork(t *testing.T) {
 	for _, fail := range []bool{false, true} {
 		t.Run(fmt.Sprintf("fail=%v", fail), func(t *testing.T) {
-			c := NewConveyor()
-			read := c.AddStage(OptName("read"))
-			fo := c.AddFanOut(OptName("fo"))
-			pool := fo.AddPool(OptName("pool"))
+			c := New()
+			read := c.AddStage(WithName("read"))
+			fo := c.AddFanOut(WithName("fo"))
+			pool := fo.AddPool(WithName("pool"))
 
 			var ran atomic.Int32
 			boom := errors.New("boom")
@@ -388,11 +388,11 @@ func TestScheduleBeforeEntry_ReturningDiscardsTheWork(t *testing.T) {
 // TestScheduleBeforeEntry_CancellationDiscardsTheWork: an item canceled while waiting to enter never activates its
 // prepared work; a Schedule after the cancellation prepares nothing either.
 func TestScheduleBeforeEntry_CancellationDiscardsTheWork(t *testing.T) {
-	c := NewConveyor(OptDrainTimeout(0))
-	read := c.AddStage(OptName("read")).SetLimit(2)
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit")).SetLimit(2)
+	c := New(WithDrainTimeout(0))
+	read := c.AddStage(WithName("read")).SetLimit(2)
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit")).SetLimit(2)
 
 	var ran atomic.Int32
 	var item2Err error
@@ -445,11 +445,11 @@ func TestScheduleBeforeEntry_CancellationDiscardsTheWork(t *testing.T) {
 // anything, yet item 1's work starts first: activation happens at item 2's admission, which the ordering gate holds
 // back until item 1 has published, and the branch queue places the work by item age.
 func TestScheduleBeforeEntry_PreparationDoesNotChangeItemOrder(t *testing.T) {
-	c := NewConveyor()
-	read := c.AddStage(OptName("read")).SetLimit(2)
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2).SetBackpressure(BackpressureBuffered)
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit")).SetLimit(2)
+	c := New()
+	read := c.AddStage(WithName("read")).SetLimit(2)
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2).SetBackpressure(BackpressureBuffered)
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit")).SetLimit(2)
 
 	var order numbers
 	item2Prepared := make(chan struct{})
@@ -485,13 +485,13 @@ func TestScheduleBeforeEntry_PreparationDoesNotChangeItemOrder(t *testing.T) {
 // TestScheduleBeforeEntry_LaneChildPreparesForAnInteriorFanOut: a lane child prepares work for a fan-out of its own
 // lane the same way a root item does for one of the conveyor's.
 func TestScheduleBeforeEntry_LaneChildPreparesForAnInteriorFanOut(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid"))
-	inner := lane.AddFanOut(OptName("inner"))
-	innerPool := inner.AddPool(OptName("inner-pool"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	lane := fo.AddLane(WithName("lane"))
+	mid := lane.AddStage(WithName("mid"))
+	inner := lane.AddFanOut(WithName("inner"))
+	innerPool := inner.AddPool(WithName("inner-pool"))
+	commit := c.AddStage(WithName("commit"))
 
 	var ran atomic.Int32
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -525,11 +525,11 @@ func TestScheduleBeforeEntry_LaneChildPreparesForAnInteriorFanOut(t *testing.T) 
 // TestScheduleBeforeEntry_PoolTaskCannotPrepare: a pool task still schedules only under its own fan-out; preparing
 // work for a later fan-out is refused the same way as before.
 func TestScheduleBeforeEntry_PoolTaskCannotPrepare(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	later := c.AddFanOut(OptName("later"))
-	laterPool := later.AddPool(OptName("later-pool"))
+	c := New()
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	later := c.AddFanOut(WithName("later"))
+	laterPool := later.AddPool(WithName("later-pool"))
 
 	var got error
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -556,9 +556,9 @@ func TestScheduleBeforeEntry_PoolTaskCannotPrepare(t *testing.T) {
 func TestScheduleBeforeEntry_WaitAndRetainStillNeedEntry(t *testing.T) {
 	for _, call := range []string{"wait", "retain"} {
 		t.Run(call, func(t *testing.T) {
-			c := NewConveyor()
-			fo := c.AddFanOut(OptName("fo"))
-			pool := fo.AddPool(OptName("pool"))
+			c := New()
+			fo := c.AddFanOut(WithName("fo"))
+			pool := fo.AddPool(WithName("pool"))
 
 			var ran atomic.Int32
 			panicsInItem(t, c, errStageNotEntered, func(ctx context.Context) {
@@ -581,10 +581,10 @@ func TestScheduleBeforeEntry_WaitAndRetainStillNeedEntry(t *testing.T) {
 // TestScheduleBeforeEntry_DiscardedTaskStaysConsumed: preparing consumes the Task; discarding the work does not make
 // it reusable, so a second submission panics like any resubmission.
 func TestScheduleBeforeEntry_DiscardedTaskStaysConsumed(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit")).SetLimit(2)
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit")).SetLimit(2)
 
 	task := pool.NewTask(func(context.Context) error { return nil })
 	item1Done := make(chan struct{})
@@ -613,11 +613,11 @@ func TestScheduleBeforeEntry_DiscardedTaskStaysConsumed(t *testing.T) {
 // method observes the cancellation, not only when the processor returns, so a processor that winds down slowly
 // does not keep the prepared callbacks alive.
 func TestScheduleBeforeEntry_CanceledItemDropsTheWorkAtOnce(t *testing.T) {
-	c := NewConveyor(OptDrainTimeout(0))
-	read := c.AddStage(OptName("read")).SetLimit(2)
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-	commit := c.AddStage(OptName("commit")).SetLimit(2)
+	c := New(WithDrainTimeout(0))
+	read := c.AddStage(WithName("read")).SetLimit(2)
+	fo := c.AddFanOut(WithName("fo"))
+	pool := fo.AddPool(WithName("pool"))
+	commit := c.AddStage(WithName("commit")).SetLimit(2)
 
 	var ran atomic.Int32
 	var afterMove, afterSchedule, afterTry int
@@ -673,10 +673,10 @@ func TestScheduleBeforeEntry_CanceledItemDropsTheWorkAtOnce(t *testing.T) {
 func TestScheduleBeforeEntry_ReusedTaskLeavesTheOthersUnclaimed(t *testing.T) {
 	for _, before := range []bool{true, false} {
 		t.Run(fmt.Sprintf("beforeEntry=%v", before), func(t *testing.T) {
-			c := NewConveyor()
-			fo := c.AddFanOut(OptName("fo"))
-			pool := fo.AddPool(OptName("pool"))
-			commit := c.AddStage(OptName("commit"))
+			c := New()
+			fo := c.AddFanOut(WithName("fo"))
+			pool := fo.AddPool(WithName("pool"))
+			commit := c.AddStage(WithName("commit"))
 
 			var ran atomic.Int32
 			var reused, twice error
@@ -719,10 +719,10 @@ func TestScheduleBeforeEntry_ReusedTaskLeavesTheOthersUnclaimed(t *testing.T) {
 // TestScheduleBeforeEntry_PreparedCallsFormOneBacklogEntry: all pre-entry Schedule calls touching one branch become
 // one backlog entry on activation, while a call after entry adds its own.
 func TestScheduleBeforeEntry_PreparedCallsFormOneBacklogEntry(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	pool := fo.AddPool(OptName("pool")) // limit 1: item 1's task blocks the pool
-	commit := c.AddStage(OptName("commit")).SetLimit(2)
+	c := New()
+	fo := c.AddFanOut(WithName("fo")).SetLimit(2)
+	pool := fo.AddPool(WithName("pool")) // limit 1: item 1's task blocks the pool
+	commit := c.AddStage(WithName("commit")).SetLimit(2)
 
 	release := make(chan struct{})
 	item1Started := make(chan struct{})

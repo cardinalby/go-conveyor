@@ -20,9 +20,9 @@ const wakeTimeout = 5 * time.Second
 // RetainFor called with context.WithoutCancel(ctx) all answer with the item's ShutdownError, and nothing is entered or
 // run.
 func TestStrippedContextCannotActForCanceledItem(t *testing.T) {
-	c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New(WithDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 
 	var bgRan atomic.Bool
 	var checked atomic.Bool
@@ -86,9 +86,9 @@ func TestStrippedContextCannotActForCanceledItem(t *testing.T) {
 // its ShutdownError even when it hides the cancellation from MoveTo and TryMoveTo.
 func TestStrippedContextCannotMoveForShutdownCanceledItem(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
-	commit := c.AddStage(OptName("commit"))
+	c := New()
+	s := c.AddStage(WithName("s"))
+	commit := c.AddStage(WithName("commit"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -140,8 +140,8 @@ func TestStrippedContextCannotMoveForShutdownCanceledItem(t *testing.T) {
 // TestDerivedDeadlineStillCancelsTheCall: a context derived from the item's with a shorter deadline keeps working as
 // before — the call fails with the deadline error — and it does not cancel the item, which may go on.
 func TestDerivedDeadlineStillCancelsTheCall(t *testing.T) {
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := New()
+	s := c.AddStage(WithName("s"))
 
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
@@ -179,8 +179,8 @@ func TestDerivedDeadlineStillCancelsTheCall(t *testing.T) {
 // watcher waitUntil placed on the item's context.
 func TestStrippedContextAdmissionWaitWakesOnItemCancellation(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	s := c.AddStage(OptName("s")).SetQueueSize(1) // item 1 inside, item 2 waits in front of it
+	c := New()
+	s := c.AddStage(WithName("s")).SetQueueSize(1) // item 1 inside, item 2 waits in front of it
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -234,9 +234,9 @@ func TestStrippedContextAdmissionWaitWakesOnItemCancellation(t *testing.T) {
 // wait; once it is parked there, the item's own context is canceled directly, with no broadcast.
 func TestStrippedContextJoinWaitWakesOnItemCancellation(t *testing.T) {
 	boom := errors.New("boom")
-	c := NewConveyor()
-	a := c.AddStage(OptName("a"))
-	b := c.AddStage(OptName("b"))
+	c := New()
+	a := c.AddStage(WithName("a"))
+	b := c.AddStage(WithName("b"))
 
 	park := make(chan struct{})
 	itemCh := make(chan *item, 1)

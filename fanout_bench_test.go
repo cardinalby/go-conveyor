@@ -15,13 +15,13 @@ func BenchmarkFanOutSchedule(b *testing.B) {
 	noop := func(context.Context) error { return nil }
 	for _, lanes := range []int{1, 2, 4, 8} {
 		b.Run(fmt.Sprintf("lanes%d", lanes), func(b *testing.B) {
-			c := NewConveyor()
-			fo := c.AddFanOut(OptName("fo")).SetLimit(4)
+			c := New()
+			fo := c.AddFanOut(WithName("fo")).SetLimit(4)
 			ls := make([]Pool, 0, lanes)
 			for i := 0; i < lanes; i++ {
-				ls = append(ls, fo.AddPool(OptName(fmt.Sprintf("l%d", i))).SetLimit(2))
+				ls = append(ls, fo.AddPool(WithName(fmt.Sprintf("l%d", i))).SetLimit(2))
 			}
-			commit := c.AddStage(OptName("commit")).SetLimit(4)
+			commit := c.AddStage(WithName("commit")).SetLimit(4)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -60,10 +60,10 @@ func BenchmarkFanOutSchedule(b *testing.B) {
 func BenchmarkFanOutSpawnChain(b *testing.B) {
 	for _, depth := range []int{1, 4, 16} {
 		b.Run(fmt.Sprintf("depth%d", depth), func(b *testing.B) {
-			c := NewConveyor()
-			fo := c.AddFanOut(OptName("fo")).SetLimit(4)
-			pool := fo.AddPool(OptName("pool")).SetLimit(2)
-			commit := c.AddStage(OptName("commit")).SetLimit(4)
+			c := New()
+			fo := c.AddFanOut(WithName("fo")).SetLimit(4)
+			pool := fo.AddPool(WithName("pool")).SetLimit(2)
+			commit := c.AddStage(WithName("commit")).SetLimit(4)
 
 			var link func(left int) TaskFunc
 			link = func(left int) TaskFunc {
@@ -108,10 +108,10 @@ func BenchmarkFanOutRounds(b *testing.B) {
 	noop := func(context.Context) error { return nil }
 	for _, rounds := range []int{1, 2, 4} {
 		b.Run(fmt.Sprintf("rounds%d", rounds), func(b *testing.B) {
-			c := NewConveyor()
-			fo := c.AddFanOut(OptName("fo")).SetLimit(4)
-			pool := fo.AddPool(OptName("pool")).SetLimit(2)
-			commit := c.AddStage(OptName("commit")).SetLimit(4)
+			c := New()
+			fo := c.AddFanOut(WithName("fo")).SetLimit(4)
+			pool := fo.AddPool(WithName("pool")).SetLimit(2)
+			commit := c.AddStage(WithName("commit")).SetLimit(4)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
