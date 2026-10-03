@@ -1,7 +1,7 @@
 # Implementation details
 
 Internal design notes for maintainers of the package. The public contract is in the package docs
-(`conveyor.go`, `stage.go`, `fanout.go`, `branch.go`, `wave.go`) and the README; this document describes how the
+(`conveyor.go`, `stage.go`, `fanout.go`, `branch.go`, `task_group.go`) and the README; this document describes how the
 runtime behind them is built and which invariants it rests on.
 
 ## 1. The core idea: one capacity primitive
@@ -106,8 +106,9 @@ An `item` is one journey through a series. Both kinds are items:
 - a **root item** — one `ItemProcessor` call, moving through the conveyor's own nodes (scope 0). It owns a context
   derived from `run.itemsCtx` and its own `cancel`.
 - a **child item** — one piece of a `Lane`'s work, moving through its interior nodes (the lane's scope).
-  It inherits its parent's item number and context, owns no `cancel` (cancellation is item-wide, so `poison`
-  escalates to the parent), and reports its outcome to the wave that created it (`parentWave`).
+  It inherits its parent's item number, its context derives from the context of the body that created it
+  (`taskGroup.ctx`), it owns no `cancel` (its failure cancels that body instead, `itemFailed`), and it reports its
+  outcome to the task group that created it (`parentGroup`).
 
 Two numbers identify an item. `no` is the conveyor item it belongs to (a child inherits its parent's) and is exposed
 to the user; it is never used for ordering. `seq` is the creation order over all scopes of the run; it is used for
@@ -136,21 +137,21 @@ no slot, stands in no queue, and no source of it is pulled before entry (§7, "D
 ### Body state
 
 For every fan-out an item has entered it records a **body state** (`item.body[k]`, by unit index) and, while the
-state is `open`, the body itself in `item.pending` — the wave that holds the work the item has outstanding there:
+state is `open`, the body itself in `item.pending` — the task group that holds the work the item has outstanding there:
 
 | state          | meaning                                                  | set by                                                    |
 |----------------|----------------------------------------------------------|-----------------------------------------------------------|
 | `bodyNone`     | never entered                                            | initial                                                   |
 | `bodyOpen`     | inside; the item's own path may add work                 | `newBody` at admission (`MoveTo` / `TryMoveTo`)           |
 | `bodyClosed`   | joined: the item left, tried to leave, or its processor returned | `closeBody` (leave idle check, `tryEnterUnit`), `completeItem` |
-| `bodyRetained` | handed to the caller as a wave                           | `FanOut.Retain`                                           |
+| `bodyRetained` | handed to the caller as a task group                           | `FanOut.Retain`                                           |
 
 `closed` and `retained` are terminal for the item's own path: `Schedule` and `Wait` there panic (`errBodyClosed`,
 `errWorkRetained`), `Retain` panics `errNothingToRetain`. `bodyNone` is not terminal: `Schedule` there prepares work
 for the entry (`run.prepare`), unless the fan-out's rank is below `reachedRank` — passed, `errWrongEnterOrder`. The
 state is independent of occupancy — an item may still occupy the node with a closed body (a failed leave, §5) or a
-retained one (the wave holds the slot), or may have moved on — which is what gives stable diagnostics. `item.sealBody` is the one transition out of `open`: it clears `pending`,
-records the new state and seals the wave (§8).
+retained one (the task group holds the slot), or may have moved on — which is what gives stable diagnostics. `item.sealBody` is the one transition out of `open`: it clears `pending`,
+records the new state and seals the task group (§8).
 
 Each scope keeps its in-flight items in a doubly-linked list in creation order (`scopeList`). That gives an O(1)
 ordering gate — each item checks only `it.prev` — and ordered iteration for the shutdown cascade. Item numbers are
@@ -172,12 +173,12 @@ Three checks, deliberately separate:
 `enterUnit` is the blocking move:
 
 1. `joinPending` — if the item is in a fan-out with an open body, wait for that body to go **idle** (nothing queued,
-   nothing running), then close it (`closeBody`: seal, mark observed, state `closed`), returning the node-qualified
-   error if the work failed. This precedes even the step into the waiting room, since stepping aside would release
-   the fan-out's slot while its work still runs. On a cancellation wake-up: a busy body returns the cause and stays
-   open (completion accounts for it); an idle body is closed, and its own error, if any, wins over the cause — a
-   failing task poisons its item, so the poison is what `waitUntil` answers with first, but "this node's work
-   failed" is the truer message. A leave never returns nil for a canceled item.
+   nothing running), then close it (`closeBody`: seal, set `joined`, state `closed`), returning the body's outcome:
+   nil, its `TaskError`, or an abort. This precedes even the step into the waiting room, since stepping aside would
+   release the fan-out's slot while its work still runs. A task error does not cancel the item, so the wait ends
+   only on idle or on a cancellation of the item or the call context. On a cancellation wake-up: a busy body returns
+   the cause and stays open, not joined (completion accounts for it); an idle body is closed and joined, and its own
+   error, if any, wins over the cause. A leave never returns nil for a canceled item.
 2. Unless the item already stands in the target's waiting room (`it.queuedAt == target.index`, a retry after a
    failed move), wait for `canEnter || canEnterQueue`. One wait with two ways forward, rather than a decision up
    front about which to wait for: an item walks straight into a free node and never touches the waiting room, and
@@ -194,8 +195,8 @@ Three checks, deliberately separate:
 5. For a fan-out, still in the same lock hold: `newBody`, then `activateDormant` submits the prepared work, if any,
    as the initial batch (§7). The rank is therefore published before the item behind can pass the gate.
 
-A move that fails (a deadline on the call context, poison, shutdown) after step 1 leaves the body **closed** and the
-item in one of two places: still inside the fan-out holding its slot, or standing in the target's waiting room with
+A move that fails after step 1 (the body's `TaskError`, a deadline on the call context, shutdown) leaves the body
+**closed** and the item in one of two places: still inside the fan-out holding its slot, or standing in the target's waiting room with
 the fan-out already released. Both are legal starting points for a later move. The `queuedAt` guard in step 2 is what
 makes a retry to the same node resume waiting instead of taking a second queued slot.
 
@@ -217,8 +218,9 @@ waiting room** on purpose: stepping into it would admit the item — releasing t
 previous node, spending its once-per-node entry — and then leave it blocked with no way back, which is the opposite
 of what a non-waiting entry promises. Bypassing does not let it jump an item already waiting there: that item
 published only the lower rank, so the ordering gate refuses. The preamble (`actingItem` with `checkCancel`) declines
-a canceled item first, judged by both contexts (§10); since a failing task poisons its item, a body with an error is
-never examined here, and the node-qualified body error comes only from `Wait` and the blocking leave.
+a canceled item first, judged by both contexts (§10). A body with an error does not cancel the item, so an idle failed
+body is closed and joined here like any idle body, and the attempt returns `(false, TaskError)`: the item stays in
+the fan-out with its body closed.
 
 **Caller contract the O(1) gate relies on:** an admission caller must hold `mu` continuously from the `canEnter`
 check through the `occupy` mutation, and must pass the ordering part before mutating. Letting a later item advance
@@ -228,7 +230,7 @@ invariant, and with it the correctness of checking only `it.prev`.
 ## 6. Release
 
 `releaseBelow(it, beforeRank)` frees every slot the item holds in units **of its own scope** with rank strictly
-below `beforeRank`, skipping a unit whose slot a live wave or an unreleased `Retain` is holding (`item.isRetaining`) or a live hold
+below `beforeRank`, skipping a unit whose slot a live task group or an unreleased `Retain` is holding (`item.isRetaining`) or a live hold
 protects (`item.holdsUnit`). It first drops the dormant work prepared for fan-outs below `beforeRank` (`dropDormant`): the
 item has passed them without entering. A queued slot is
 released by the same rank rule, which is what makes the waiting room disappear the moment the item is admitted: the
@@ -243,7 +245,7 @@ queued piece of work may start now.
 
 `finishItem` sweeps **every** unit of the conveyor, not just its own scope's, because an item can hold a slot
 outside its scope: a pool's work cannot travel, so its slot is charged to the scheduling
-item, which lives in the parent scope. By then `completeItem` has already joined all the item's waves, so those
+item, which lives in the parent scope. By then `completeItem` has already joined all the item's task groups, so those
 slots are gone — the wider sweep is a backstop that keeps "no slot outlives its item" true of the function itself
 rather than of the order its callers run in. It also clears `item.holds` first, giving back held queued tokens; a held
 unit is one of the slots the sweep frees.
@@ -258,19 +260,19 @@ the stage before it, while younger items whose work can start pass it on the bra
 ordering gate are unchanged). `Buffered` opens no hold.
 
 **The hold** (`upstreamHold`) is the deferred release, recorded by `newHold` in `takeUnit` and appended to
-`item.holds`. `newBody` attaches it to the body's wave (`wave.hold`, matched by `hold.at == f.node`), so
+`item.holds`. `newBody` attaches it to the body's task group (`taskGroup.hold`, matched by `hold.at == f.node`), so
 `addToBody` and `branchStarted` find it without going through the item, and a retained body keeps its own hold when
 the item acquires another at a later fan-out. It snapshots the mode (`hold.mode`) and protects exactly one token:
 
 - `queued` — the item's queued slot, when the item was admitted from the fan-out's waiting room (`takeQueue`
   released the previous node already). `newHold` takes the count over from `item.queuedAt` (reset to -1), so a
   later `takeQueue` cannot give it back; `dischargeHold` returns it;
-- else `unit` — the highest-rank unit below the fan-out the item occupies (whether or not a `Retain` wave or an
+- else `unit` — the highest-rank unit below the fan-out the item occupies (whether or not a `Retain` task group or an
   earlier hold has it too; such a slot is freed only when all have ended): the previous stage, or the start gate
   (the conveyor's for a root item, the lane's for a child), which is what throttles item or child creation while the
   hold lasts; `-1` when the item had nothing behind it.
 
-It is a kind of ownership **separate from `wave.retainUnit`**. `releaseBelow` skips a held unit (`item.holdsUnit`)
+It is a kind of ownership **separate from `taskGroup.retainUnit`**. `releaseBelow` skips a held unit (`item.holdsUnit`)
 the same way it skips a retained one, so the sweep an unrelated `Retain` completion triggers (`releaseRetained` →
 `releaseBelow`) cannot free it. `takeUnit` still runs `releaseBelow` after creating the hold: anything else the item
 held behind it is released as usual.
@@ -280,7 +282,7 @@ token, then `releaseBelow(it, it.reachedRank)` — the ordinary rule, now no lon
 item is already finished. The caller broadcasts. Three things end a hold, whichever comes first:
 
 1. **The initial batch has progressed.** The initial batch is the first root submission to the body: the activation
-   of prepared work at admission, else the first root `Schedule`. `submitClaimed` knows it by `wave.rootSubmitted`
+   of prepared work at admission, else the first root `Schedule`. `submitClaimed` knows it by `taskGroup.rootSubmitted`
    (spawns never set it) and calls `markEntering`: every new collection gets `taskCollection.hold`, and
    `hold.awaiting` becomes the set of touched branch indices. A submission that touched no branch (no tasks, or only
    statically empty ones) discharges at once. From then on `branchStarted(col, branch, started)` removes the branch
@@ -312,21 +314,13 @@ which the older item opens by passing (§14).
 ### Tasks and sources
 
 A `Task` is `{branch, src}`. A `taskSource` is a **lazy, stateful, single-use** producer of callbacks; `claim()` is
-what detects a `Task` submitted twice. Sources come in two kinds:
-
-- **sync** (`singleSource`, `countSource`): `pull` runs no user code, so the scheduler calls it under `run.mu` —
-  the fast path, preserving the atomic slot-reuse of the branch workers.
-- **async** (`genSource` over `iter.Pull`, `chanSource`): `pull` runs user code and may block, so it is called
-  **without** `run.mu`, single-flight per collection (`taskCollection.pulling`), with the slot reserved for the
-  duration. Async sources treat item-ctx cancellation as exhaustion.
-
-`release()` gives up whatever a source still holds, for work that will never run — it is what stops a suspended
-generator. Like an async pull it must be called **outside** `run.mu`, since resuming a generator to unwind runs the
-user's deferred code.
+what detects a `Task` submitted twice. There are two sources, `singleSource` (`NewTask`) and `countSource`
+(`NewTasks`). `pull` runs no user code, so the scheduler calls it under `run.mu`, which keeps the atomic slot reuse
+of the branch workers. A source holds nothing but its own state, so dropped work needs no release step.
 
 ### Bodies and scheduling
 
-`FanOut.MoveTo` / `TryMoveTo` create the body at admission (`run.newBody`): an **unsealed**, idle wave with `atNode`
+`FanOut.MoveTo` / `TryMoveTo` create the body at admission (`run.newBody`): an **unsealed**, idle task group with `atNode`
 set and `hold` attached, stored in `item.pending`, body state `open`. Then `activateDormant` submits the prepared
 work, if any (see "Dormant work" below); otherwise nothing is queued yet.
 
@@ -335,30 +329,31 @@ work, if any (see "Dormant work" below); otherwise nothing is queued yet.
 1. static task validation (every task's branch belongs to this fan-out) before the context is touched, then the
    handle check;
 2. `conveyor.resolveCaller`: a pool-work marker in the context names the **collection** whose work is calling (and
-   through it the wave and the owning item); otherwise the context's item is the caller; neither is
+   through it the task group and the owning item); otherwise the context's item is the caller; neither is
    `ErrForeignContext`;
-3. under the lock, the **stale** checks: a finished caller item, or, for pool work, a finished wave —
-   `ErrStaleContext`. A lane child's own lifetime is judged here, *before* any redirect to its parent's wave, so a
+3. under the lock, the **stale** checks: a finished caller item, or, for pool work, a finished task group —
+   `ErrStaleContext`. A lane child's own lifetime is judged here, *before* any redirect to its parent's task group, so a
    child's context used after its callback returned is refused even while the parent's body is busy;
-4. `fanOut.bodyFor` resolves the body and classifies the addition: pool work adds to its own wave, which must be
-   this fan-out's (`errInvalidUnit`, wrong target) — a **spawn**; a lane child whose `parentWave.atNode` is this
-   fan-out adds to the parent's wave — a spawn, checked before the scope check because the fan-out lives in the
+4. `fanOut.bodyFor` resolves the body and classifies the addition: pool work adds to its own task group, which must be
+   this fan-out's (`errInvalidUnit`, wrong target) — a **spawn**; a lane child whose `parentGroup.atNode` is this
+   fan-out adds to the parent's task group — a spawn, checked before the scope check because the fan-out lives in the
    parent's scope; otherwise the item acts in its own scope (`validateScope`): state `bodyNone` with the fan-out
-   ahead of `reachedRank` returns a nil wave — the work is **prepared** (`run.prepare`, after the `returned` and
+   ahead of `reachedRank` returns a nil task group — the work is **prepared** (`run.prepare`, after the `returned` and
    cancellation checks; a passed fan-out panics `errWrongEnterOrder`); else `openBody` requires state `open` — a
    **root**;
 5. cancellation by both contexts (`item.cancelCause`); `Schedule` never blocks, so it makes this check itself. This
-   is what stops a caller with a stripped context from queueing work for a poisoned item;
+   is what stops a caller with a stripped context from queueing work for a canceled item. Then a body whose context
+   is canceled (its first task error, §8) refuses the work with that cause, the `TaskError`;
 6. `run.addToBody`: **claim** every source (`claimTasks`; the resubmission panic fires here, before the body is
    mutated), then `submitClaimed`: **group** into one `taskCollection` per branch in argument order,
-   `insertCollection` each, on the first root addition (`wave.rootSubmitted`) **mark** the collections as the
+   `insertCollection` each, on the first root addition (`taskGroup.rootSubmitted`) **mark** the collections as the
    initial batch if the body has a hold (`markEntering`, §6), **publish** the node's rank (idempotent max; the
-   door), `pump` every touched branch, broadcast.
+   door), `pump` every touched branch, broadcast. New work clears the body's `joined` (§8).
 
 Steps 3 to 6 run under `run.mu` with no user code, so `Schedule` is safe from any goroutine and tasks may call it
-concurrently with the ItemProcessor. The runtime detects an expired *wave*, not an expired individual callback: the
+concurrently with the ItemProcessor. The runtime detects an expired *task group*, not an expired individual callback: the
 pool-work context is one per collection (`taskCollection.workCtx`), so a goroutine that outlives its task while
-sibling work keeps the wave busy is not detected — the documented callback lifetime contract.
+sibling work keeps the task group busy is not detected — the documented callback lifetime contract.
 
 ### Dormant work
 
@@ -381,23 +376,20 @@ submission by the youngest item with queued work — lands at the tail after one
 drained front to back, which is what makes the order the caller listed the tasks the order their work starts in.
 
 Work is pulled from the **head** collection one freed slot at a time, so a free slot never goes to a younger item's
-work while an older item has work queued. An inserted collection may **displace the head**, including one whose async
-pull is in flight: that collection keeps its single-flight status and its reserved slot (the callback the pull yields
-runs on that slot), and pulls continue from the new head. Removal is therefore **by identity** (`dequeue`): a
-displaced collection settles or is dropped from wherever it stands. The head case stays constant-time. Both ways a
+work while an older item has work queued. An inserted collection may **displace the head**, and pulls continue from
+the new head. Removal is **by identity** (`dequeue`): a collection settles or is dropped from wherever it stands. The head case stays constant-time. Both ways a
 collection leaves the queue — `settleCollection` when exhausted, `dropCollection` when its item is canceled — go
 through `dequeue`, so each collection leaves exactly once, with one `Queued` decrement and one
-`sourceExhausted` notification to its wave. A collection is dequeued as soon as its work has all been handed out, so
+`sourceExhausted` notification to its task group. A collection is dequeued as soon as its work has all been handed out, so
 the branch's `Queued` gauge counts collections with work **not yet started**, never work merely still running; an
 item with rounds or spawns may have several collections queued on one branch.
 
 ### Running
 
-`pump` starts as many pieces as free slots and pullable work allow, spawning one `branchWorker` per piece. `grabNext`
-fills one slot from the head collection and has three outcomes: sync work pulled inline and fully accounted; an
-async pull reserved and handed to the caller to finish outside the lock (`finishAsyncPull`); or nothing to start.
-If the head collection's item is canceled, `grabNext` drops the collection (`dropCollection`) and retries with the
-next one — every source kind then behaves the same way on cancellation, and the branch serves the next item at once.
+`pump` starts as many pieces as free slots and queued work allow, spawning one `branchWorker` per piece. `grabNext`
+fills one slot from the head collection: the work is pulled inline and fully accounted, or there is nothing to start.
+If the head collection's task group context is canceled (the item is canceled, or the body has failed), `grabNext`
+drops the collection (`dropCollection`) and retries with the next one, so the branch serves the next item at once.
 The in-package `assignHook` observes every hand-out (a sync pull or a reservation) for the property tests.
 
 `startWork` decides where the slot is charged:
@@ -405,60 +397,58 @@ The in-package `assignHook` observes every hand-out (a sync pull or a reservatio
 - a **`Lane`** (`travels()` is true): a child item is created and holds the branch's start gate itself, giving it up on its
   first move;
 - a **`Pool`** (`travels()` is false): the work cannot travel, so the slot is charged to the scheduling item for the duration,
-  and the callback gets a cached non-movable context (`withPoolWork`, carrying its collection) whose use in a move or
-  a `Wait` panics and which `Schedule` accepts.
+  and the callback gets a cached non-movable context (`withPoolWork` on the body's context, carrying its collection)
+  whose use in a move or a `Wait` panics and which `Schedule` accepts.
 
 `branchWorker` runs its piece, then keeps the slot busy with the next queued piece — possibly another item's — and
 exits only when nothing is pullable or the limit has been lowered below the current occupancy.
 **Release-on-completion** is what makes an item that scheduled more work than a branch's capacity drain through its
 own completions; the **limit re-check on reuse** is what makes a `SetLimit` decrease actually shrink the pool.
 
-## 8. Waves
+## 8. Task groups
 
-A `wave` is the handle for background work charged to one item: a `RetainFor` bgOp, or the body of a fan-out. It
-tracks three counters, all under `run.mu`:
+A `task group` is the handle for background work charged to one item: a `RetainFor` task, or the body of a fan-out.
+It tracks two counters, all under `run.mu`:
 
 - `unexhausted` — collections that may still produce work;
-- `rootUnexhausted` — the part of `unexhausted` made of **root** collections (scheduled through the item's own path,
-  `taskCollection.root`); spawns are not counted;
 - `running` — tasks (or child items) started but not finished.
 
-`idle()` is `unexhausted == 0 && running == 0`. A wave is also **sealed** or not:
+`idle()` is `unexhausted == 0 && running == 0`. A task group is also **sealed** or not:
 
 | dimension   | values                                                                                                  |
 |-------------|---------------------------------------------------------------------------------------------------------|
-| sealed      | unsealed: the item's own path may still add (a root). Sealed: only the wave's own running work may add (a spawn). |
+| sealed      | unsealed: the item's own path may still add (a root). Sealed: only the task group's own running work may add (a spawn). |
 | busy / idle | busy: a collection may still produce work or a task is running.                                          |
 | finished    | `Finished` closed: sealed **and** idle, decided in `settle` in the same step that made it so.            |
 
-Every wave is born sealed (`newWave`) except a fan-out body (`newBody` clears `sealed`). A body is sealed by
+Every task group is born sealed (`newTaskGroup`) except a fan-out body (`newBody` clears `sealed`). A body is sealed by
 `item.sealBody` from the leave's idle check, `tryEnterUnit`, `FanOut.Retain`, or `completeItem`. `settle` closes nothing
-while the wave is unsealed — the item may still add work, so neither "all handed out" nor "all done" can be final. Once
-sealed, `Started` closes when `rootUnexhausted == 0` and `Finished` when idle. A leave seals an idle wave, so both
-close at once; `FanOut.Retain` may seal a busy one, and they close later in that order.
+while the task group is unsealed — the item may still add work, so "all done" cannot be final. Once sealed, `Finished`
+closes when idle. A leave seals an idle task group, so it closes at once; `FanOut.Retain` may seal a busy one, and it
+closes later.
 
-A spawn happens while its spawner is running, so a body cannot be idle with work still to come; a sealed wave goes
-busy to busy or busy to idle, and sealed-and-idle is terminal. Adding to a finished wave is refused with
+A spawn happens while its spawner is running, so a body cannot be idle with work still to come; a sealed task group goes
+busy to busy or busy to idle, and sealed-and-idle is terminal. Adding to a finished task group is refused with
 `ErrStaleContext` (§7 step 3).
 
-**`Started` over roots.** `Started` exists so the ItemProcessor knows when *its own* streaming sources are done
-reading. A spawned source is created by a task that is still running at that moment and owns that decision, so it
-does not count and does not delay `Started`; the guarantee covers state read only by root sources. With one
-`Schedule` right after entering, every collection is a root and `Started` closes exactly as it did before bodies
-could grow.
+**Context.** `ctx` is what the task group's tasks run with. A body gets its own, `context.WithCancelCause(it.ctx)` in
+`newBody`; pool work (`withPoolWork`) and lane children (`newChildItem`) derive from it. A `RetainFor` task group uses
+the item's context and has no `cancel`; `runRetain` hands the task `withRetainTask(ctx, retainUnit)`, a marked
+context with which every node call panics `errCannotMove` (`checkTaskCtx`, the same check as for pool work). `settle`
+cancels a finished body's context with nil, to release it.
 
-`retainUnit` is the unit whose slot the wave holds until its work is done — the stage of a `RetainFor`, or the node
+`retainUnit` is the unit whose slot the task group holds until its work is done — the stage of a `RetainFor`, or the node
 of a `FanOut.Retain`. It is nil while a fan-out's work is still the node's body: then the *item* holds the slot, because it
 cannot leave until the work is done. `releaseRetained` frees the slot only if the item has already moved past that
 node; if the item is still in it, the item's next move does the freeing (`releaseBelow` stops skipping the unit
-once the wave has finished). Those two halves are the "whichever happens last" contract: an item never sits in a
-node holding nothing, and a slot never outlives the work it was kept for. A retained wave's tasks may keep spawning
+once the task group has finished). Those two halves are the "whichever happens last" contract: an item never sits in a
+node holding nothing, and a slot never outlives the work it was kept for. A retained task group's tasks may keep spawning
 into it; the slot follows the whole tree.
 
-`Retain` (the stage variant without a callback) is not a wave. It adds a `stageHold` to `item.stageHolds`, which
-`isRetaining` checks next to the waves, and its `release` removes it and runs the same sweep as `releaseRetained`
+`Retain` (the stage variant without a task) is not a task group. It adds a `stageHold` to `item.stageHolds`, which
+`isRetaining` checks next to the task groups, and its `release` removes it and runs the same sweep as `releaseRetained`
 (`run.releaseStageHold`). Holds are not joined by `completeItem`: a hold never released would otherwise block the item,
-and with it every later item, forever. `finishItem` drops what is left, after the waves were joined, so a release from
+and with it every later item, forever. `finishItem` drops what is left, after the task groups were joined, so a release from
 a task can never come after its slot was freed; only a goroutine the user started can outlive it. Both `Retain` and
 `RetainFor` require the item to be in the stage now (`occupied > 0` and `reachedRank == u.rank`): occupancy alone is
 not enough, as an earlier retain keeps the slot occupied after the item moved on, and whether that one has ended yet
@@ -466,40 +456,48 @@ is a race.
 
 `hold` is the upstream hold the admission that opened this body deferred, nil under `Buffered` (§6).
 
-`atNode` names the fan-out whose body the wave is. It supplies the node name in the error of `FanOut.Wait`, the leave
-and `Wave.Wait` (`joinedErr`, which falls back to `retainUnit` for a `RetainFor` wave), lets `Schedule` tell a lane child's spawn into its parent's fan-out from a move into
-another node, and is what `sealBody` indexes the body state by.
+`atNode` names the fan-out whose body the task group is. It names the task group in panic messages (`owner`, which
+falls back to `retainUnit` for a `RetainFor` task group), lets `Schedule` tell a lane child's spawn into its parent's
+fan-out from a move into another node, and is what `sealBody` indexes the body state by.
 
-Two ways an error reaches a wave:
+### Outcome
 
-- `recordErr` — the wave's own work failed. The first such error wins, and it **poisons** the owning item (fail-fast)
-  so siblings and the ItemProcessor abort promptly. It replaces an abandonment cause stored earlier (`abandoned`):
-  the wave cannot be finished while its work is still running, so nothing has read that cause as final.
-- `recordAbandoned` — work was dropped without running because the item was canceled. It records the cancellation
-  cause, flagged `abandoned`, but does **not** poison (the item is already canceled by definition).
-  A task error recorded earlier is kept. Without it a wave would settle clean
-  whenever its work was skipped rather than failed, and a caller could not tell "all my work ran" from "most of it
-  was thrown away" — which is the one thing a wave must never be ambiguous about, since it is what a pipeline uses
-  to decide whether the item's effects are complete.
+`err` is the outcome a join reports. Two ways an error reaches it:
 
-`acked` records that the outcome was observed — by `FanOut.Wait` on the open body, by the leave's `closeBody`, by
-`Wave.Wait` on a retained wave, or by an `Err()` call after the wave finished. `Finished` alone never
-acknowledges. An unacked error fails the item at completion, so a failure can be delayed but never lost.
-`FanOut.Wait`, `closeBody` and `Wave.Wait` all share one rule for a cancellation wake-up: a finished (for
-`FanOut.Wait`: idle) wave with an error is acknowledged and its error returned, because the poison that woke them is
-that error; a clean or unfinished wave leaves the cancellation cause as the answer.
+- `recordErr(err, u)` — a task (or child item) of the task group returned an error; `u` is where it ran (a branch's
+  start gate, or the `RetainFor` stage). The error first goes through `item.asAbort`: after the conveyor canceled the
+  item it is the `ShutdownError`, stored as is and flagged `abandoned`, with no further effect. The first real error
+  wins, as `&taskError{unit: u.handle(), err}`, and cancels the body's context (errgroup-style: the body, never the
+  item). It replaces an abandonment cause stored earlier — the task group cannot be finished while its work is still
+  running, so nothing has read that cause as final — and is never replaced itself. If the item's processor has already
+  returned and the task group is not joined, nobody can take the error any more: `itemFailed` fails the item now.
+- `recordAbandoned(cause)` — work was dropped without running because the item or the body was canceled. It records
+  the cancellation cause, flagged `abandoned`, only if nothing is recorded yet, and cancels nothing. Without it a task
+  group would settle clean whenever its work was skipped rather than failed, and a caller could not tell "all my work
+  ran" from "most of it was thrown away" — which is the one thing a task group must never be ambiguous about, since it
+  is what a pipeline uses to decide whether the item's effects are complete.
 
-`Wave.Wait` is the only way to wait on a `RetainFor` or `FanOut.Retain` wave inside the runtime; `MoveTo` and `TryMoveTo` take
-no waves. The reason is the wake-up order: a wait that first asks for admission and only then looks at the wave lets
-the poison of a finished failed wave land in the admission wait, which returns the cause without acknowledging
-anything. A wait that owns the wave has no such gap. `Wave.Wait` resolves its caller before taking the lock: a
-standalone wave (no run) returns its stored error; a pool-work context panics `errCannotMove`; a context without an
-item returns `ErrForeignContext`; another item's wave panics `errForeignWave` (a lane child may wait only on waves it
-created); under the lock a finished item returns `ErrStaleContext`. Then `waitUntil(isFinished)` and the rule above.
+`joined` records that a **join** reported the settled outcome to the processor: `TaskGroup.Wait` on a finished task
+group, `FanOut.Wait` on an idle body, or the leave's `closeBody`. From then on the processor decides what the outcome
+means: what it returns is the item's result. New work scheduled into an open body clears `joined`, so a later join
+must report it again. `Finished` alone never joins, and reading an outcome never changes it. An error of a task group
+that is not joined fails the item (§10), so a failure can be handled or delayed but never lost.
 
-`FanOut.Wait` is `waitUntil(idle)` on the open body, then the acknowledged node-qualified error; it never seals, so
-the item may schedule again. Its cancellation nuance mirrors `joinPending`: an idle body with an error reports the
-body error, anything else reports the cause, and a canceled item never gets nil.
+All joins share one rule for a cancellation wake-up (of the item or the call context): a finished (for `FanOut.Wait`
+and the leave: idle) task group with an error is joined and its error returned, since its outcome is settled; a clean
+one leaves the cancellation cause as the answer, so a canceled item never gets nil; an unfinished one returns the cause
+and stays unjoined.
+
+`TaskGroup.Wait` is the only way to join a `RetainFor` or `FanOut.Retain` task group; `MoveTo` and `TryMoveTo` take no
+task groups, so the processor chooses which node's slot it holds while it waits. `TaskGroup.Wait` resolves its caller
+before taking the lock: a standalone task group (no run) returns its stored error; a task's context (pool work or a
+`RetainFor` task) panics `errCannotMove`; a context without an item returns `ErrForeignContext`; another item's task
+group panics `errForeignTaskGroup` (a lane child may wait only on task groups it created); under the lock a finished
+item returns `ErrStaleContext`. Then `waitUntil(isFinished)` and the rule above.
+
+`FanOut.Wait` is `waitUntil(idle)` on the open body, then the joined outcome (`err` as is: nil, the `TaskError`, or
+an abort); it never seals, so the item may schedule again — unless the body failed, whose canceled context refuses
+new work. A cancellation is returned wrapped with the node name.
 
 ## 9. Worker pools
 
@@ -523,42 +521,52 @@ is shared *across items*, so slot accounting must live in `run` state — which 
 
 ## 10. Errors, cancellation and shutdown
 
-**Fail-fast within an item.** The first error from a task or a bgOp is recorded on its wave and poisons the item's
-context, so siblings and the ItemProcessor abort promptly. A child item's failure escalates to its parent, since
-cancellation is item-wide. Because `Schedule` on a canceled item returns the cause and queued work of a canceled item
-is dropped at the head, a failing tree terminates: running tasks finish, nothing new is accepted.
+**Fail-fast within a body, not the item.** A task error never cancels the item. The first real error of a fan-out
+body cancels the body's own context (§8, `recordErr`): its running tasks and lane children see the cancellation, its
+queued collections are dropped at the head (`grabNext`), and `Schedule` into it returns the `TaskError`. So a failing
+tree terminates, while the item, its other bodies and its `RetainFor` tasks go on. A lane child's failure fails its
+parent's body the same way (`itemFailed` → `parentGroup.recordErr`, with the lane as the unit). A `RetainFor` task
+group has no context of its own: its error only becomes its outcome.
+
+**The processor decides.** A join (§8) hands the outcome to the processor, and what it returns is the item's result:
+the `TaskError` (or any error) fails the item, nil lets it go on. A task group the processor never joined decides for
+it: its error is the item's error (`item.firstUnjoinedErr`).
 
 **Cancellation is judged by the item, not by the context passed.** `item.cancelCause` reads the cancellation cause
 of the item's own context first, then the call context's, then — for an `UntilShutdown` context once shutdown has
 begun — `run.shutdownErr`. It runs under `mu`, and every node method decides with it: the admission waits
-and `Wave.Wait` (`waitUntil`), the `TryMoveTo` preamble (`actingItem` with `checkCancel`), `Schedule`, `Wait`, and
-`RetainFor`'s decision to run its callback (`Retain` keeps its hold regardless: a canceled call context does not stop the item from moving on with its own). A context with cancellation stripped (`context.WithoutCancel`) therefore
+and `TaskGroup.Wait` (`waitUntil`), the `TryMoveTo` preamble (`actingItem` with `checkCancel`), `Schedule`, `Wait`, and
+`RetainFor`'s decision to run its task (`Retain` keeps its hold regardless: a canceled call context does not stop the item from moving on with its own). A context with cancellation stripped (`context.WithoutCancel`) therefore
 cannot move, schedule, wait or retain for a canceled item, which is what keeps a canceled item from committing past
 a failed older one; a derived context with a shorter deadline still works, since it inherits the item's cancellation
-and adds its own. `FanOut.Retain` is the exception: it hands back the item's own wave whatever the cancellation
+and adds its own. `FanOut.Retain` is the exception: it hands back the item's own task group whatever the cancellation
 state.
 
 **`completeItem`** runs after any item's processor returns — an ItemProcessor for a root item, a `TaskFunc` for a
-child. It poisons the item on any processor error, an abort too (only a nil return lets the item's running tasks and
-`RetainFor` bgOps finish), **seals the open body** if any (state `closed`;
-without this an idle body would never finish and the item would wait forever, and from here the item's own path is
-refused — which covers a `RetainFor` callback that holds the item's context and schedules after the processor
-returned), waits for every outstanding wave (a sealed body still grows from its running tasks until the tree is
-exhausted), then computes the effective error: the processor's own, else the first error from a wave nobody
-observed. Then:
+child. Under the lock it maps the processor's error (`asAbort`), sets `returned`, drops dormant work, and cancels the
+item's context on any processor error, an abort too (only a nil return lets the item's running tasks and `RetainFor`
+tasks finish; a child has no cancel of its own). Then `settleOutcome` computes the effective error: the processor's
+real error, else the first error of a task group the processor did not join (a `TaskError`, or an abort), else the
+processor's error (nil or an abort). It is final from here — nobody can join for the item any more — so a failure is
+reported now (`itemFailed`, once per item: `failReported`), not after the wait below; a task group that fails during
+the wait reports itself from `recordErr`. Then `completeItem` **seals the open body** if any (state `closed`; without
+this an idle body would never finish and the item would wait forever, and from here the item's own path is refused),
+waits for every outstanding task group (a sealed body still grows from its running tasks until the tree is
+exhausted), and runs `settleOutcome` again (idempotent), so an abort found only now still cascades. Outcomes:
 
-- a **child** reports it to `parentWave.workDone`, which cancels the parent and surfaces there;
-- a **root item's** real error triggers error-shutdown: `markShutdownLocked`, record it as the trigger (or, after the
+- a **child's** failure goes to `parentGroup.recordErr` and fails the parent's body (above). After `finishItem` the
+  child reports to `parentGroup.workDone`, which counts it done;
+- a **root item's** failure goes to `failRoot`: `markShutdownLocked`, record it as the trigger (or, after the
   trigger, as `drainErr` if that is still nil: the first failure of the drain), and cancel every *later* item with
   `shutdownErr` (earlier ones are left to finish);
 - a **root item's** abort (the effective error is a `ShutdownError`) while shutdown is in progress is the **abort
   cascade**: every later item is canceled with `shutdownErr` too. Returning nil never cascades, and a child's abort
-  does not cascade by itself (it poisons its parent, as any wave error does).
+  does not cascade by itself (it becomes its body's abandonment cause).
 
 Both cascades run under `mu` before `finishItem`. A younger item can pass the aborted one only after it is unlinked,
 so by then it is canceled: no younger item enters a node the aborted one did not reach, which leaves no gap.
 
-Slots are released and the context canceled before a child's outcome is reported, so a parent joining the wave sees
+Slots are released and the context canceled before a child's outcome is reported, so a parent joining the task group sees
 the branch already released.
 
 **Shutdown** has two triggers — the `Run` context being canceled, or an item error. Both go through
@@ -594,8 +602,8 @@ for any context carrying the mark, in the same lock hold as the entry, so a move
 
 **Abort classification** (`item.asAbort`, needs no lock). An error that is or wraps a `ShutdownError` is an abort
 as is. Any other non-nil error is mapped to the item's context cause when that cause is a `ShutdownError` (the
-conveyor canceled the item, so whatever it returns follows from that). Any other item cause (a failed task, a failed
-`RetainFor`), or an item that is not canceled, keeps the error: an error wrapping `context.Canceled` from an item the
+conveyor canceled the item, so whatever it returns follows from that). Any other item cause (the processor's own
+error, a lane child's failed body), or an item that is not canceled, keeps the error: an error wrapping `context.Canceled` from an item the
 conveyor did not cancel is a failure, also after shutdown has begun (e.g. a read canceled through `UntilShutdown` and
 returned as is).
 
@@ -612,26 +620,27 @@ static wiring or a dynamic per-item contract violation is irrelevant.
 
 - **Panic**, with unexported sentinels (`errInvalidUnit`, `errWrongScope`, `errCannotMove`, `errConveyorRunning`,
   `errConveyorFinalized`, `errStageNotEntered`, `errNothingToRetain`, `errBodyClosed`, `errWorkRetained`,
-  `errWrongEnterOrder`, `errNodeAlreadyEntered`, `errNilTaskFunc`, `errTaskReused`, `errForeignWave`): builder calls
+  `errWrongEnterOrder`, `errNodeAlreadyEntered`, `errNilTaskFunc`, `errTaskReused`, `errForeignTaskGroup`): builder calls
   on a running or finalized conveyor; a handle from another conveyor, or one used with a context from another
   conveyor; a node outside the item's series; moving backward or re-entering a node; `Retain` / `RetainFor` / `Wait` on a node
   the item is not in, `Retain` with a context that carries no item, or `Schedule` for a fan-out the item has passed; `Schedule` / `Wait` through the item's
   own path at a body that is closed or retained; a task calling `Schedule` for a fan-out it does not run under; a resubmitted `Task`; a
-  foreign wave; a move or a `Wait` attempted from a pool's non-movable work, or a lane child's `Wait` on its parent's
+  foreign task group; a node call with a `RetainFor` task's context, a move or a `Wait` attempted from a pool's
+  non-movable work, or a lane child's `Wait` on its parent's
   fan-out (`errWrongScope`). They are unexported because a caller must not branch on them — they exist so the
   package's own tests can assert via `errors.Is`. The checks that run under `run.mu` are safe: the deferred `Unlock`
   still fires during the panic unwind.
-- **Return**: context cancellation and `ShutdownError`, fail-fast work errors surfacing at `FanOut.Wait`, a leave or `Wave.Wait`,
+- **Return**: context cancellation and `ShutdownError`, a `TaskError` from a join (`FanOut.Wait`, a leave,
+  `TaskGroup.Wait`) or from `Schedule` into a failed body,
   `ErrForeignContext` / `ErrStaleContext` (both wrapping `ErrInvalidContext`), and `ErrConveyorAlreadyRunning`.
 
 The context cases are the deliberate carve-out. A **stale** context — a finished item's, a lane child's whose
 callback returned (`item.returned`, set when `completeItem` takes the lock, judged before a spawn into the parent's
-fan-out), or pool work's whose wave has finished, including one decoupled from cancellation via
+fan-out), or pool work's whose task group has finished, including one decoupled from cancellation via
 `context.WithoutCancel` — is
 benign: a context outliving its owner, like a closed-channel receive. A **foreign** context is a mistake, but a
-cleanly declinable one, not a memory-unsafe wiring bug like a foreign *handle*. A nil callback is the mirror case:
-the eager constructors panic, but by the time a streaming source yields nil the misuse surfaces on an internal
-goroutine, so it fails the item instead.
+cleanly declinable one, not a memory-unsafe wiring bug like a foreign *handle*. A nil callback makes the
+constructors panic.
 
 ## 11. Dynamic capacity
 
@@ -694,19 +703,19 @@ Break any of these and the model stops holding:
    publishes its rank at the item's initial batch (prepared work at admission, else the first `Schedule`, or leave,
    or `Retain`), never at a bare admission, so a younger item cannot queue before the older one has. Each collection leaves its queue exactly once, by identity, with one
    `Queued` decrement and one exhaustion notification.
-6. **User code never runs under `run.mu`.** Task callbacks, generator pulls, channel receives, `RetainFor` bgOps and
-   source releases all run outside the lock. `dropCollection` therefore hands abandoned sources to their own
-   goroutine.
-7. **A wave error is never lost.** A wave whose error nobody acknowledged fails its item at completion. A root item's
+6. **User code never runs under `run.mu`.** Task callbacks and `RetainFor` tasks run outside the lock; source pulls
+   run no user code.
+7. **A task group error is never lost.** A join hands it to the processor, whose return decides; a task group the
+   processor never joined fails its item when the processor returns, or at once if it fails later. A root item's
    real error becomes the trigger, or the drain error if it is the first failure after the trigger; later ones are
    not reported, so the ItemProcessor logs them if needed.
 8. **No slot outlives its item, and no item sits somewhere holding nothing.** The two halves of the retain
    handover, and of the upstream hold: a held token is freed by a discharge (the mode's start milestone, or a body
    sealed with no root submission) or by `finishItem`, whichever comes first, and every discharge goes through
    `dischargeHold` once. Dormant work holds nothing and is dropped when the item passes, returns, or finishes.
-9. **A body is idle whenever it is observed idle.** A spawn is only accepted from running work of the same wave, so
-   an idle wave cannot have work still to come; `Wait` and the leave may therefore decide on `idle()` alone. A sealed
-   idle wave is finished and refuses additions.
+9. **A body is idle whenever it is seen idle.** A spawn is only accepted from running work of the same task group, so
+   an idle task group cannot have work still to come; `Wait` and the leave may therefore decide on `idle()` alone. A sealed
+   idle task group is finished and refuses additions.
 10. **No root item gets past a failed or aborted older one.** That item cancels every younger one under `mu` before
     it is unlinked, and a younger item cannot pass it before then (§10).
 
@@ -727,8 +736,7 @@ result of spawned work must express the join as a continuation (the last sibling
 with a task's context panics. The item, which holds a fan-out slot and no branch slot, is the only thing that waits
 for a body, and the body drains through the holders above. A younger item at the door waits for the older item's
 initial batch, leave or `Retain`; the older item never waits on the younger one. Ordered insertion moves queue
-positions only and creates no waits. Streaming pulls hold one reserved slot while user code runs; the assumption,
-unchanged, is that the producer terminates or respects the item's context.
+positions only and creates no waits.
 
 **The no-gap property and its limits.** A follow-up scheduled from a running task onto the *same* pool is queued
 while the spawner still holds its slot; when the task returns, the freed slot goes to the head of the queue, which is
@@ -738,7 +746,7 @@ extend to a follow-up on another branch (it waits for a slot there, and a younge
 to a lane child spawning after its first move (it no longer holds the entrance, so a younger item's child may be
 created meanwhile), or to a later round through the item's own path (younger items' tasks may be running; the round is
 queued ahead of their *queued* work and takes slots as they free). Ordering is defined at the moment a slot is handed
-out — a slot reserved for a streaming pull counts as handed out at reservation — and never by preemption.
+out, and never by preemption.
 
 Alternatives that were considered and rejected, worth knowing before reintroducing one:
 
@@ -768,9 +776,9 @@ downstream exclusive stage re-serializes the results.
   door (or in the waiting room) until it schedules, leaves or retains, whatever the fan-out's limit. User code runs
   between admission and the first `Schedule` with the door closed; the documented advice is to keep it short, or to
   prepare the work with `Schedule` before entering, which opens the door at admission.
-- **`Started` covers roots only.** A spawned streaming source is not covered by `Started`; the task that created it
-  owns the decision. The runtime cannot tell one collection's callbacks apart either (one context per collection), so a
-  goroutine that outlives its task is detected only once the whole wave has finished.
+- **Expired callbacks are detected per task group.** The runtime cannot tell one collection's callbacks apart (one
+  context per collection), so a goroutine that outlives its task is detected only once the whole task group has
+  finished.
 - **A `Stats` read resets the windows**, so there can be only one consumer.
 - **Not all topologies are expressible**: windowing, feedback loops and splits without a join are outside the
   model, which always describes the path of one item.

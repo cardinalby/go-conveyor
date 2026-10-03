@@ -9,7 +9,7 @@ import (
 )
 
 // TestFanOutWorkIsJoinedOnTheWayOut: the tasks are the node's body, so the move that leaves the fan-out returns only
-// once every one of them has finished — with no wave named anywhere.
+// once every one of them has finished — with no task group named anywhere.
 func TestFanOutWorkIsJoinedOnTheWayOut(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))

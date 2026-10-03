@@ -78,7 +78,9 @@ Everything you know about an item applies to a child, one level down:
   cancellation reaches it.
 - It may move **only through its own lane's nodes**. Reaching a conveyor node from a child — or a lane's node from
   the conveyor — is a **panic** (`errWrongScope`).
-- Its error is fail-fast: it cancels the whole item (siblings included).
+- Its error fails the parent's body at the fan-out, like a pool task error: the other tasks and children of that
+  body see their context canceled, and the parent's join returns the error as a `TaskError` with the lane as its
+  `Unit`. The parent item is not canceled (see [Errors](4_fan-out.md#errors)).
 - A lane may have its own interior fan-outs; a child enters them with `MoveTo` and adds work with `Schedule` and
   `Wait`, exactly like the ItemProcessor does on the conveyor.
 
@@ -109,7 +111,7 @@ Children are pulled from the lane's queue in this order:
 1. **Older item first** — a child is never created for a younger item's work while an older item has work queued
    on the lane.
 2. **Then `Schedule` order**, and within one `Schedule` call the order you listed the tasks.
-3. **Then index order** within a `NewTasks` / generator / channel.
+3. **Then index order** within a `NewTasks`.
 
 So for `Schedule(ctx, messages.NewTask(A), messages.NewTasks(2, B))` from item 1 and
 `Schedule(ctx, messages.NewTasks(2, C))` from item 2, every interior stage is entered in the order

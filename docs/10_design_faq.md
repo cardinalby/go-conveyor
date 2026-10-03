@@ -132,9 +132,9 @@ Why does a context with cancellation stripped (`context.WithoutCancel`) not bypa
 ---
 
 Cancellation is judged by the **item**, not by the context you pass. Every node method also reads the cancellation
-cause of the item's own context, so once a task has failed or the conveyor is shutting down, `MoveTo`, `TryMoveTo`,
-`Schedule` and `Wait` return the cause, and `RetainFor` declines to run its callback, whatever the caller derived from
-the item's context.
+cause of the item's own context, so once the conveyor has canceled the item, `MoveTo`, `TryMoveTo`, `Schedule` and
+`Wait` return the cause, and `RetainFor` declines to run its task, whatever the caller derived from the item's
+context.
 
 The reason is ordering. If item 5 fails while writing and item 6 hides its cancellation to reach `commit`, item 6
 would commit cumulative offsets past item 5's messages. A pipeline is only correct if a canceled item cannot enter a

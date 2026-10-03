@@ -300,9 +300,9 @@ func TestLaneChildSpawnsIntoItsParentsFanOut(t *testing.T) {
 	}
 }
 
-// TestSpawnIntoRetainedWaveKeepsTheSlot: a task of a retained wave may still spawn; the wave finishes only when the
-// whole tree is done, and the fan-out slot follows the tree meanwhile.
-func TestSpawnIntoRetainedWaveKeepsTheSlot(t *testing.T) {
+// TestSpawnIntoRetainedTaskGroupKeepsTheSlot: a task of a retained task group may still spawn; the task group finishes
+// only when the whole tree is done, and the fan-out slot follows the tree meanwhile.
+func TestSpawnIntoRetainedTaskGroupKeepsTheSlot(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool")).SetLimit(2)
@@ -335,7 +335,7 @@ func TestSpawnIntoRetainedWaveKeepsTheSlot(t *testing.T) {
 		<-spawnRunning
 		select {
 		case <-w.Finished():
-			t.Error("the wave finished while spawned work was still running")
+			t.Error("the task group finished while spawned work was still running")
 		default:
 		}
 		if got := occupancyOf(c, fo); got != 1 {
@@ -345,7 +345,7 @@ func TestSpawnIntoRetainedWaveKeepsTheSlot(t *testing.T) {
 		<-w.Finished()
 		waitFor(t, "the fan-out slot to be given back", func() bool { return occupancyOf(c, fo) == 0 })
 		checked.Store(true)
-		return w.Err()
+		return w.Wait(ctx)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -358,35 +358,28 @@ func TestSpawnIntoRetainedWaveKeepsTheSlot(t *testing.T) {
 // TestScheduleFromCanceledItemQueuesNothing: a canceled item's Schedule returns the cause and queues nothing, also
 // when the call hides the cancellation with context.WithoutCancel — the item's own context decides.
 func TestScheduleFromCanceledItemQueuesNothing(t *testing.T) {
-	boom := errors.New("boom")
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
+	c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
 
-	trigger := make(chan struct{})
 	var ran, checked atomic.Bool
-	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := s.MoveTo(ctx); err != nil {
+	stop, done := runAsync(c, func(ctx context.Context) error {
+		if itemNo(ctx) != 1 {
+			<-ctx.Done()
+			return nil
+		}
+		if err := fo.MoveTo(ctx); err != nil { // inside, with an empty body
 			return err
 		}
-		poison := s.RetainFor(ctx, func() error {
-			<-trigger
-			return boom
-		})
-		if err := fo.MoveTo(ctx); err != nil {
-			return err
-		}
-		close(trigger) // poison the item once it is inside, with an empty body
-		<-poison.Finished()
-		_ = poison.Err()
+		<-ctx.Done() // the drain timeout canceled the item
 		task := func(context.Context) error {
 			ran.Store(true)
 			return nil
 		}
 		for _, cc := range []context.Context{ctx, context.WithoutCancel(ctx)} {
-			if err := fo.Schedule(cc, pool.NewTask(task)); !errors.Is(err, boom) {
-				t.Errorf("Schedule on a poisoned item = %v, want the poison", err)
+			var se ShutdownError
+			if err := fo.Schedule(cc, pool.NewTask(task)); !errors.As(err, &se) {
+				t.Errorf("Schedule on a canceled item = %v, want its ShutdownError", err)
 			}
 		}
 		if got := queueOccupancy(c, pool); got != 0 {
@@ -398,8 +391,11 @@ func TestScheduleFromCanceledItemQueuesNothing(t *testing.T) {
 		checked.Store(true)
 		return nil
 	})
-	if err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatalf("run failed: %v", err)
+	waitFor(t, "item 1 to enter fo", func() bool { return occupancyOf(c, fo) == 1 })
+	stop(errors.New("stop"))
+	err := recvErr(t, "Run", done)
+	if _, item := runErrorKinds(err); item {
+		t.Fatalf("Run = %v, want no item failure", err)
 	}
 	if !checked.Load() {
 		t.Fatalf("the checks did not run")
@@ -409,9 +405,70 @@ func TestScheduleFromCanceledItemQueuesNothing(t *testing.T) {
 	}
 }
 
-// TestScheduleFromFinishedWorkIsStale: a pool goroutine that outlives its wave gets ErrStaleContext; so does a lane
-// child's context after the child's callback returned, even while sibling work keeps the parent's wave busy — the
-// child's own lifetime is judged before its work would be redirected to the parent's wave.
+// TestScheduleIntoFailedBodyQueuesNothing: once a task of the body has failed, Schedule into that body returns the
+// TaskError and queues nothing, also with context.WithoutCancel; the item itself is not canceled.
+func TestScheduleIntoFailedBodyQueuesNothing(t *testing.T) {
+	boom := errors.New("boom")
+	c := NewConveyor()
+	fo := c.AddFanOut(OptName("fo"))
+	pool := fo.AddPool(OptName("pool"))
+
+	var ran, checked atomic.Bool
+	err := runOnce(t, c, func(ctx context.Context) error {
+		if err := fo.MoveTo(ctx); err != nil {
+			return err
+		}
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return boom })); err != nil {
+			return err
+		}
+		waitFor(t, "the task error to be recorded on the body", func() bool { return bodyErrOf(ctx) != nil })
+		if cause := context.Cause(ctx); cause != nil {
+			t.Errorf("item canceled with %v; a task failure must not cancel the item", cause)
+		}
+		task := func(context.Context) error {
+			ran.Store(true)
+			return nil
+		}
+		for _, cc := range []context.Context{ctx, context.WithoutCancel(ctx)} {
+			var te TaskError
+			if err := fo.Schedule(cc, pool.NewTask(task)); !errors.As(err, &te) || te.Unwrap() != boom {
+				t.Errorf("Schedule into a failed body = %v, want the body's TaskError with %v", err, boom)
+			}
+		}
+		if got := queueOccupancy(c, pool); got != 0 {
+			t.Errorf("pool backlog = %d after the refused schedules, want 0", got)
+		}
+		if err := fo.Wait(ctx); !errors.Is(err, boom) {
+			t.Errorf("Wait on the failed body = %v, want the task error", err)
+		}
+		checked.Store(true)
+		return nil // the joined failure is the processor's to decide: the item goes on
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Wait joined the failure, so the run should not fail, got %v", err)
+	}
+	if !checked.Load() {
+		t.Fatalf("the checks did not run")
+	}
+	if ran.Load() {
+		t.Fatalf("a task ran although its schedule was refused")
+	}
+}
+
+// bodyErrOf reads the recorded error of the item's open fan-out body without joining it.
+func bodyErrOf(ctx context.Context) error {
+	it := itemOf(ctx)
+	it.run.mu.Lock()
+	defer it.run.mu.Unlock()
+	if it.pending == nil {
+		return nil
+	}
+	return it.pending.err
+}
+
+// TestScheduleFromFinishedWorkIsStale: a pool goroutine that outlives its task group gets ErrStaleContext; so does a
+// lane child's context after the child's callback returned, even while sibling work keeps the parent's task group busy
+// — the child's own lifetime is judged before its work would be redirected to the parent's task group.
 func TestScheduleFromFinishedWorkIsStale(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -451,7 +508,7 @@ func TestScheduleFromFinishedWorkIsStale(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		<-secondInInner // child 0 is finished, child 1 keeps the wave busy
+		<-secondInInner // child 0 is finished, child 1 keeps the task group busy
 		stale := <-childCtx
 		err = fo.Schedule(stale, lane.NewTask(func(context.Context) error {
 			ran.Add(1)
@@ -461,7 +518,7 @@ func TestScheduleFromFinishedWorkIsStale(t *testing.T) {
 			t.Errorf("Schedule with a finished child's context = %v, want ErrStaleContext", err)
 		}
 		close(release)
-		if err := commit.MoveTo(ctx); err != nil { // the wave is finished
+		if err := commit.MoveTo(ctx); err != nil { // the task group is finished
 			return err
 		}
 		err = fo.Schedule(<-taskCtx, pool.NewTask(func(context.Context) error {
@@ -469,7 +526,7 @@ func TestScheduleFromFinishedWorkIsStale(t *testing.T) {
 			return nil
 		}))
 		if !errors.Is(err, ErrStaleContext) {
-			t.Errorf("Schedule with a finished wave's task context = %v, want ErrStaleContext", err)
+			t.Errorf("Schedule with a finished task group's task context = %v, want ErrStaleContext", err)
 		}
 		checked.Store(true)
 		return nil
@@ -522,7 +579,7 @@ func TestScheduleAfterLeavingPanics(t *testing.T) {
 	})
 }
 
-// TestScheduleAfterRetainPanics: from Retain on the body belongs to the returned wave, whatever its progress.
+// TestScheduleAfterRetainPanics: from Retain on the body belongs to the returned task group, whatever its progress.
 func TestScheduleAfterRetainPanics(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -583,7 +640,7 @@ func TestScheduleFromRetainCallbackAfterProcessorReturnedPanics(t *testing.T) {
 		if err := s.MoveTo(ctx); err != nil {
 			return err
 		}
-		_ = s.RetainFor(ctx, func() error {
+		_ = s.RetainFor(ctx, func(context.Context) error {
 			waitFor(t, "completion to close the body", func() bool { return bodyStateOf(ctx, fo) == bodyClosed })
 			got <- recoveredErr(func() {
 				_ = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
@@ -710,9 +767,10 @@ func TestTryMoveToOutOfIdleBodyIntoFullTargetLeavesItOpen(t *testing.T) {
 	}
 }
 
-// TestTryMoveToOutOfFailedBodyReportsThePoison: a failing task poisons the item, so the non-blocking leave declines
-// from its preamble with the cause; Wait afterwards still gives the node-qualified body error.
-func TestTryMoveToOutOfFailedBodyReportsThePoison(t *testing.T) {
+// TestTryMoveToOutOfFailedBodyReportsTheTaskError: once the failed body is idle, the non-blocking leave joins it: it
+// closes the body and declines with the TaskError, and the item stays in the fan-out. The item is not canceled, so a
+// processor that handles the error may still move on.
+func TestTryMoveToOutOfFailedBodyReportsTheTaskError(t *testing.T) {
 	boom := errors.New("boom")
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
@@ -727,18 +785,35 @@ func TestTryMoveToOutOfFailedBodyReportsThePoison(t *testing.T) {
 		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return boom })); err != nil {
 			return err
 		}
-		<-ctx.Done() // the failure poisons the item
-		if entered, err := commit.TryMoveTo(ctx); entered || !errors.Is(err, boom) {
-			t.Errorf("TryMoveTo on a poisoned item = (%v, %v), want (false, the task error)", entered, err)
+		waitFor(t, "the failed body to go idle", func() bool {
+			it := itemOf(ctx)
+			it.run.mu.Lock()
+			defer it.run.mu.Unlock()
+			return it.pending.idle() && it.pending.err != nil
+		})
+		var te TaskError
+		if entered, err := commit.TryMoveTo(ctx); entered || !errors.As(err, &te) || te.Unit() != pool ||
+			te.Unwrap() != boom {
+			t.Errorf("TryMoveTo out of a failed body = (%v, %v), want (false, a TaskError of %s with %v)",
+				entered, err, pool, boom)
 		}
-		if err := fo.Wait(ctx); !errors.Is(err, boom) {
-			t.Errorf("Wait after the failed task = %v, want the task error", err)
+		if st := bodyStateOf(ctx, fo); st != bodyClosed {
+			t.Errorf("body state after the declined leave = %d, want closed (%d)", st, bodyClosed)
+		}
+		if got := occupancyOf(c, fo); got != 1 {
+			t.Errorf("fo occupancy = %d after the declined leave, want 1", got)
+		}
+		if cause := context.Cause(ctx); cause != nil {
+			t.Errorf("item canceled with %v; a task failure must not cancel the item", cause)
+		}
+		if err := commit.MoveTo(ctx); err != nil {
+			t.Errorf("MoveTo after the joined failure = %v, want nil", err)
 		}
 		checked.Store(true)
-		return nil
+		return nil // the joined failure is the processor's to decide: the item goes on
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatalf("Wait observed the failure, so the run should not fail, got %v", err)
+		t.Fatalf("TryMoveTo joined the failure, so the run should not fail, got %v", err)
 	}
 	if !checked.Load() {
 		t.Fatalf("the checks did not run")
@@ -861,212 +936,7 @@ func TestSpawnTakesTheFreedSlotAheadOfYoungerQueuedWork(t *testing.T) {
 	assertEvents(t, order.all(), []string{"A1 spawns", "A3", "B"})
 }
 
-// TestSpawnDisplacesAPullInFlightAndBothRun: a younger item's generator is mid-pull, its slot reserved, when the older
-// item spawns onto the same pool. The spawn is inserted ahead and pulled from the new head at once, while the
-// displaced pull keeps its slot: the callback it yields later still runs on it.
-func TestSpawnDisplacesAPullInFlightAndBothRun(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	pool := fo.AddPool(OptName("pool")).SetLimit(3)
-	commit := c.AddStage(OptName("commit"))
-
-	olderScheduled := make(chan struct{})
-	pullInFlight := make(chan struct{})
-	spawnRan := make(chan struct{})
-	var order recorder
-	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
-		switch no {
-		case 1:
-			if err := fo.MoveTo(ctx); err != nil {
-				return err
-			}
-			err := fo.Schedule(ctx, pool.NewTask(func(ctx context.Context) error {
-				<-pullInFlight // the younger generator is being pulled, holding a reserved slot
-				return fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
-					order.add("A spawn")
-					close(spawnRan)
-					return nil
-				}))
-			}))
-			if err != nil {
-				return err
-			}
-			close(olderScheduled)
-		case 2:
-			<-olderScheduled
-			if err := fo.MoveTo(ctx); err != nil {
-				return err
-			}
-			err := fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-				close(pullInFlight)
-				<-spawnRan // the pull stays in flight until the older spawn has run
-				yield(func(context.Context) error {
-					order.add("B yielded")
-					return nil
-				})
-			}))
-			if err != nil {
-				return err
-			}
-		}
-		return commit.MoveTo(ctx)
-	})
-	assertEvents(t, order.all(), []string{"A spawn", "B yielded"})
-}
-
-// TestDisplacedPullExhaustionRemovesTheRightCollection: the younger item's generator ends without yielding while the
-// older item's spawn, inserted ahead of it, still waits at the head for a slot. The displaced collection is the one
-// removed — by identity, not "the head" — so the spawn still runs on the slot the pull gives back, the younger body
-// goes idle exactly once, and the branch's backlog returns to zero.
-func TestDisplacedPullExhaustionRemovesTheRightCollection(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	pool := fo.AddPool(OptName("pool")).SetLimit(2)
-	commit := c.AddStage(OptName("commit"))
-
-	olderScheduled := make(chan struct{})
-	pullInFlight := make(chan struct{})
-	spawnQueued := make(chan struct{})
-	spawnRan := make(chan struct{})
-	var youngerWaited atomic.Bool
-	backlogAfter := int64(-1)
-	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
-		switch no {
-		case 1:
-			if err := fo.MoveTo(ctx); err != nil {
-				return err
-			}
-			err := fo.Schedule(ctx, pool.NewTask(func(ctx context.Context) error {
-				<-pullInFlight
-				// Both slots are taken (this task, the reserved pull): the spawn waits at the head of the queue.
-				if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
-					close(spawnRan)
-					return nil
-				})); err != nil {
-					return err
-				}
-				close(spawnQueued)
-				<-spawnRan // keep this slot: the spawn can only run on the one the ended pull gives back
-				return nil
-			}))
-			if err != nil {
-				return err
-			}
-			close(olderScheduled)
-			return commit.MoveTo(ctx)
-		case 2:
-			<-olderScheduled
-			if err := fo.MoveTo(ctx); err != nil {
-				return err
-			}
-			err := fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-				close(pullInFlight)
-				<-spawnQueued // end without yielding, while the older spawn sits at the head
-			}))
-			if err != nil {
-				return err
-			}
-			if err := fo.Wait(ctx); err != nil { // hangs if the exhaustion was lost or counted twice
-				return err
-			}
-			youngerWaited.Store(true)
-			<-spawnRan
-			backlogAfter = int64(queueOccupancy(c, pool))
-			return commit.MoveTo(ctx)
-		}
-		return nil
-	})
-	if !youngerWaited.Load() {
-		t.Fatalf("the younger item's Wait did not return")
-	}
-	if backlogAfter != 0 {
-		t.Fatalf("pool backlog = %d after both collections left the queue, want 0", backlogAfter)
-	}
-}
-
-// TestDisplacedPullCanceledMidPullRecordsAbandonment: the same displacement, but the younger item is poisoned while
-// its generator is mid-pull. The pull ends as exhaustion, the displaced collection is removed by identity, the spawn
-// still runs, and the younger body records why its work was abandoned.
-func TestDisplacedPullCanceledMidPullRecordsAbandonment(t *testing.T) {
-	boom := errors.New("boom")
-	c := NewConveyor()
-	s := c.AddStage(OptName("s"))
-	fo := c.AddFanOut(OptName("fo")).SetLimit(2)
-	pool := fo.AddPool(OptName("pool")).SetLimit(2)
-	commit := c.AddStage(OptName("commit"))
-
-	olderScheduled := make(chan struct{})
-	pullInFlight := make(chan struct{})
-	spawnQueued := make(chan struct{})
-	spawnRan := make(chan struct{})
-	var waitErr, bodyErr error
-	var checked atomic.Bool
-	runNOK(t, c, 2, func(ctx context.Context, no int64) error {
-		switch no {
-		case 1:
-			if err := fo.MoveTo(ctx); err != nil {
-				return err
-			}
-			err := fo.Schedule(ctx, pool.NewTask(func(ctx context.Context) error {
-				<-pullInFlight
-				if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error {
-					close(spawnRan)
-					return nil
-				})); err != nil {
-					return err
-				}
-				close(spawnQueued)
-				<-spawnRan // keep this slot: the spawn can only run on the one the ended pull gives back
-				return nil
-			}))
-			if err != nil {
-				return err
-			}
-			close(olderScheduled)
-			return commit.MoveTo(ctx)
-		case 2:
-			<-olderScheduled
-			if err := s.MoveTo(ctx); err != nil {
-				return err
-			}
-			poison := s.RetainFor(ctx, func() error {
-				<-spawnQueued // poison the item while its pull is in flight and the older spawn heads the queue
-				return boom
-			})
-			if err := fo.MoveTo(ctx); err != nil {
-				return err
-			}
-			err := fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-				close(pullInFlight)
-				<-ctx.Done() // a producer that respects the item's context: the pull ends without yielding
-			}))
-			if err != nil {
-				return err
-			}
-			<-poison.Finished()
-			_ = poison.Err()
-			waitErr = fo.Wait(ctx) // the cause, or the body's error once the pull has ended
-			w := fo.Retain(ctx)    // the body itself says how its work ended
-			<-w.Finished()
-			bodyErr = w.Err()
-			<-spawnRan
-			checked.Store(true)
-			return nil
-		}
-		return nil
-	})
-	if !checked.Load() {
-		t.Fatalf("the checks did not run")
-	}
-	if !errors.Is(waitErr, boom) {
-		t.Fatalf("Wait on the poisoned item = %v, want the poison", waitErr)
-	}
-	if !errors.Is(bodyErr, boom) {
-		t.Fatalf("the abandoned body's error = %v, want the poison recorded as the abandonment cause", bodyErr)
-	}
-}
-
-// --- concurrency and streaming ---
+// --- concurrency ---
 
 // TestConcurrentSchedulesAllLandOnce: Schedule is safe from any goroutine. Tasks spawn while the ItemProcessor keeps
 // adding to the same body, every callback runs exactly once, a spawn with no tasks is a no-op, and the blocking leave
@@ -1115,57 +985,6 @@ func TestConcurrentSchedulesAllLandOnce(t *testing.T) {
 	}
 	if want := int64(roots + (roots-1)*perRoot + extra); atCommit != want {
 		t.Fatalf("%d callbacks had run when the item reached commit, want %d", atCommit, want)
-	}
-}
-
-// TestStartedOnRetainedWaveCountsRootSourcesOnly: Started closes once the root generator is drained, even while a
-// generator spawned by one of its tasks is still being pulled; Finished waits for that too.
-func TestStartedOnRetainedWaveCountsRootSourcesOnly(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool")) // limit 1: the root generator is drained before the spawned one is pulled
-
-	spawnedPulling := make(chan struct{})
-	release := make(chan struct{})
-	var checked atomic.Bool
-	err := runOnce(t, c, func(ctx context.Context) error {
-		if err := fo.MoveTo(ctx); err != nil {
-			return err
-		}
-		err := fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-			yield(func(ctx context.Context) error {
-				return fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-					close(spawnedPulling)
-					<-release
-					yield(func(context.Context) error { return nil })
-				}))
-			})
-		}))
-		if err != nil {
-			return err
-		}
-		w := fo.Retain(ctx)
-		<-spawnedPulling // the spawned generator is mid-pull, so the root generator has already been drained
-		select {
-		case <-w.Started():
-		default:
-			t.Error("Started is still open although every root source has been handed out")
-		}
-		select {
-		case <-w.Finished():
-			t.Error("Finished closed while a spawned generator was still being pulled")
-		default:
-		}
-		close(release)
-		<-w.Finished()
-		checked.Store(true)
-		return w.Err()
-	})
-	if err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatalf("run failed: %v", err)
-	}
-	if !checked.Load() {
-		t.Fatalf("the checks did not run")
 	}
 }
 
@@ -1233,7 +1052,7 @@ func TestChildRunsRoundsAndSpawnsInsideItsLane(t *testing.T) {
 
 // TestScheduleFromReturnedChildIsStale: a lane child's callback has returned but the child is not finished yet, because
 // it retained work at an interior fan-out that is still running. Its context is over for its own code: a Schedule into
-// the parent's fan-out with it is refused with ErrStaleContext, not redirected into the parent's wave.
+// the parent's fan-out with it is refused with ErrStaleContext, not redirected into the parent's task group.
 func TestScheduleFromReturnedChildIsStale(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))

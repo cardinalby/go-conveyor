@@ -16,10 +16,39 @@ import (
 var (
 	_ Branch = Pool(nil)
 	_ Branch = Lane(nil)
-	_ Branch = (*branch)(nil)
-	_ Pool   = (*branch)(nil)
-	_ Lane   = (*branch)(nil)
+	_ Pool   = (*poolHandle)(nil)
+	_ Lane   = (*laneHandle)(nil)
 )
+
+// TestPoolAndLaneAreDistinguishableByTypeAssertion: a Pool is not a Lane and a Lane is not a Pool, also when they come
+// back from FanOut.Branches, so a type assertion tells the kinds apart and cannot reach the other kind's methods
+// (nodes on a pool, SetLimit on a lane).
+func TestPoolAndLaneAreDistinguishableByTypeAssertion(t *testing.T) {
+	c := NewConveyor()
+	fo := c.AddFanOut(OptName("fo"))
+	var pool Branch = fo.AddPool(OptName("pool"))
+	var lane Branch = fo.AddLane(OptName("lane"))
+
+	if _, ok := pool.(Lane); ok {
+		t.Error("a Pool asserts to Lane")
+	}
+	if _, ok := lane.(Pool); ok {
+		t.Error("a Lane asserts to Pool")
+	}
+	if _, ok := pool.(interface{ AddStage(...AnyUnitOption) Stage }); ok {
+		t.Error("a Pool has AddStage")
+	}
+	bs := fo.Branches()
+	if len(bs) != 2 || bs[0] != pool || bs[1] != lane {
+		t.Fatalf("Branches = %v, want the handles AddPool and AddLane returned", bs)
+	}
+	if _, ok := bs[0].(Pool); !ok {
+		t.Error("Branches()[0] does not assert to Pool")
+	}
+	if _, ok := bs[1].(Lane); !ok {
+		t.Error("Branches()[1] does not assert to Lane")
+	}
+}
 
 // TestBranchServesBothKindsUniformly: Branch is what a Pool and a Lane have in common, so code that only builds work
 // — a topology assembled from configuration, a helper handed "somewhere to put this task" — needs one variable and
@@ -215,9 +244,7 @@ func TestPoolTasksStartInSubmissionOrder(t *testing.T) {
 		var ts []Task
 		ts = append(ts, pool.NewTask(func(context.Context) error { rec.add("A"); return nil }))
 		ts = append(ts, pool.NewTasks(2, func(_ context.Context, i int) error { rec.add("B%d", i); return nil }))
-		ts = append(ts, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-			yield(func(context.Context) error { rec.add("C"); return nil })
-		}))
+		ts = append(ts, pool.NewTasks(1, func(context.Context, int) error { rec.add("C"); return nil }))
 		ts = append(ts, pool.NewTask(func(context.Context) error { rec.add("D"); return nil }))
 		if err := fo.MoveTo(ctx); err != nil {
 			return err
@@ -225,7 +252,7 @@ func TestPoolTasksStartInSubmissionOrder(t *testing.T) {
 		if err := fo.Schedule(ctx, ts...); err != nil {
 			return err
 		}
-		return commit.MoveTo(ctx) // joins the wave: all five callbacks have run by here
+		return commit.MoveTo(ctx) // joins the task group: all five callbacks have run by here
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)

@@ -27,16 +27,18 @@ type RetainableStage interface {
 	// item is not in now.
 	Retain(ctx context.Context) (release func())
 
-	// RetainFor runs bgOp in the background while keeping this stage's slot held, letting the item move on without
-	// releasing the stage. The slot is freed once bgOp returns and the item has moved on. Wait for bgOp with the
-	// returned Wave (before or after a later MoveTo); an error from bgOp cancels the item. Several calls run their
-	// bgOps in parallel and the slot is held until all of them return.
+	// RetainFor runs the task fn in the background while keeping this stage's slot held, letting the item move on
+	// without releasing the stage. The slot is freed once fn returns and the item has moved on. Join fn with the
+	// returned TaskGroup (before or after a later MoveTo): Wait returns its error as a TaskError, and the processor
+	// decides; an error of a task never joined fails the item. Several calls run their tasks in parallel and the
+	// slot is held until all of them return.
 	//
-	// On a canceled item — canceled on ctx or on its own context — bgOp does not run and the returned wave is
-	// already finished, carrying the cancellation cause.
+	// fn gets the item's context, canceled when the item is; node calls with it panic. On a canceled item — canceled
+	// on ctx or on its own context — fn does not run and the returned task group is already finished, carrying the
+	// cancellation cause.
 	//
 	// It panics on misuse: a handle from another conveyor, or a stage the item is not in now.
-	RetainFor(ctx context.Context, bgOp func() error) Wave
+	RetainFor(ctx context.Context, fn TaskFunc) TaskGroup
 }
 
 // Stage is a node whose work runs inline: the item enters it with MoveTo, runs the stage's code in the
@@ -45,7 +47,8 @@ type Stage interface {
 	RetainableStage
 
 	// MoveTo advances the item into this stage, releasing the previous node. It blocks until the stage (or its
-	// waiting room) has room and it is the item's turn.
+	// waiting room) has room and it is the item's turn. Leaving a fan-out joins the item's tasks there first and
+	// returns their TaskError, if any, without entering (see FanOut).
 	//
 	// It returns ErrForeignContext, ErrStaleContext, or the item's cancellation cause — whether the cancellation is
 	// visible on ctx or only on the item's own context (see ItemProcessor). It panics on misuse: moving backward,
@@ -61,7 +64,8 @@ type Stage interface {
 	// (SetQueueSize) and never jumps an item already waiting there.
 	//
 	// A canceled item returns (false, its cancellation cause), whether the cancellation is visible on ctx or only on
-	// the item's own context. It panics on the same misuse as MoveTo.
+	// the item's own context. Leaving a fan-out whose tasks still run declines; if they have stopped, it joins them
+	// and returns (false, the TaskError) on a task error. It panics on the same misuse as MoveTo.
 	TryMoveTo(ctx context.Context) (entered bool, err error)
 
 	// SetLimit sets how many items may run this stage's code at once (default 1; a limit <= 0 means 1), and
@@ -158,8 +162,8 @@ func (s *stage) Retain(ctx context.Context) func() {
 }
 
 // RetainFor hands this stage's slot to a background operation (see the RetainableStage interface).
-func (s *stage) RetainFor(ctx context.Context, bgOp func() error) Wave {
-	return s.series.conveyor.retainFor(ctx, s.work, bgOp)
+func (s *stage) RetainFor(ctx context.Context, fn TaskFunc) TaskGroup {
+	return s.series.conveyor.retainFor(ctx, s.work, fn)
 }
 
 // retain keeps the slot of stage unit u for the acting item until the returned release is called: the body of
@@ -182,24 +186,25 @@ func (c *conveyor) retain(ctx context.Context, u *unit) func() {
 	return func() { r.releaseStageHold(it, h) }
 }
 
-// retainFor hands the slot of stage unit u to bgOp: the body of RetainFor on a stage, the starting stage and a lane.
-func (c *conveyor) retainFor(ctx context.Context, u *unit, bgOp func() error) Wave {
-	// checkCancel is false: a canceled item is answered with a wave of this item's own (below), not an error, which
-	// needs the lock this call takes.
+// retainFor hands the slot of stage unit u to the task fn: the body of RetainFor on a stage, the starting stage and a
+// lane.
+func (c *conveyor) retainFor(ctx context.Context, u *unit, fn TaskFunc) TaskGroup {
+	// checkCancel is false: a canceled item is answered with a task group of this item's own (below), not an error,
+	// which needs the lock this call takes.
 	it, r, err := c.actingItem(ctx, "retain", u, false)
 	if err != nil {
-		// No item to charge: hand back a standalone finished wave carrying the reason.
-		return standaloneWave(fmt.Errorf("retain %s: %w", u, err))
+		// No item to charge: hand back a standalone finished task group carrying the reason.
+		return standaloneTaskGroup(fmt.Errorf("retain %s: %w", u, err))
 	}
 	defer r.mu.Unlock()
 	if err := it.cancelCause(ctx); err != nil {
-		return finishedWave(r, it, err) // the item is canceled (on ctx or on its own context): do not run bgOp
+		return finishedTaskGroup(r, it, err) // the item is canceled (on ctx or on its own context): do not run fn
 	}
 	checkInStage(it, u)
-	w := newWave(r, it)
+	w := newTaskGroup(r, it)
 	w.retainUnit = u
 	w.workStarted()
-	go r.runRetain(w, bgOp)
+	go r.runRetain(w, fn)
 	return w
 }
 

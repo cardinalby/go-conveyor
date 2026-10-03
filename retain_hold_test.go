@@ -166,7 +166,7 @@ func TestHoldMixedWithRetainFor(t *testing.T) {
 			return nil
 		}
 		release := a.Retain(ctx)
-		w := a.RetainFor(ctx, func() error { <-bgDone; return nil })
+		w := a.RetainFor(ctx, func(context.Context) error { <-bgDone; return nil })
 		if err := b.MoveTo(ctx); err != nil {
 			return err
 		}
@@ -219,7 +219,7 @@ func TestHoldAfterMovingOnPanics(t *testing.T) {
 		if err := a.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := a.RetainFor(ctx, func() error { <-bgDone; return nil })
+		w := a.RetainFor(ctx, func(context.Context) error { <-bgDone; return nil })
 		if err := b.MoveTo(ctx); err != nil {
 			return err
 		}
@@ -227,7 +227,7 @@ func TestHoldAfterMovingOnPanics(t *testing.T) {
 			t.Errorf("stage occupancy = %d while the bgOp runs, want 1", got)
 		}
 		assertPanics(t, errStageNotEntered, func() { a.Retain(ctx) })
-		assertPanics(t, errStageNotEntered, func() { a.RetainFor(ctx, func() error { return nil }) })
+		assertPanics(t, errStageNotEntered, func() { a.RetainFor(ctx, func(context.Context) error { return nil }) })
 		close(bgDone)
 		return w.Wait(ctx)
 	})

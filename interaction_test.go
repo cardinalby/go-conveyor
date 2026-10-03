@@ -9,7 +9,7 @@ import (
 )
 
 // TestCanceledItemsQueuedWorkIsSkipped: once an item is canceled, work it scheduled but that has not started yet is
-// dropped rather than invoked with a dead context — for every source kind, not just the streaming ones. The wave
+// dropped rather than invoked with a dead context — for every source kind. The task group
 // still resolves, so a joiner is never left hanging.
 func TestCanceledItemsQueuedWorkIsSkipped(t *testing.T) {
 	c := NewConveyor(OptDrainTimeout(0)) // cancel in-flight items as soon as shutdown starts
@@ -51,7 +51,7 @@ func TestCanceledItemsQueuedWorkIsSkipped(t *testing.T) {
 		w := fo.Retain(ic)
 		<-w.Finished() // must resolve even though most of the work was dropped
 		resolved <- ran.Load()
-		return w.Err()
+		return groupErr(w)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -64,7 +64,7 @@ func TestCanceledItemsQueuedWorkIsSkipped(t *testing.T) {
 				got, scheduled)
 		}
 	default:
-		t.Fatalf("the wave never resolved")
+		t.Fatalf("the task group never resolved")
 	}
 }
 
@@ -121,7 +121,7 @@ func TestRetainReleasesWhileItemSitsInFanOut(t *testing.T) {
 			return nil
 		}
 		// Item 1: hand write's slot to a background op, then move into the fan-out and wait for that op *there*.
-		w := write.RetainFor(ic, func() error {
+		w := write.RetainFor(ic, func(context.Context) error {
 			<-releaseBg // released once the test has seen this item inside the fan-out
 			bgDone.Store(true)
 			return nil
@@ -229,8 +229,8 @@ func TestSeveralRetainsOnOneStageKeepItHeld(t *testing.T) {
 		if no > 1 {
 			return nil // a follower: it may only get in once the last retain has finished
 		}
-		fast := a.RetainFor(ic, func() error { return nil })
-		slow := a.RetainFor(ic, func() error {
+		fast := a.RetainFor(ic, func(context.Context) error { return nil })
+		slow := a.RetainFor(ic, func(context.Context) error {
 			<-release
 			return nil
 		})
@@ -243,7 +243,7 @@ func TestSeveralRetainsOnOneStageKeepItHeld(t *testing.T) {
 		close(release)
 		<-slow.Finished()
 		cancel()
-		return slow.Err()
+		return groupErr(slow)
 	})
 
 	if got := occWhileRetained.Load(); got != 1 {
@@ -333,7 +333,7 @@ func TestRetainedStageFillsItsWaitingRoom(t *testing.T) {
 		}
 		entered.Add(1)
 		if retainer.CompareAndSwap(false, true) {
-			w := s.RetainFor(ic, func() error {
+			w := s.RetainFor(ic, func(context.Context) error {
 				select {
 				case <-release:
 				case <-ic.Done():

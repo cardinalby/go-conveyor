@@ -385,23 +385,31 @@ func TestAbortedItemReturningAnyErrorIsNotAFailure(t *testing.T) {
 	}
 }
 
-// TestPlainCancelAfterTaskFailureStaysAFailure: when the item's context was canceled by its own failed RetainFor, a
-// returned context.Canceled does not turn into an abort: the item fails with what the processor returned.
+// TestPlainCancelAfterTaskFailureStaysAFailure: a task failure does not cancel the item, so a context.Canceled the
+// processor returns afterwards (from a call context of its own) does not turn into an abort: the item fails with what
+// the processor returned, not with the joined task error.
 func TestPlainCancelAfterTaskFailureStaysAFailure(t *testing.T) {
 	c := NewConveyor()
 	boom := errors.New("boom")
 
 	err := runOnce(t, c, func(ic context.Context) error {
-		c.StartingStage().RetainFor(ic, func() error { return boom })
-		<-ic.Done()
-		return context.Canceled
+		w := c.StartingStage().RetainFor(ic, func(context.Context) error { return boom })
+		if err := w.Wait(ic); !errors.Is(err, boom) {
+			t.Errorf("Wait = %v, want the task's error %v", err, boom)
+		}
+		if cause := context.Cause(ic); cause != nil {
+			t.Errorf("item canceled with %v; a task failure must not cancel the item", cause)
+		}
+		callCtx, cancel := context.WithCancel(ic)
+		cancel()
+		return callCtx.Err() // a plain context.Canceled
 	})
 
 	if shutdown, item := runErrorKinds(err); shutdown || !item {
 		t.Fatalf("Run = %v, want an ItemError", err)
 	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run = %v, want the processor's context.Canceled", err)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, boom) {
+		t.Fatalf("Run = %v, want the processor's context.Canceled and not the joined task error", err)
 	}
 }
 
@@ -573,7 +581,7 @@ func TestItemErrorUnitTaskFailsAfterMovingOn(t *testing.T) {
 		if err := a.MoveTo(ic); err != nil {
 			return err
 		}
-		a.RetainFor(ic, func() error {
+		a.RetainFor(ic, func(context.Context) error {
 			<-gate
 			return boom
 		})
@@ -727,41 +735,41 @@ func TestRunErrorDrainFailureBeforeDrainTimeout(t *testing.T) {
 	}
 }
 
-// TestRunErrorDrainTimeoutBeforeDrainFailure: the first event of the drain wins: once the drain timed out with an
-// item in flight, DrainError is its cause even if that item then fails for real (its own RetainFor canceled it
-// earlier, so the conveyor did not abort it).
-func TestRunErrorDrainTimeoutBeforeDrainFailure(t *testing.T) {
+// TestRunErrorFailureAfterDrainTimeoutIsAnAbort: once the drain timed out with an item in flight, DrainError is its
+// cause. The item's task and the item itself then fail with errors of their own, but the conveyor has canceled the
+// item, so both are aborts: the task's error is reported as the ShutdownError and DrainError is not replaced.
+func TestRunErrorFailureAfterDrainTimeoutIsAnAbort(t *testing.T) {
 	boom := errors.New("boom")
 	stop := errors.New("stop")
 	errDrain := errors.New("drain timed out")
 	opt, endDrain := drainByTest(t)
 	c := NewConveyor(opt)
-	ready, failRetain, canceled, proceed := make(chan struct{}), make(chan struct{}), make(chan struct{}),
-		make(chan struct{})
+	ready, failRetain, canceled := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	joined := make(chan error, 1)
 
 	cancel, done := runAsync(c, func(ic context.Context) error {
 		if itemNo(ic) != 1 {
 			<-ic.Done()
 			return context.Cause(ic)
 		}
-		c.StartingStage().RetainFor(ic, func() error {
-			<-failRetain
+		w := c.StartingStage().RetainFor(ic, func(context.Context) error {
+			<-failRetain // ignores the cancellation
 			return boom
 		})
 		signal(ready)
-		<-ic.Done()
+		<-ic.Done() // the drain timeout canceled the item
 		signal(canceled)
-		<-proceed
-		return context.Cause(ic) // boom: a real failure
+		<-w.Finished()
+		joined <- w.Wait(ic)
+		return boom // an abort all the same
 	})
 	<-ready
 	cancel(stop)
 	waitFor(t, "shutdown to begin", func() bool { return shutdownBegun(c) })
-	close(failRetain)
-	<-canceled
 	endDrain(errDrain)
-	waitFor(t, "the drain timeout to be recorded", func() bool { return drainErrOf(c) != nil })
-	close(proceed)
+	<-canceled
+	close(failRetain)
+	assertShutdownCause(t, "Wait on the task that failed after the cancellation", recvErr(t, "Wait", joined), stop)
 	err := recvErr(t, "Run", done)
 
 	assertShutdownCause(t, "Run", err, stop)
@@ -844,7 +852,7 @@ func TestRunErrorDrainFailureBeforeJoin(t *testing.T) {
 			return context.Cause(ic)
 		}
 		first.Store(itemOf(ic))
-		c.StartingStage().RetainFor(ic, func() error {
+		c.StartingStage().RetainFor(ic, func(context.Context) error {
 			<-release // ignores the cancellation: the completion of the item waits for it
 			return nil
 		})

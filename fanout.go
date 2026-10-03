@@ -10,6 +10,14 @@ import (
 // finish. Use it for concurrent work such as writing to several databases, or, with a Lane, to turn one item into
 // several child journeys.
 //
+// The tasks of one item at a fan-out (its body) share a context derived from the item's. The first task error
+// cancels it: the other tasks see a canceled context, queued tasks are dropped, and Schedule returns that error. The
+// item itself is not canceled. A join — FanOut.Wait, or the MoveTo / TryMoveTo of the next node that leaves the
+// fan-out — waits until the tasks have stopped and returns nil, that first error as a TaskError, or the ShutdownError
+// if the conveyor canceled the item. After a TaskError the processor decides: return it to fail the item, or handle it
+// and go on. After a failed leave the body is closed and the item is still in the fan-out, so a second MoveTo moves
+// on. If the processor returns without joining, the error fails the item.
+//
 // A branch is either a Pool (AddPool), a single step where a task runs and is done, or a Lane (AddLane), a pipeline
 // whose steps a task travels as a child item. Most fan-outs need only pools.
 type FanOut interface {
@@ -38,6 +46,9 @@ type FanOut interface {
 	// The item behind cannot enter this fan-out until this item's initial batch is known (it schedules, leaves, or
 	// retains); meanwhile it may wait in the fan-out's waiting room.
 	//
+	// Leaving a previous fan-out joins its body first (see FanOut): the call then returns the body's TaskError, if
+	// any, without entering.
+	//
 	// It returns ErrForeignContext, ErrStaleContext, or the item's cancellation cause, whether the cancellation is
 	// visible on ctx or only on the item's own context (see ItemProcessor). It panics on misuse: moving backward,
 	// re-entering this node, or a node outside the item's own series.
@@ -48,8 +59,9 @@ type FanOut interface {
 	// decline; entering may keep the previous node's slot instead (see SetBackpressure).
 	//
 	// When entered is false nothing happened: the item stays where it is, and work prepared with Schedule stays
-	// prepared for a later attempt or a MoveTo. A canceled item returns (false, its cancellation cause). It panics on
-	// the same misuse as MoveTo.
+	// prepared for a later attempt or a MoveTo. A canceled item returns (false, its cancellation cause). Leaving a
+	// previous fan-out whose tasks still run declines; if they have stopped, it joins them and returns
+	// (false, the TaskError) on a task error. It panics on the same misuse as MoveTo.
 	TryMoveTo(ctx context.Context) (entered bool, err error)
 
 	// Schedule adds tasks to this item's work at this fan-out. It never blocks. Allowed callers:
@@ -59,10 +71,10 @@ type FanOut interface {
 	//   - a child item of one of this fan-out's lanes, before its callback returns.
 	//
 	// Inside the fan-out, tasks are queued at once. Before entry, tasks are prepared: the Tasks are consumed, but
-	// nothing runs and no generator or channel is pulled until the item enters. All prepared calls together form the
-	// initial batch (see FanOutBackpressure). Prepared work is discarded without running if the item passes the
-	// fan-out without entering or returns, and once a canceled item calls a node method or returns; a declined
-	// TryMoveTo keeps it. Prepared work does not appear in Stats.
+	// nothing runs until the item enters. All prepared calls together form the initial batch (see
+	// FanOutBackpressure). Prepared work is discarded without running if the item passes the fan-out without entering
+	// or returns, and once a canceled item calls a node method or returns; a declined TryMoveTo keeps it. Prepared
+	// work does not appear in Stats.
 	//
 	// Preparing the work and then entering lets it start as part of the entry:
 	//
@@ -80,33 +92,38 @@ type FanOut interface {
 	// behind enter.
 	//
 	// It returns ErrForeignContext; ErrStaleContext for the context of a finished item, a finished child, a finished
-	// wave, or (before entry) a processor that has returned; or the item's cancellation cause. In these cases nothing is
-	// queued or prepared. It panics on misuse: a task of another fan-out, a Task submitted twice, a fan-out the item
-	// has already passed, a body closed by leaving (or trying to leave), Retain, or a task calling it for a fan-out it
-	// does not run under.
+	// task group, or (before entry) a processor that has returned; the item's cancellation cause; or the TaskError of a
+	// body whose task has failed. In these cases nothing is queued or prepared. It panics on misuse: a task of another
+	// fan-out, a Task submitted twice, a fan-out the item has already passed, a body closed by leaving (or trying to
+	// leave), Retain, or a task calling it for a fan-out it does not run under.
 	Schedule(ctx context.Context, tasks ...Task) error
 
-	// Wait blocks until every task scheduled so far in this fan-out's body has finished, including work those tasks
-	// scheduled themselves, and returns the first error or the item's cancellation cause. The item keeps its slot and
-	// may Schedule again afterwards. Use it for rounds: wait, plan the next tasks from the results, schedule again.
-	// Repeated calls return the same error again.
+	// Wait blocks until every task scheduled so far in this fan-out's body has stopped, including work those tasks
+	// scheduled themselves, and returns nil or their first error as a TaskError. The item keeps its slot and may
+	// Schedule again afterwards, unless a task failed. Use it for rounds: wait, plan the next tasks from the results,
+	// schedule again. Repeated calls return the same error again. If the conveyor canceled the item, it returns the
+	// ShutdownError.
+	//
+	// If the item or the call context is canceled before the tasks stop, Wait returns that cause and the tasks are not
+	// joined (see FanOut).
 	//
 	// Only the ItemProcessor (or a child item at a fan-out of its own lane) may call it, while the body is open. It
 	// panics when called with a task's context (a task must never wait for other work), before entering, after leaving,
 	// or after Retain.
 	Wait(ctx context.Context) error
 
-	// Retain hands the work scheduled here to the returned Wave and lets the item move on without waiting for it. This
-	// fan-out's slot stays held until the work is done and the item has moved on. The work may still grow from its own
-	// running tasks. It is the fan-out counterpart of Stage.RetainFor: use it to overlap this fan-out's work with later
-	// stages, then call Wave.Wait before the step that needs the result.
+	// Retain hands the work scheduled here to the returned TaskGroup and lets the item move on without waiting for it.
+	// This fan-out's slot stays held until the work is done and the item has moved on. The work may still grow from its
+	// own running tasks. It is the fan-out counterpart of Stage.RetainFor: use it to overlap this fan-out's work with
+	// later stages, then call TaskGroup.Wait before the step that needs the result. The work's first error is reported
+	// by that Wait; if the item never waits, the error fails the item.
 	//
 	// After Retain the ItemProcessor may not Schedule or Wait here again. Retain does not release the previous node's
 	// slot earlier than SetBackpressure allows.
 	//
 	// It panics on misuse: a fan-out the item does not currently occupy, or nothing to retain (never entered, already
 	// retained, or the body was closed by leaving).
-	Retain(ctx context.Context) Wave
+	Retain(ctx context.Context) TaskGroup
 
 	// SetLimit sets how many items may be inside this fan-out at once (default 1; a limit <= 0 means 1), and returns
 	// the fan-out for chaining. An item counts from entering until it moves into the next node or its waiting room;
@@ -151,14 +168,15 @@ type FanOut interface {
 // Schedule calls and work scheduled by running tasks never delay the release.
 //
 // A task counts as started when its callback is dispatched; a lane task counts when its child item is created. A
-// source that ends without producing a task (NewTasks with count 0, a closed channel, a finished generator) counts
-// for its branch as well. Work waiting behind a full pool has not started.
+// task without callbacks (NewTasks with count 0) counts for its branch as well. Work waiting behind a full pool has not
+// started.
 type FanOutBackpressure int
 
 const (
-	// BackpressureBalanced is the default. The previous slot is released when the first task of the initial batch starts
-	// on any branch, or when every branch of the batch ran out without a task. An item whose work is all waiting for
-	// full pools keeps the previous node busy; an item with some work running does not. A good general-purpose choice.
+	// BackpressureBalanced is the default. The previous slot is released when the first task of the initial batch
+	// starts on any branch, or when every branch of the batch ran out without a task. An item whose work is all
+	// waiting for full pools keeps the previous node busy; an item with some work running does not. A good
+	// general-purpose choice.
 	BackpressureBalanced FanOutBackpressure = iota
 
 	// BackpressureBuffered releases the previous slot on entering, like a plain stage. More items wait inside the
@@ -196,11 +214,21 @@ type fanOut struct {
 	branches []*branch
 }
 
-func (f *fanOut) AddPool(opts ...AnyUnitOption) Pool { return f.addBranch(opts) }
+func (f *fanOut) AddPool(opts ...AnyUnitOption) Pool {
+	b := f.addBranch(opts)
+	h := &poolHandle{b: b}
+	b.handle = h
+	return h
+}
 
-func (f *fanOut) AddLane(opts ...AnyUnitOption) Lane { return f.addBranch(opts) }
+func (f *fanOut) AddLane(opts ...AnyUnitOption) Lane {
+	b := f.addBranch(opts)
+	h := &laneHandle{b: b}
+	b.handle = h
+	return h
+}
 
-// addBranch builds a branch. It is the whole of both constructors: the kinds differ only in the interface handed back,
+// addBranch builds a branch. It is the whole of both constructors: the kinds differ only in the handle handed back,
 // which is what decides whether nodes can be added to the series every branch gets. That series is what a freed slot
 // pumps, and what a child item travels if there is anything there to travel (see unit.branchSeries, run.startWork).
 func (f *fanOut) addBranch(opts []AnyUnitOption) *branch {
@@ -265,13 +293,13 @@ func (f *fanOut) Schedule(ctx context.Context, tasks ...Task) error {
 	r := it.run
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// A finished caller's context is stale: the item itself, or, for a pool's work, the wave it belongs to. A lane
-	// child whose callback has returned is over for its own code even while its background work keeps it unfinished:
-	// its lifetime is judged before its work would be charged to the parent's wave. (Its own-body path is answered by
-	// the closed body instead.) The boundary is completeItem taking the lock; a Schedule racing with the return is
-	// the callback lifetime contract's problem.
-	if it.finished || (col != nil && col.wave.isFinished()) ||
-		(col == nil && it.returned && it.parentWave != nil && it.parentWave.atNode == f.node) {
+	// A finished caller's context is stale: the item itself, or, for a pool's work, the task group it belongs to. A
+	// lane child whose callback has returned is over for its own code even while its background work keeps it
+	// unfinished: its lifetime is judged before its work would be charged to the parent's task group. (Its own-body
+	// path is answered by the closed body instead.) The boundary is completeItem taking the lock; a Schedule racing
+	// with the return is the callback lifetime contract's problem.
+	if it.finished || (col != nil && col.group.isFinished()) ||
+		(col == nil && it.returned && it.parentGroup != nil && it.parentGroup.atNode == f.node) {
 		return fmt.Errorf("schedule at %s: %w", f, ErrStaleContext)
 	}
 	w, root := f.bodyFor(col, it)
@@ -291,24 +319,30 @@ func (f *fanOut) Schedule(ctx context.Context, tasks ...Task) error {
 	if err := w.it.cancelCause(ctx); err != nil {
 		return fmt.Errorf("schedule at %s: %w", f, err)
 	}
+	// A body whose work has failed takes nothing more: its first error is the answer (the item may leave and handle
+	// it).
+	if err := context.Cause(w.ctx); err != nil {
+		return fmt.Errorf("schedule at %s: %w", f, err)
+	}
 	r.addToBody(w.it, w, f, tasks, root)
+	w.joined = false // new work: a join must report it again
 	return nil
 }
 
-// bodyFor resolves the body a Schedule adds to, and whether the addition is a root (through the item's own path) or
-// a spawn (from the body's own work). A pool's work adds to its own wave, which must be this fan-out's; a lane child
-// adds to its parent's wave when this is the fan-out its lane belongs to (checked before the scope, which is the
-// parent's); otherwise the item acts in its own scope: its body here must be open, or — a nil wave — it has not
-// entered this fan-out yet and the work is prepared for the entry (see run.prepare). A fan-out the item has already
-// passed is misuse, like a MoveTo to it. Caller holds mu.
-func (f *fanOut) bodyFor(col *taskCollection, it *item) (w *wave, root bool) {
+// bodyFor resolves the body a Schedule adds to, and whether the addition is a root (through the item's own path) or a
+// spawn (from the body's own work). A pool's work adds to its own task group, which must be this fan-out's; a lane
+// child adds to its parent's task group when this is the fan-out its lane belongs to (checked before the scope, which
+// is the parent's); otherwise the item acts in its own scope: its body here must be open, or — a nil task group —
+// it has not entered this fan-out yet and the work is prepared for the entry (see run.prepare). A fan-out the item has
+// already passed is misuse, like a MoveTo to it. Caller holds mu.
+func (f *fanOut) bodyFor(col *taskCollection, it *item) (w *taskGroup, root bool) {
 	if col != nil {
 		if col.branch.fanout != f {
 			panic(fmt.Errorf("work on %s cannot schedule at %s: %w", col.branch, f, errInvalidUnit))
 		}
-		return col.wave, false
+		return col.group, false
 	}
-	if pw := it.parentWave; pw != nil && pw.atNode == f.node {
+	if pw := it.parentGroup; pw != nil && pw.atNode == f.node {
 		return pw, false
 	}
 	c := f.series.conveyor
@@ -332,21 +366,18 @@ func (f *fanOut) Wait(ctx context.Context) error {
 	}
 	defer r.mu.Unlock()
 	w := f.openBody(it, "wait")
-	// A canceled wait with an idle failed body falls through: a failing task poisons its item, so the body's own error
-	// is the truer message (see joinPending). A canceled item never gets nil.
+	// A body that is idle when the wait is canceled is still joined: its outcome is settled. A clean one leaves the
+	// cancellation cause as the answer, so a canceled item never gets nil.
 	if err := r.waitUntil(ctx, it, w.idle); err != nil && (!w.idle() || w.err == nil) {
 		return fmt.Errorf("wait at %s: %w", f, err)
 	}
-	if w.err != nil {
-		w.acked = true
-		return joinedErr(w)
-	}
-	return nil // the body stays open: the item may schedule again
+	w.joined = true
+	return w.err // the body stays open: after a nil the item may schedule again
 }
 
 // openBody returns the item's open body at this fan-out, or panics with the sentinel of its body state (see
 // bodyState). verb names the refused call. Caller holds mu.
-func (f *fanOut) openBody(it *item, verb string) *wave {
+func (f *fanOut) openBody(it *item, verb string) *taskGroup {
 	switch it.body[f.node.index] {
 	case bodyOpen:
 		return it.pending
@@ -361,17 +392,17 @@ func (f *fanOut) openBody(it *item, verb string) *wave {
 
 // Retain hands this fan-out's slot to the work the item scheduled here. See the FanOut interface for the full
 // contract.
-func (f *fanOut) Retain(ctx context.Context) Wave {
-	// checkCancel is false: a canceled item is handed its own wave (the work is already scheduled and will settle with
-	// the cancellation cause), not an error — the same choice RetainFor makes.
+func (f *fanOut) Retain(ctx context.Context) TaskGroup {
+	// checkCancel is false: a canceled item is handed its own task group (the work is already scheduled and will settle
+	// with the cancellation cause), not an error — the same choice RetainFor makes.
 	it, r, err := f.series.conveyor.actingItem(ctx, "retain", f.node, false)
 	if err != nil {
-		// No item to charge: hand back a standalone finished wave carrying the reason.
-		return standaloneWave(fmt.Errorf("retain %s: %w", f, err))
+		// No item to charge: hand back a standalone finished task group carrying the reason.
+		return standaloneTaskGroup(fmt.Errorf("retain %s: %w", f, err))
 	}
 	defer r.mu.Unlock()
 	// The body state, not occupancy, says whether there is work to hand over, so the diagnostic is the same whether
-	// the item still stands here (a retained wave holding the slot, a failed leave) or has moved on.
+	// the item still stands here (a retained task group holding the slot, a failed leave) or has moved on.
 	switch it.body[f.node.index] {
 	case bodyOpen:
 	case bodyRetained:
@@ -397,13 +428,14 @@ func (f *fanOut) Retain(ctx context.Context) Wave {
 	return w
 }
 
-// newBody opens the item's body at f: an unsealed idle wave, recorded as the item's pending work with body state
+// newBody opens the item's body at f: an unsealed idle task group, recorded as the item's pending work with body state
 // open. It is sealed when the item leaves, retains or completes (see item.sealBody), so an empty body still
 // finishes. Caller holds run.mu.
-func (r *run) newBody(it *item, f *fanOut) *wave {
-	w := newWave(r, it)
+func (r *run) newBody(it *item, f *fanOut) *taskGroup {
+	w := newTaskGroup(r, it)
 	w.sealed = false
 	w.atNode = f.node
+	w.ctx, w.cancel = context.WithCancelCause(it.ctx)
 	for _, h := range it.holds {
 		if h.at == f.node { // the hold this admission opened (takeUnit ran just before, under the same lock hold)
 			w.hold = h
@@ -415,9 +447,9 @@ func (r *run) newBody(it *item, f *fanOut) *wave {
 }
 
 // addToBody adds tasks to the item's body w at f: it claims the sources (where a resubmitted Task panics, before
-// anything is mutated) and submits them. root says the tasks come through the item's own path (see
-// taskCollection.root). Caller holds run.mu.
-func (r *run) addToBody(it *item, w *wave, f *fanOut, tasks []Task, root bool) {
+// anything is mutated) and submits them. root says the tasks come through the item's own path, not from the body's
+// own work (see taskGroup.rootSubmitted). Caller holds run.mu.
+func (r *run) addToBody(it *item, w *taskGroup, f *fanOut, tasks []Task, root bool) {
 	claimTasks(tasks)
 	r.submitClaimed(it, w, f, tasks, root)
 }
@@ -450,7 +482,7 @@ func claimTasks(tasks []Task) {
 //
 // Several tasks for the same branch become one collection, whose sources are consumed front to back — which is what
 // makes the order the caller listed them the order their work starts in.
-func (r *run) submitClaimed(it *item, w *wave, f *fanOut, tasks []Task, root bool) {
+func (r *run) submitClaimed(it *item, w *taskGroup, f *fanOut, tasks []Task, root bool) {
 	byBranch := make(map[int]*taskCollection, len(f.branches))
 	touched := make([]int, 0, len(f.branches))
 	for _, t := range tasks {
@@ -460,7 +492,7 @@ func (r *run) submitClaimed(it *item, w *wave, f *fanOut, tasks []Task, root boo
 		branchIdx := t.branch.start.index
 		col := byBranch[branchIdx]
 		if col == nil {
-			col = &taskCollection{it: it, wave: w, branch: t.branch, root: root}
+			col = &taskCollection{it: it, group: w, branch: t.branch}
 			byBranch[branchIdx] = col
 			touched = append(touched, branchIdx)
 		}
@@ -547,7 +579,7 @@ func (f *fanOut) Backpressure() FanOutBackpressure { return f.node.backpressureM
 func (f *fanOut) Branches() []Branch {
 	bs := make([]Branch, 0, len(f.branches))
 	for _, b := range f.branches {
-		bs = append(bs, b)
+		bs = append(bs, b.handle)
 	}
 	return bs
 }

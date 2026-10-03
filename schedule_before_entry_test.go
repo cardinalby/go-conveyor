@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"iter"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -20,7 +19,7 @@ func dormantCount(ctx context.Context) int {
 }
 
 // TestScheduleBeforeEntry_NothingRunsBeforeAdmission: prepared work takes no capacity, stands in no queue, and none
-// of its callbacks, generators or channels is touched until the item enters.
+// of its callbacks runs until the item enters.
 func TestScheduleBeforeEntry_NothingRunsBeforeAdmission(t *testing.T) {
 	c := NewConveyor()
 	read := c.AddStage(OptName("read"))
@@ -28,14 +27,7 @@ func TestScheduleBeforeEntry_NothingRunsBeforeAdmission(t *testing.T) {
 	pool := fo.AddPool(OptName("pool")).SetLimit(3)
 	commit := c.AddStage(OptName("commit"))
 
-	var ran, pulled atomic.Int32
-	ch := make(chan TaskFunc, 1)
-	ch <- func(context.Context) error { ran.Add(1); return nil }
-	close(ch)
-	gen := func(yield func(TaskFunc) bool) {
-		pulled.Add(1)
-		yield(func(context.Context) error { ran.Add(1); return nil })
-	}
+	var ran atomic.Int32
 	prepared := make(chan struct{})
 	proceed := make(chan struct{})
 	go func() {
@@ -43,12 +35,6 @@ func TestScheduleBeforeEntry_NothingRunsBeforeAdmission(t *testing.T) {
 		// The item is in read with everything prepared: nothing has moved.
 		if got := ran.Load(); got != 0 {
 			t.Errorf("%d callbacks ran before entry", got)
-		}
-		if got := pulled.Load(); got != 0 {
-			t.Errorf("the generator was pulled before entry")
-		}
-		if len(ch) != 1 {
-			t.Errorf("the channel was received from before entry")
 		}
 		if got := occupancyOf(c, pool); got != 0 {
 			t.Errorf("pool occupancy = %d before entry, want 0", got)
@@ -67,11 +53,11 @@ func TestScheduleBeforeEntry_NothingRunsBeforeAdmission(t *testing.T) {
 		}
 		if err := fo.Schedule(ctx,
 			pool.NewTask(func(context.Context) error { ran.Add(1); return nil }),
-			pool.NewTasksGen(iter.Seq[TaskFunc](gen)),
+			pool.NewTasks(1, func(context.Context, int) error { ran.Add(1); return nil }),
 		); err != nil {
 			return err
 		}
-		if err := fo.Schedule(ctx, pool.NewTasksChan(ch)); err != nil {
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { ran.Add(1); return nil })); err != nil {
 			return err
 		}
 		close(prepared)
@@ -324,7 +310,7 @@ func TestScheduleBeforeEntry_DeclinedTryMoveToKeepsTheWork(t *testing.T) {
 }
 
 // TestScheduleBeforeEntry_SkippingTheFanOutDiscardsTheWork: moving past a prepared fan-out drops the work — no
-// callback runs, a generator is never pulled, and the leave is not a join.
+// callback runs, and the leave is not a join.
 func TestScheduleBeforeEntry_SkippingTheFanOutDiscardsTheWork(t *testing.T) {
 	c := NewConveyor()
 	read := c.AddStage(OptName("read"))
@@ -332,17 +318,14 @@ func TestScheduleBeforeEntry_SkippingTheFanOutDiscardsTheWork(t *testing.T) {
 	pool := fo.AddPool(OptName("pool"))
 	commit := c.AddStage(OptName("commit"))
 
-	var ran, pulled atomic.Int32
-	genTask := pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-		pulled.Add(1)
-		yield(func(context.Context) error { ran.Add(1); return nil })
-	})
+	var ran atomic.Int32
+	countTask := pool.NewTasks(2, func(context.Context, int) error { ran.Add(1); return nil })
 	var checked atomic.Bool
 	err := runOnce(t, c, func(ctx context.Context) error {
 		if err := read.MoveTo(ctx); err != nil {
 			return err
 		}
-		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { ran.Add(1); return nil }), genTask); err != nil {
+		if err := fo.Schedule(ctx, pool.NewTask(func(context.Context) error { ran.Add(1); return nil }), countTask); err != nil {
 			return err
 		}
 		if err := commit.MoveTo(ctx); err != nil {
@@ -362,9 +345,6 @@ func TestScheduleBeforeEntry_SkippingTheFanOutDiscardsTheWork(t *testing.T) {
 	}
 	if got := ran.Load(); got != 0 {
 		t.Fatalf("%d discarded callbacks ran", got)
-	}
-	if got := pulled.Load(); got != 0 {
-		t.Fatalf("the discarded generator was pulled")
 	}
 }
 

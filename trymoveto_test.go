@@ -137,7 +137,7 @@ func TestTryMoveToFanOutDeclinedLeavesItemInPlace(t *testing.T) {
 	}
 }
 
-// TestTryMoveToThenWaitOnEntry: a non-blocking entry followed by Wave.Wait is the old "TryMoveTo with joins": once
+// TestTryMoveToThenWaitOnEntry: a non-blocking entry followed by TaskGroup.Wait is the old "TryMoveTo with joins": once
 // the item is in, the wait for the named work happens inside the target, and by the time it returns the work is done.
 func TestTryMoveToThenWaitOnEntry(t *testing.T) {
 	t.Parallel()
@@ -150,7 +150,7 @@ func TestTryMoveToThenWaitOnEntry(t *testing.T) {
 		if err := first.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := first.RetainFor(ctx, func() error {
+		w := first.RetainFor(ctx, func(context.Context) error {
 			bgDone.Store(true)
 			return nil
 		})
@@ -165,7 +165,7 @@ func TestTryMoveToThenWaitOnEntry(t *testing.T) {
 			return err
 		}
 		if !bgDone.Load() {
-			t.Error("Wait returned before the wave had finished")
+			t.Error("Wait returned before the task group had finished")
 		}
 		return nil
 	})
@@ -174,9 +174,10 @@ func TestTryMoveToThenWaitOnEntry(t *testing.T) {
 	}
 }
 
-// TestTryMoveToEnteredThenWaitFails: the entry and the wait are two results. The item DID enter (so the previous node
-// is released and the stage is spent) and the Wait that follows reports the wave's error, named after the retained
-// stage. The processor sees a clean (true, nil) entry and a separate failure, not one mixed answer.
+// TestTryMoveToEnteredThenWaitFails: the entry and the wait are two results. A failed RetainFor task does not cancel
+// the item, so the item DOES enter (the previous node is released and the stage is spent), and the Wait that follows
+// reports the task group's error as a TaskError named after the retained stage. The processor sees a clean (true, nil)
+// entry and a separate failure, not one mixed answer.
 func TestTryMoveToEnteredThenWaitFails(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
@@ -184,46 +185,38 @@ func TestTryMoveToEnteredThenWaitFails(t *testing.T) {
 	first := c.AddStage(OptName("first"))
 	second := c.AddStage(OptName("second"))
 
-	inSecond := make(chan struct{})
 	err := runOnce(t, c, func(ctx context.Context) error {
 		if err := first.MoveTo(ctx); err != nil {
 			return err
 		}
-		// The bgOp fails only once the item is inside `second`, so the entry is decided before the item is poisoned:
-		// had it failed earlier, the cancellation check would decline the move instead and entered would be false.
-		w := first.RetainFor(ctx, func() error {
-			<-inSecond
-			return boom
-		})
-		go func() {
-			waitFor(t, "the item to enter second", func() bool { return occupancyOf(c, second) == 1 })
-			close(inSecond)
-		}()
+		w := first.RetainFor(ctx, func(context.Context) error { return boom })
+		<-w.Finished() // the task has failed before the move is tried
 
 		entered, err := second.TryMoveTo(ctx)
 		if !entered || err != nil {
-			t.Errorf("TryMoveTo = (%v, %v), want (true, nil): the stage was free and the item was not yet poisoned",
+			t.Errorf("TryMoveTo = (%v, %v), want (true, nil): the stage was free and a task error does not cancel the item",
 				entered, err)
 		}
-		if err := w.Wait(ctx); !errors.Is(err, boom) {
-			t.Errorf("Wait = %v, want the wave's %v", err, boom)
-		} else if !strings.HasPrefix(err.Error(), "first work: ") {
+		var te TaskError
+		if err := w.Wait(ctx); !errors.As(err, &te) || te.Unwrap() != boom || te.Unit() != Unit(first) {
+			t.Errorf("Wait = %v, want a TaskError of %s with %v", err, first, boom)
+		} else if !strings.HasPrefix(err.Error(), "first task: ") {
 			t.Errorf("Wait = %q, want it named after the retained stage", err)
 		}
 		if occ := occupancyOf(c, first); occ != 0 {
 			t.Errorf("first occupancy = %d, want 0 — entering second released it", occ)
 		}
-		return nil
+		return nil // the error was joined: dropping it keeps the item OK
 	})
-	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, boom) {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
 	}
 }
 
-// TestTryMoveToFanOutThenWaitFailsPoisonsBody: a fan-out entered and then a failing Wait leaves the item inside the
-// node with an open, empty body — the node is entered but its rank is never published. The wave's error poisons the
-// item, so a following Schedule returns the cause and the tasks never run.
-func TestTryMoveToFanOutThenWaitFailsPoisonsBody(t *testing.T) {
+// TestTryMoveToFanOutThenWaitFailsKeepsBodyOpen: a fan-out entered and then a failing Wait on an earlier RetainFor
+// task group leaves the item inside the node with an open body that still works. The RetainFor error belongs to its own
+// task group: it does not cancel the item or the new body, so a following Schedule is accepted and its tasks run.
+func TestTryMoveToFanOutThenWaitFailsKeepsBodyOpen(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
 	c := NewConveyor()
@@ -232,19 +225,12 @@ func TestTryMoveToFanOutThenWaitFailsPoisonsBody(t *testing.T) {
 	pool := fan.AddPool(OptName("pool"))
 
 	var ran atomic.Int64
-	inFan := make(chan struct{})
 	err := runOnce(t, c, func(ctx context.Context) error {
 		if err := first.MoveTo(ctx); err != nil {
 			return err
 		}
-		w := first.RetainFor(ctx, func() error {
-			<-inFan
-			return boom
-		})
-		go func() {
-			waitFor(t, "the item to enter the fan-out", func() bool { return occupancyOf(c, fan) == 1 })
-			close(inFan)
-		}()
+		w := first.RetainFor(ctx, func(context.Context) error { return boom })
+		<-w.Finished()
 
 		tasks := []Task{pool.NewTask(func(context.Context) error {
 			ran.Add(1)
@@ -252,21 +238,24 @@ func TestTryMoveToFanOutThenWaitFailsPoisonsBody(t *testing.T) {
 		})}
 		entered, err := fan.TryMoveTo(ctx)
 		if !entered || err != nil {
-			t.Errorf("TryMoveTo = (%v, %v), want (true, nil): the fan-out was free and the item was not yet poisoned",
+			t.Errorf("TryMoveTo = (%v, %v), want (true, nil): the fan-out was free and a task error does not cancel the item",
 				entered, err)
 		}
 		if err := w.Wait(ctx); !errors.Is(err, boom) {
-			t.Errorf("Wait = %v, want the wave's %v", err, boom)
+			t.Errorf("Wait = %v, want the task group's %v", err, boom)
 		}
-		if err := fan.Schedule(ctx, tasks...); !errors.Is(err, boom) {
-			t.Errorf("Schedule after the failed wait = %v, want the item's cause %v", err, boom)
+		if err := fan.Schedule(ctx, tasks...); err != nil {
+			t.Errorf("Schedule after the failed wait = %v, want nil: the body is not affected", err)
+		}
+		if err := fan.Wait(ctx); err != nil {
+			t.Errorf("fan-out Wait = %v, want nil", err)
 		}
 		return nil
 	})
-	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, boom) {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
 	}
-	if got := ran.Load(); got != 0 {
-		t.Fatalf("%d tasks ran, want 0 — the failed wave poisoned the item before anything was scheduled", got)
+	if got := ran.Load(); got != 1 {
+		t.Fatalf("%d tasks ran, want 1 — the body must take work after the RetainFor failure", got)
 	}
 }

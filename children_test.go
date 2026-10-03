@@ -109,7 +109,7 @@ func TestChildReleasesLaneEntranceOnFirstMove(t *testing.T) {
 		}
 		w := fo.Retain(ctx)
 		<-w.Finished()
-		return w.Err()
+		return groupErr(w)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -276,7 +276,7 @@ func TestChildCannotMoveIntoASiblingLane(t *testing.T) {
 	}
 }
 
-// TestChildErrorFailsItemAndRun: a child's error escalates through the wave to its item and then to the run.
+// TestChildErrorFailsItemAndRun: a child's error escalates through the task group to its item and then to the run.
 func TestChildErrorFailsItemAndRun(t *testing.T) {
 	boom := errors.New("child boom")
 	c := NewConveyor()
@@ -361,7 +361,7 @@ func TestChildSeesParentCancellation(t *testing.T) {
 		}
 		w := fo.Retain(ic)
 		<-w.Finished()
-		return w.Err()
+		return groupErr(w)
 	})
 
 	<-released
@@ -463,7 +463,7 @@ func TestChildCannotMoveOutsideItsLane(t *testing.T) {
 		}
 		w := fo.Retain(ctx)
 		<-w.Finished()
-		return w.Err()
+		return groupErr(w)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -527,7 +527,7 @@ func TestNonTravellingWorkCannotMove(t *testing.T) {
 		}
 		w := fo.Retain(ctx)
 		<-w.Finished()
-		return w.Err()
+		return groupErr(w)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -565,7 +565,7 @@ func TestNestedFanOutInsideLane(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				if err := after.MoveTo(cctx); err != nil { // joins the nested wave
+				if err := after.MoveTo(cctx); err != nil { // joins the nested task group
 					return err
 				}
 				afterRuns.Add(1)
@@ -586,8 +586,8 @@ func TestNestedFanOutInsideLane(t *testing.T) {
 	}
 }
 
-// TestNestedWaveErrorFailsEverything: an error deep inside a lane's own fan-out reaches the run.
-func TestNestedWaveErrorFailsEverything(t *testing.T) {
+// TestNestedTaskGroupErrorFailsEverything: an error deep inside a lane's own fan-out reaches the run.
+func TestNestedTaskGroupErrorFailsEverything(t *testing.T) {
 	boom := errors.New("nested boom")
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("outer"))
@@ -628,7 +628,7 @@ func TestNestedWaveErrorFailsEverything(t *testing.T) {
 		t.Fatalf("Run error = %v, want %v", err, boom)
 	}
 	if afterRan.Load() {
-		t.Fatalf("the child continued past a failed nested wave")
+		t.Fatalf("the child continued past a failed nested task group")
 	}
 }
 
@@ -670,43 +670,6 @@ func TestInteriorStageWithQueue(t *testing.T) {
 	}
 	if got := done.Load(); got < 15 {
 		t.Fatalf("%d children finished, want >= 15", got)
-	}
-}
-
-// TestStreamingChildren: a lane with interior nodes can be fed by a streaming source too.
-func TestStreamingChildren(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	lane := fo.AddLane(OptName("lane"))
-	mid := lane.AddStage(OptName("mid"))
-	commit := c.AddStage(OptName("commit"))
-
-	var ran atomic.Int64
-	runNOK(t, c, 3, func(ctx context.Context, no int64) error {
-		err := fo.MoveTo(ctx)
-		if err == nil {
-			err = fo.Schedule(ctx, lane.NewTasksGen(func(yield func(TaskFunc) bool) {
-				for i := 0; i < 4; i++ {
-					if !yield(func(cctx context.Context) error {
-						if err := mid.MoveTo(cctx); err != nil {
-							return err
-						}
-						ran.Add(1)
-						return nil
-					}) {
-						return
-					}
-				}
-			}))
-		}
-		if err != nil {
-			return err
-		}
-		return commit.MoveTo(ctx)
-	})
-
-	if got := ran.Load(); got < 12 {
-		t.Fatalf("%d streamed children ran, want >= 12", got)
 	}
 }
 

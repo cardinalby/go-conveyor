@@ -270,7 +270,7 @@ func assertPanics(t *testing.T, want error, fn func()) {
 
 // recoveredErr runs fn and returns the error it panicked with, or nil if it did not panic. Unlike assertPanics it
 // asserts nothing, which is what makes it safe on a worker goroutine: assertPanics reports a mismatch with Fatalf,
-// and Fatalf off the test goroutine calls runtime.Goexit — so the task would never return, its wave would never
+// and Fatalf off the test goroutine calls runtime.Goexit — so the task would never return, its task group would never
 // settle, and the run would hang instead of failing. Capture the panic here and assert on the test goroutine.
 func recoveredErr(fn func()) (err error) {
 	defer func() {
@@ -376,7 +376,7 @@ func queueOccupancy(c Conveyor, u Unit) int {
 
 // branchScope reports a branch's own scope id. Branch is an interface, so this reaches through to the implementation — which
 // only an in-package test can do, and which is the point: the scope is internal bookkeeping, not API.
-func branchScope(b Branch) int { return b.(*branch).series.id }
+func branchScope(b Branch) int { return branchOf(b).series.id }
 
 // runAsync runs c on its own goroutine and returns the cancel of its Run context and a channel with Run's result.
 func runAsync(c Conveyor, proc ItemProcessor) (context.CancelCauseFunc, <-chan error) {
@@ -430,4 +430,26 @@ func signal(ch chan struct{}) { close(ch) }
 func itemNo(ctx context.Context) int64 {
 	no, _ := ItemNoFromContext(ctx)
 	return no
+}
+
+// branchOf returns the implementation behind a Pool or Lane handle.
+func branchOf(b Branch) *branch {
+	switch h := b.(type) {
+	case *poolHandle:
+		return h.b
+	case *laneHandle:
+		return h.b
+	}
+	panic(fmt.Sprintf("unknown branch handle %T", b))
+}
+
+// groupErr reads w's recorded outcome without joining it (white-box; the API has no getter).
+func groupErr(w TaskGroup) error {
+	g := w.(*taskGroup)
+	if g.run == nil {
+		return g.err
+	}
+	g.run.mu.Lock()
+	defer g.run.mu.Unlock()
+	return g.err
 }

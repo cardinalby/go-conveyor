@@ -72,7 +72,7 @@ func TestCompletionSealsBusyBodyAndJoinsTheTree(t *testing.T) {
 
 // TestCompletionWithErrorStopsTheSpawningTree: the processor returns an error while its tree still spawns. The run
 // ends with that error, Schedule from the running task returns it as the cause, and the queued spawn is dropped —
-// recorded on the wave as the reason its work did not run.
+// recorded on the task group as the reason its work did not run.
 func TestCompletionWithErrorStopsTheSpawningTree(t *testing.T) {
 	boom := errors.New("boom")
 	for _, retain := range []bool{false, true} {
@@ -88,7 +88,7 @@ func TestCompletionWithErrorStopsTheSpawningTree(t *testing.T) {
 			running := make(chan struct{})
 			var bRan atomic.Int64
 			var schedErr error // set by task A before it returns; read once Run is over
-			var w Wave
+			var w TaskGroup
 			err := runOnce(t, c, func(ctx context.Context) error {
 				if err := fo.MoveTo(ctx); err != nil {
 					return err
@@ -125,25 +125,27 @@ func TestCompletionWithErrorStopsTheSpawningTree(t *testing.T) {
 				t.Errorf("the queued task ran although its item was canceled")
 			}
 			if retain {
-				if werr := w.Err(); !errors.Is(werr, boom) {
-					t.Errorf("wave error = %v, want the cause %v recorded for the dropped work", werr, boom)
+				if werr := groupErr(w); !errors.Is(werr, boom) {
+					t.Errorf("task group error = %v, want the cause %v recorded for the dropped work", werr, boom)
 				}
 			}
 		})
 	}
 }
 
-// TestCompletionShutdownErrorYieldsToUnobservedWaveError: a processor that returns a ShutdownError does not hide a
-// real failure of its work — the unobserved wave error becomes the item's error, here the first failure of the drain.
-func TestCompletionShutdownErrorYieldsToUnobservedWaveError(t *testing.T) {
+// TestCompletionShutdownErrorYieldsToUnobservedTaskGroupError: a processor that returns a ShutdownError does not hide a
+// real failure of its work — the unobserved task group error becomes the item's error, here the first failure of the
+// drain.
+func TestCompletionShutdownErrorYieldsToUnobservedTaskGroupError(t *testing.T) {
 	boom := errors.New("boom")
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
+	pool := fo.AddPool(OptName("pool")).SetLimit(2)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	failTask := make(chan struct{})
+	bodyCanceled := make(chan error, 1)
 	var once atomic.Bool
 	err := c.Run(ctx, func(ic context.Context) error {
 		if !once.CompareAndSwap(false, true) {
@@ -153,34 +155,48 @@ func TestCompletionShutdownErrorYieldsToUnobservedWaveError(t *testing.T) {
 		if err := fo.MoveTo(ic); err != nil {
 			return err
 		}
-		err := fo.Schedule(ic, pool.NewTask(func(context.Context) error {
-			<-failTask
-			return boom // the item is alive: a real failure
-		}))
+		err := fo.Schedule(ic,
+			pool.NewTask(func(context.Context) error {
+				<-failTask
+				return boom // the item is alive: a real failure
+			}),
+			pool.NewTask(func(tctx context.Context) error {
+				<-tctx.Done() // canceled by the sibling's failure
+				bodyCanceled <- context.Cause(tctx)
+				return nil
+			}),
+		)
 		if err != nil {
 			return err
 		}
 		cancel()
 		<-pre.Done()
 		close(failTask)
-		<-ic.Done() // canceled by the task failure
-		if cause := context.Cause(ic); !errors.Is(cause, boom) {
-			t.Errorf("item cancellation cause = %v, want %v", cause, boom)
+		if cause := <-bodyCanceled; !errors.Is(cause, boom) {
+			t.Errorf("body cancellation cause = %v, want %v", cause, boom)
+		}
+		if cause := context.Cause(ic); cause != nil {
+			t.Errorf("item canceled with %v; a task failure must not cancel the item", cause)
 		}
 		return context.Cause(pre) // a ShutdownError
 	})
 
 	if !runFailedWith(err, boom) {
-		t.Fatalf("Run = %v, want the wave's unobserved error %v", err, boom)
+		t.Fatalf("Run = %v, want the task group's unobserved error %v", err, boom)
 	}
 	var ie ItemError
-	if !errors.As(err.(RunError).DrainError(), &ie) || ie.Unwrap() != boom {
-		t.Fatalf("DrainError = %v, want an ItemError with %v", err.(RunError).DrainError(), boom)
+	if !errors.As(err.(RunError).DrainError(), &ie) {
+		t.Fatalf("DrainError = %v, want an ItemError", err.(RunError).DrainError())
+	}
+	var te TaskError
+	if !errors.As(ie.Unwrap(), &te) || te.Unwrap() != boom || te.Unit() != pool {
+		t.Fatalf("ItemError.Unwrap() = %v, want a TaskError of %s with %v", ie.Unwrap(), pool, boom)
 	}
 }
 
 // TestShutdownWhileBlockedInWaitDropsQueuedSpawns: a shutdown wakes an item blocked in Wait with the shutdown cause.
-// The body stays open, the running task finishes, and the queued work is dropped with the cause recorded on the wave.
+// The body stays open, the running task finishes, and the queued work is dropped with the cause recorded on the task
+// group.
 func TestShutdownWhileBlockedInWaitDropsQueuedSpawns(t *testing.T) {
 	cause := errors.New("stop now")
 	c := NewConveyor(OptDrainTimeout(0))
@@ -222,7 +238,7 @@ func TestShutdownWhileBlockedInWaitDropsQueuedSpawns(t *testing.T) {
 		assertShutdownCause(t, "Wait during shutdown", werr, cause)
 		w := fo.Retain(ic) // the body is still open after Wait returned
 		<-w.Finished()
-		assertShutdownCause(t, "the wave of the dropped work", w.Err(), cause)
+		assertShutdownCause(t, "the task group of the dropped work", groupErr(w), cause)
 		return werr
 	})
 
@@ -237,63 +253,57 @@ func TestShutdownWhileBlockedInWaitDropsQueuedSpawns(t *testing.T) {
 	}
 }
 
-// TestCompletionAbandonmentDoesNotHideALaterTaskError: a failed RetainFor cancels the item; a channel source's pull
-// ends first and records the abandonment on the wave; then the running task fails for real. The real failure is the
-// wave's error, not the cancellation cause it happened to follow. (After a cancellation by the conveyor, a task error
-// is an abort instead.)
+// TestCompletionAbandonmentDoesNotHideALaterTaskError: the processor retains its body and returns an error, which
+// cancels the item; a task queued behind a busy pool is dropped first and records the abandonment on the task group;
+// then the running task fails for real. The real failure is the task group's error, not the cancellation cause it
+// happened to follow. (After a cancellation by the conveyor, a task error is an abort instead.)
 func TestCompletionAbandonmentDoesNotHideALaterTaskError(t *testing.T) {
 	boom := errors.New("boom")
-	errRetain := errors.New("retained work failed")
+	errProc := errors.New("processor failed")
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	work := fo.AddPool(OptName("work"))
 	feed := fo.AddPool(OptName("feed"))
 
-	never := make(chan TaskFunc) // nobody feeds it: the pull ends only with the item's cancellation
-	failRetain := make(chan struct{})
-	taskDone := make(chan struct{})
+	groups := make(chan TaskGroup, 1)
+	workStarted := make(chan struct{})
+	feedStarted := make(chan struct{})
 	err := runFirstItem(t, c, func(ic context.Context) error {
-		c.StartingStage().RetainFor(ic, func() error {
-			<-failRetain
-			return errRetain
-		})
 		if err := fo.MoveTo(ic); err != nil {
 			return err
 		}
-		it := itemOf(ic)
-		waveErr := func() error {
-			it.run.mu.Lock()
-			defer it.run.mu.Unlock()
-			return it.pending.err
-		}
 		err := fo.Schedule(ic,
 			work.NewTask(func(tctx context.Context) error {
-				defer close(taskDone)
+				close(workStarted)
 				<-tctx.Done()
-				waitFor(t, "the abandoned pull to be recorded on the wave", func() bool { return waveErr() != nil })
+				w := <-groups
+				groups <- w
+				waitFor(t, "the dropped task to be recorded on the task group", func() bool { return groupErr(w) != nil })
 				return boom
 			}),
-			feed.NewTasksChan(never),
+			// feed has limit 1: the first task holds it until the cancellation, then the second one is dropped.
+			feed.NewTask(func(tctx context.Context) error {
+				close(feedStarted)
+				<-tctx.Done()
+				return nil
+			}),
+			feed.NewTask(func(context.Context) error { return nil }),
 		)
 		if err != nil {
 			return err
 		}
-		close(failRetain)
-		<-ic.Done()
-		<-taskDone
-		// The task callback has returned; wait until runWork has also reported its error to the wave.
-		waitFor(t, "the task's error to be recorded on the wave", func() bool {
-			it.run.mu.Lock()
-			defer it.run.mu.Unlock()
-			return it.pending.running == 0
-		})
-		if cause := context.Cause(ic); cause != errRetain {
-			t.Errorf("item cancellation cause = %v, want %v", cause, errRetain)
-		}
-		return waveErr()
+		<-workStarted
+		<-feedStarted
+		groups <- fo.Retain(ic)
+		return errProc
 	})
 
-	if !errors.Is(err, boom) {
-		t.Fatalf("Run = %v, want the task's own error %v", err, boom)
+	if !errors.Is(err, errProc) {
+		t.Fatalf("Run = %v, want the processor's error %v", err, errProc)
+	}
+	w := <-groups
+	var te TaskError
+	if got := groupErr(w); !errors.As(got, &te) || te.Unwrap() != boom || te.Unit() != work {
+		t.Fatalf("task group error = %v, want a TaskError of %s with the task's own error %v", got, work, boom)
 	}
 }

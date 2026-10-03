@@ -35,7 +35,7 @@ type run struct {
 	nextItemNo int64 // last number assigned to a root item this run; a child inherits its parent's (see item.no)
 	nextSeq    int64 // last creation sequence number handed to any item of this run, root or child (see item.seq)
 	idle       int   // workers parked in acquireItem waiting for the start stage (0 or 1; extras retire)
-	parked     int   // callers blocked in waitUntil (a node method or Wave.Wait); read by tests to sync on a wait
+	parked     int   // callers blocked in waitUntil (a node method or TaskGroup.Wait); read by tests to sync on a wait
 	// spawning counts workers that have been started but have not yet reached acquireItem. Together with idle it
 	// answers "is a worker already on its way to take the next item", which is what the replacement decision in
 	// acquireItem needs. Counting only idle would ignore a worker that exists but has not been scheduled yet, so a
@@ -74,15 +74,20 @@ type run struct {
 // are allowed to finish. An item aborted during the shutdown cancels all younger items too. Use UntilShutdown for the
 // part of the path that should stop at once when shutdown begins.
 //
-// Cancellation is judged by the item's own context. Once it is canceled (a failed task or RetainFor, a shutdown), every
-// node method returns the cause, even when called with a context that hides the cancellation
-// (context.WithoutCancel). A derived context with its own deadline still works. Code that must run after
+// A task error does not cancel the item: the join that reports it (TaskGroup.Wait, FanOut.Wait, or the MoveTo that
+// leaves a fan-out) returns a TaskError, and the processor decides. Return it, or any error, to fail the item; return
+// nil to go on, e.g. after sending the message to a dead-letter queue. An error of tasks the processor never joined
+// fails the item when the processor returns.
+//
+// Cancellation is judged by the item's own context. Once it is canceled (a shutdown, or for a lane child the failure
+// of its fan-out body), every node method returns the cause, even when called with a context that hides the
+// cancellation (context.WithoutCancel). A derived context with its own deadline still works. Code that must run after
 // cancellation can still run in plain Go once the node method has returned; it just cannot run inside a node.
 type ItemProcessor func(ctx context.Context) error
 
 // Run drives items through the conveyor until ctx is canceled or an item fails (see the Conveyor interface).
 func (c *conveyor) Run(ctx context.Context, itemProcessor ItemProcessor) error {
-	r, err := c.tryRun(itemProcessor)
+	r, err := c.tryRun(ctx, itemProcessor)
 	if err != nil {
 		return err
 	}
@@ -106,8 +111,9 @@ func (c *conveyor) Run(ctx context.Context, itemProcessor ItemProcessor) error {
 	return r.result(ctx)
 }
 
-// result builds the error Run returns from the trigger of the shutdown and the drain outcome. The trigger decides the kind: an ItemError when an item failed first, else a ShutdownError with
-// the Run context's cause. It is nil if the Run context was never canceled and nothing failed.
+// result builds the error Run returns from the trigger of the shutdown and the drain outcome. The trigger decides the
+// kind: an ItemError when an item failed first, else a ShutdownError with the Run context's cause. It is nil if the
+// Run context was never canceled and nothing failed.
 func (r *run) result(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -125,8 +131,9 @@ func (r *run) result(ctx context.Context) error {
 	return &shutdownError{cause: cause, drain: r.drainErr}
 }
 
-// tryRun creates the run and publishes it as currentRun, under runMu.
-func (c *conveyor) tryRun(itemProcessor ItemProcessor) (*run, error) {
+// tryRun creates the run and publishes it as currentRun, under runMu. Item contexts carry ctx's values but not its
+// cancellation: the caller's cancellation begins a graceful shutdown instead (see watchShutdown).
+func (c *conveyor) tryRun(ctx context.Context, itemProcessor ItemProcessor) (*run, error) {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
 	if c.isRunning {
@@ -136,7 +143,7 @@ func (c *conveyor) tryRun(itemProcessor ItemProcessor) (*run, error) {
 	c.isRunning = true
 	r := c.newRun()
 	r.proc = itemProcessor
-	r.itemsCtx, r.cancelItems = context.WithCancelCause(context.Background())
+	r.itemsCtx, r.cancelItems = context.WithCancelCause(context.WithoutCancel(ctx))
 	r.shutdownCtx, r.cancelShutdown = context.WithCancelCause(context.Background())
 	c.currentRun.Store(r)
 	return r, nil
@@ -155,13 +162,18 @@ func (c *conveyor) stopRun() {
 // done. No func, or a nil context from it, leaves the items to finish on their own.
 //
 // It exits early (without touching in-flight items, and without asking the func) if the run drains before any
-// shutdown, which the closing of stopWatch signals.
+// shutdown, which the closing of stopWatch signals. Once a shutdown has begun the func is always asked, even when the
+// run has drained meanwhile.
 func (r *run) watchShutdown(ctx context.Context, stopWatch <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
 
 	select {
 	case <-stopWatch:
-		return // run finished without a shutdown; nothing to do
+		select {
+		case <-r.shutdownCh: // both were ready: an item error began the shutdown before the run drained
+		default:
+			return // run finished without a shutdown; nothing to do
+		}
 	case <-ctx.Done():
 		r.beginShutdown(context.Cause(ctx))
 	case <-r.shutdownCh:
@@ -331,17 +343,14 @@ func (r *run) acquireItem(arrived bool) *item {
 }
 
 // completeItem runs after an item's processor returns — for a root item's ItemProcessor and for a child item's
-// ItemFunc alike. It joins the item's outstanding background work, computes the item's effective error, releases
-// its slots, cancels its context and wakes waiters.
+// callback alike. It decides the item's outcome, joins the item's outstanding background work, releases its slots,
+// cancels its context and wakes waiters.
 //
-// The effective error is the processor's own error, else the first error from a wave whose outcome nobody observed
-// (see Wave). Where it goes depends on the kind of item:
-//   - a child reports it to the wave that created it, which cancels its parent (fail-fast) and surfaces there;
-//   - a root item's real (non-shutdown) error triggers error-shutdown: record the first error, stop creating, and
-//     cancel every later item so they abort while earlier items keep finishing; after the trigger, the first such
-//     error is the drain error;
-//   - a root item's abort during a shutdown cancels every later item too (the abort cascade), so no later item
-//     gets past it.
+// The item's error is the processor's own error, else the first error of a task group the processor did not join (see
+// taskGroup.joined). It is final from here on — nobody can join a task group for the item any more — so a failure
+// counts now, not once the join below is over (see itemFailed), and so does a failure of unjoined work while the join
+// is running (see taskGroup.recordErr). An abort of a root item during a shutdown cancels every later item too (the
+// abort cascade), so no later item gets past it.
 func (r *run) completeItem(it *item, procErr error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -349,19 +358,17 @@ func (r *run) completeItem(it *item, procErr error) {
 	it.returned = true
 	r.dropDormant(it, math.MaxInt) // work prepared for a fan-out never entered: nothing waits for it
 
-	// Any processor error, an abort too, cancels the item's own still-running background work; a nil return lets it
-	// finish (a live task owns its slot and cannot be force-freed).
-	if procErr != nil {
-		it.poison(procErr)
+	// A root processor's error, an abort too, cancels the item's own still-running background work; a nil return lets
+	// it finish. A child's failure cancels its body, and with it the child's own work, in itemFailed.
+	if procErr != nil && it.cancel != nil {
+		it.cancel(procErr)
 	}
-	// A root failure after the trigger is the drain error from now on, not only once the join below is over: a drain
-	// timeout during the join must not take its place.
-	if it.parentWave == nil && procErr != nil && !isShutdown(procErr) && r.trigger != nil && r.drainErr == nil {
-		r.drainErr = &itemError{unit: r.itemUnit(it), err: procErr}
-	}
+	// Called now for its effects only: a failure is reported and an abort cascades without waiting for the join. The
+	// outcome may still change during the join, so it is taken from the second call below.
+	_ = r.settleOutcome(it, procErr)
+	r.cond.Broadcast()
 	// An open fan-out body is sealed: the processor's path into it is over, and an idle body finishes only once
-	// sealed, so the wait below would otherwise never end. It still grows from its own running work; an error of it
-	// nobody observed fails the item below.
+	// sealed, so the wait below would otherwise never end. It still grows from its own running work.
 	if w := it.pending; w != nil {
 		it.sealBody(w, bodyClosed)
 		// Sealing may have ended an upstream hold (see dischargeHold) and freed a slot upstream waiters are parked on;
@@ -369,41 +376,68 @@ func (r *run) completeItem(it *item, procErr error) {
 		r.cond.Broadcast()
 	}
 	// Join all outstanding background work before releasing slots.
-	for it.hasLiveWaves() {
+	for it.hasLiveTaskGroups() {
 		r.cond.Wait()
 	}
 
-	effErr := procErr
-	isShutdownErr := isShutdown(effErr)
-	if effErr == nil || isShutdownErr {
-		if e := it.firstUnackedWaveErr(); e != nil {
-			effErr = e
-			isShutdownErr = isShutdown(effErr)
-		}
-	}
-	if it.parentWave == nil && effErr != nil && !isShutdownErr {
-		ie := &itemError{unit: r.itemUnit(it), err: effErr}
-		if r.trigger != nil && r.drainErr == nil {
-			r.drainErr = ie // the shutdown began earlier; this is the first failure of the drain
-		}
-		// Cancel every later item immediately (error semantics), with the trigger as the shutdown cause: this error,
-		// or the earlier event that began the shutdown. Earlier items are left to finish, bounded by the drain timeout
-		// via the watcher that markShutdownLocked wakes.
-		r.markShutdownLocked(ie)
-		r.cancelLater(it)
-	} else if it.parentWave == nil && isShutdownErr && r.shutdownErr != nil {
-		// The abort cascade: a younger item must not finish past an aborted one. Before finishItem, so no younger
-		// item can pass it through the ordering gate first.
-		r.cancelLater(it)
-	}
+	// Work that failed during the join has reported itself already; an abort found only now still cascades. Before
+	// finishItem, so no younger item can pass this one through the ordering gate first.
+	effErr := r.settleOutcome(it, procErr)
 	r.finishItem(it)
 	if it.cancel != nil {
-		it.cancel(nil) // release the context; a child has none of its own (it shares its parent's)
+		it.cancel(nil) // release the context; a child has none of its own (it shares its body's)
 	}
-	if it.parentWave != nil {
-		// Report the child's outcome to the wave that scheduled it — after its slots are freed, so a parent
-		// joining the wave sees the branch already released.
-		it.parentWave.workDone(effErr)
+	if it.parentGroup != nil {
+		// Report the child's outcome to the task group that scheduled it — after its slots are freed, so a parent
+		// joining the task group sees the branch already released.
+		it.parentGroup.workDone(effErr, it.lane.start)
 	}
 	r.cond.Broadcast()
+}
+
+// settleOutcome computes the outcome of an item whose processor returned procErr — that error if it is a real
+// failure, else the first error of a task group the processor did not join, else procErr (nil or an abort) — and acts
+// on it: a failure is reported (itemFailed, once), and a root item's abort during a shutdown cancels every later item
+// (the abort cascade). Idempotent. Caller holds mu and must broadcast.
+func (r *run) settleOutcome(it *item, procErr error) error {
+	err := procErr
+	if err == nil || isShutdown(err) {
+		if e := it.firstUnjoinedErr(); e != nil {
+			err = e
+		}
+	}
+	if err != nil && !isShutdown(err) {
+		r.itemFailed(it, err)
+	} else if it.parentGroup == nil && err != nil && r.shutdownErr != nil {
+		r.cancelLater(it)
+	}
+	return err
+}
+
+// itemFailed reports the final failure of an item, once. A root item's failure goes to the run (failRoot); a child's
+// fails the body that created it, which cancels the body's other work and becomes its outcome. Caller holds mu and
+// must broadcast.
+func (r *run) itemFailed(it *item, err error) {
+	if it.failReported {
+		return
+	}
+	it.failReported = true
+	if it.parentGroup == nil {
+		r.failRoot(it, err)
+		return
+	}
+	it.parentGroup.recordErr(err, it.lane.start)
+}
+
+// failRoot handles the real error of a root item: the first one is the trigger of the shutdown, a later one the first
+// failure of the drain. It cancels every later item at once (error semantics), with the trigger as the shutdown
+// cause. Earlier items are left to finish, bounded by the drain timeout via the watcher that markShutdownLocked
+// wakes. Caller holds mu and must broadcast.
+func (r *run) failRoot(it *item, err error) {
+	ie := &itemError{unit: r.itemUnit(it), err: err}
+	if r.trigger != nil && r.drainErr == nil {
+		r.drainErr = ie
+	}
+	r.markShutdownLocked(ie)
+	r.cancelLater(it)
 }

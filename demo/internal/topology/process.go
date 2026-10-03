@@ -484,9 +484,10 @@ func (f *Failures) FailItem(itemNo int64) {
 	f.broadcastLocked()
 }
 
-// FailTask requests that itemNo's task on lane laneID fail. That error poisons the owning item fail-fast (see Wave),
-// so its processor aborts too and the run ends up in the same error-shutdown; the only difference from FailItem is
-// where the error originates, which is the interesting part to watch for a fan-out.
+// FailTask requests that itemNo's task on lane laneID fail. That error stops the item's other tasks at the fan-out and
+// comes back from the MoveTo that leaves it as a TaskError; the processor returns it, so the run ends up in the same
+// error-shutdown. The only difference from FailItem is where the error originates, which is the interesting part to
+// watch for a fan-out.
 func (f *Failures) FailTask(laneID string, itemNo int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -758,7 +759,7 @@ func runNodes(
 				releaseThis()
 				return err
 			}
-			// A MoveTo error is the item's cancellation cause, the same thing a failed Schedule would have reported.
+			// A MoveTo error is the item's cancellation cause or the TaskError of the fan-out it leaves.
 			if err := fo.MoveTo(ctx); err != nil {
 				release()
 				releaseThis()

@@ -9,7 +9,7 @@ import (
 )
 
 // This file pins the package's error contract: which misuses panic with a sentinel, and which runtime conditions
-// are returned (or carried by a Wave).
+// are returned (or carried by a TaskGroup).
 
 // panicsInItem runs one item through c and asserts that misuse, called with the item's context, panics with want.
 // It is the shape most panic tests need: no setup moves, one misused call.
@@ -114,24 +114,23 @@ func TestErrForeignContextFromFanOutMoveTo(t *testing.T) {
 	}
 }
 
-// TestErrForeignContextFromRetain: Retain has no error to return, so it hands back a wave that is born finished
+// TestErrForeignContextFromRetain: Retain has no error to return, so it hands back a task group that is born finished
 // carrying ErrForeignContext, and it does not run the bgOp.
 func TestErrForeignContextFromRetain(t *testing.T) {
 	c := NewConveyor()
 	s := c.AddStage(OptName("s"))
 
 	var ran atomic.Bool
-	w := s.RetainFor(context.Background(), func() error {
+	w := s.RetainFor(context.Background(), func(context.Context) error {
 		ran.Store(true)
 		return nil
 	})
 	if w == nil {
-		t.Fatalf("Retain returned a nil Wave")
+		t.Fatalf("Retain returned a nil TaskGroup")
 	}
-	<-w.Started()
 	<-w.Finished()
-	if !errors.Is(w.Err(), ErrForeignContext) || !errors.Is(w.Err(), ErrInvalidContext) {
-		t.Fatalf("wave error = %v, want ErrForeignContext", w.Err())
+	if !errors.Is(groupErr(w), ErrForeignContext) || !errors.Is(groupErr(w), ErrInvalidContext) {
+		t.Fatalf("task group error = %v, want ErrForeignContext", groupErr(w))
 	}
 	if ran.Load() {
 		t.Fatalf("bgOp ran although the context was foreign")
@@ -181,10 +180,10 @@ func TestErrStaleContextFromFinishedItem(t *testing.T) {
 			if err := fo.Wait(stale); !errors.Is(err, ErrStaleContext) {
 				t.Errorf("FanOut.Wait with a stale context = %v, want ErrStaleContext", err)
 			}
-			rw := s.RetainFor(stale, func() error { return nil })
+			rw := s.RetainFor(stale, func(context.Context) error { return nil })
 			<-rw.Finished()
-			if !errors.Is(rw.Err(), ErrStaleContext) {
-				t.Errorf("Retain wave error = %v, want ErrStaleContext", rw.Err())
+			if !errors.Is(groupErr(rw), ErrStaleContext) {
+				t.Errorf("Retain task group error = %v, want ErrStaleContext", groupErr(rw))
 			}
 			checked.Store(true)
 			return nil
@@ -312,9 +311,9 @@ func TestShutdownErrorFromItemError(t *testing.T) {
 	}
 }
 
-// TestWaveErrorSurfacesFromJoinAndFromErr: a wave's error reaches the item through Wave.Wait and through Wave.Err,
-// and from there it fails the run.
-func TestWaveErrorSurfacesFromJoinAndFromErr(t *testing.T) {
+// TestTaskGroupErrorSurfacesFromJoinAndFromErr: a task group's error reaches the item through TaskGroup.Wait and
+// through TaskGroup.Err, and from there it fails the run.
+func TestTaskGroupErrorSurfacesFromJoinAndFromErr(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
@@ -331,7 +330,7 @@ func TestWaveErrorSurfacesFromJoinAndFromErr(t *testing.T) {
 		}
 		w := fo.Retain(ctx)
 		// The task may fail before or after this move: the move then returns the poison, or nil. Either way the
-		// wave's own error is what Wait reports once the wave is finished.
+		// task group's own error is what Wait reports once the task group is finished.
 		if err := commit.MoveTo(ctx); err != nil && !errors.Is(err, boom) {
 			t.Errorf("MoveTo = %v, want nil or the task error as the cause", err)
 		}
@@ -341,8 +340,8 @@ func TestWaveErrorSurfacesFromJoinAndFromErr(t *testing.T) {
 			t.Errorf("Wait error = %v, want the task error", joinErr)
 		}
 		<-w.Finished()
-		if !errors.Is(w.Err(), boom) {
-			t.Errorf("Wave.Err() = %v, want the task error", w.Err())
+		if !errors.Is(groupErr(w), boom) {
+			t.Errorf("TaskGroup.Err() = %v, want the task error", groupErr(w))
 		}
 		return joinErr
 	})
@@ -449,7 +448,7 @@ func TestErrNodeAlreadyEnteredFanOut(t *testing.T) {
 		})
 		checked.Store(true)
 		<-w.Finished()
-		return w.Err()
+		return groupErr(w)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -547,59 +546,6 @@ func TestErrNilTaskFuncEagerConstructors(t *testing.T) {
 	_ = pool.NewTasks(0, nil)
 }
 
-// TestErrNilTaskFuncFromGeneratorFailsItem: a generator that yields a nil callback misuses the API on an internal
-// goroutine, so it fails the item (fail-fast) instead of panicking there.
-func TestErrNilTaskFuncFromGeneratorFailsItem(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-
-	runErr := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx)
-		if err == nil {
-			err = fo.Schedule(ctx, pool.NewTasksGen(func(yield func(TaskFunc) bool) {
-				yield(nil)
-			}))
-		}
-		if err != nil {
-			return err
-		}
-		w := fo.Retain(ctx)
-		<-w.Finished()
-		return w.Err()
-	})
-	if !errors.Is(runErr, errNilTaskFunc) {
-		t.Fatalf("Run = %v, want an error matching the nil-callback sentinel", runErr)
-	}
-}
-
-// TestErrNilTaskFuncFromChannelFailsItem: the same for a nil callback sent on a task channel.
-func TestErrNilTaskFuncFromChannelFailsItem(t *testing.T) {
-	c := NewConveyor()
-	fo := c.AddFanOut(OptName("fo"))
-	pool := fo.AddPool(OptName("pool"))
-
-	ch := make(chan TaskFunc, 1)
-	ch <- nil
-	close(ch)
-
-	runErr := runOnce(t, c, func(ctx context.Context) error {
-		err := fo.MoveTo(ctx)
-		if err == nil {
-			err = fo.Schedule(ctx, pool.NewTasksChan(ch))
-		}
-		if err != nil {
-			return err
-		}
-		w := fo.Retain(ctx)
-		<-w.Finished()
-		return w.Err()
-	})
-	if !errors.Is(runErr, errNilTaskFunc) {
-		t.Fatalf("Run = %v, want an error matching the nil-callback sentinel", runErr)
-	}
-}
-
 // TestErrStageNotEnteredOnUnenteredStage: Retain hands over the slot the item holds in the stage, so retaining a
 // stage the item never entered is meaningless.
 func TestErrStageNotEnteredOnUnenteredStage(t *testing.T) {
@@ -607,7 +553,7 @@ func TestErrStageNotEnteredOnUnenteredStage(t *testing.T) {
 	s := c.AddStage(OptName("s"))
 
 	panicsInItem(t, c, errStageNotEntered, func(ctx context.Context) {
-		_ = s.RetainFor(ctx, func() error { return nil })
+		_ = s.RetainFor(ctx, func(context.Context) error { return nil })
 	})
 }
 
@@ -636,7 +582,7 @@ func TestErrStageNotEnteredAfterLeaving(t *testing.T) {
 				_ = fo.Schedule(ctx, pool.NewTask(func(context.Context) error { return nil }))
 			})
 			assertPanics(t, errBodyClosed, func() { _ = fo.Wait(ctx) })
-			_ = first.RetainFor(ctx, func() error { return nil })
+			_ = first.RetainFor(ctx, func(context.Context) error { return nil })
 		})
 	})
 	t.Run("retain", func(t *testing.T) {
@@ -682,7 +628,7 @@ func TestErrWrongScopeChildMovingToConveyorNode(t *testing.T) {
 		}
 		w := fo.Retain(ctx)
 		<-w.Finished()
-		return w.Err()
+		return groupErr(w)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -716,7 +662,7 @@ func TestErrWrongScopeIsCheckedOnEveryEntryPoint(t *testing.T) {
 		{"Stage.MoveTo", func(s Stage, _ FanOut, _ Branch, ctx context.Context) { _ = s.MoveTo(ctx) }},
 		{"Stage.TryMoveTo", func(s Stage, _ FanOut, _ Branch, ctx context.Context) { _, _ = s.TryMoveTo(ctx) }},
 		{"Stage.Retain", func(s Stage, _ FanOut, _ Branch, ctx context.Context) {
-			_ = s.RetainFor(ctx, func() error { return nil })
+			_ = s.RetainFor(ctx, func(context.Context) error { return nil })
 		}},
 		{"FanOut.MoveTo", func(_ Stage, f FanOut, b Branch, ctx context.Context) {
 			_ = f.MoveTo(ctx)
@@ -763,7 +709,7 @@ func TestErrCannotMoveFromNonTravellingWork(t *testing.T) {
 			err = fo.Schedule(ctx, pool.NewTask(func(cctx context.Context) error {
 				assertPanics(t, errCannotMove, func() { _ = commit.MoveTo(cctx) })
 				assertPanics(t, errCannotMove, func() { _, _ = commit.TryMoveTo(cctx) })
-				assertPanics(t, errCannotMove, func() { _ = commit.RetainFor(cctx, func() error { return nil }) })
+				assertPanics(t, errCannotMove, func() { _ = commit.RetainFor(cctx, func(context.Context) error { return nil }) })
 				assertPanics(t, errCannotMove, func() { _ = fo.Wait(cctx) })
 				if err := fo.Schedule(cctx, pool.NewTask(func(context.Context) error {
 					spawned.Store(true)
@@ -780,7 +726,7 @@ func TestErrCannotMoveFromNonTravellingWork(t *testing.T) {
 		}
 		w := fo.Retain(ctx)
 		<-w.Finished()
-		return w.Err()
+		return groupErr(w)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
@@ -793,15 +739,15 @@ func TestErrCannotMoveFromNonTravellingWork(t *testing.T) {
 	}
 }
 
-// TestErrForeignWaveFromAnotherItem: a wave is only meaningful to the item that created it, so joining another
-// item's wave is misuse.
-func TestErrForeignWaveFromAnotherItem(t *testing.T) {
+// TestErrForeignTaskGroupFromAnotherItem: a task group is only meaningful to the item that created it, so joining
+// another item's task group is misuse.
+func TestErrForeignTaskGroupFromAnotherItem(t *testing.T) {
 	c := NewConveyor()
 	fo := c.AddFanOut(OptName("fo"))
 	pool := fo.AddPool(OptName("pool"))
 	commit := c.AddStage(OptName("commit"))
 
-	waves := make(chan Wave, 1)
+	groups := make(chan TaskGroup, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	var checked atomic.Bool
@@ -818,12 +764,12 @@ func TestErrForeignWaveFromAnotherItem(t *testing.T) {
 				return err
 			}
 			w := fo.Retain(ic)
-			waves <- w
+			groups <- w
 			return commit.MoveTo(ic)
 		case 2:
 			defer cancel()
-			foreign := <-waves
-			assertPanics(t, errForeignWave, func() { _ = foreign.Wait(ic) })
+			foreign := <-groups
+			assertPanics(t, errForeignTaskGroup, func() { _ = foreign.Wait(ic) })
 			checked.Store(true)
 			return nil
 		default:
@@ -834,15 +780,15 @@ func TestErrForeignWaveFromAnotherItem(t *testing.T) {
 		t.Fatalf("run failed: %v", runErr)
 	}
 	if !checked.Load() {
-		t.Fatalf("the foreign-wave check did not run")
+		t.Fatalf("the foreign-task-group check did not run")
 	}
 }
 
-// TestErrForeignWaveFromNilWave: Wait on a nil *wave is caught by the same check (a nil Wave interface value cannot
-// be: there is nothing to dispatch on).
-func TestErrForeignWaveFromNilWave(t *testing.T) {
-	var w *wave
-	assertPanics(t, errForeignWave, func() { _ = w.Wait(context.Background()) })
+// TestErrForeignTaskGroupFromNilTaskGroup: Wait on a nil *taskGroup is caught by the same check (a nil TaskGroup
+// interface value cannot be: there is nothing to dispatch on).
+func TestErrForeignTaskGroupFromNilTaskGroup(t *testing.T) {
+	var w *taskGroup
+	assertPanics(t, errForeignTaskGroup, func() { _ = w.Wait(context.Background()) })
 }
 
 // TestErrConveyorRunningOnTopologyChange: the topology may not be extended while the conveyor is running.

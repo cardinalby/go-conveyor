@@ -183,7 +183,7 @@ func TestPositionalNamesInStats(t *testing.T) {
 		w := fo.Retain(ctx)
 		got = c.Stats()
 		<-w.Finished()
-		return w.Err()
+		return groupErr(w)
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run failed: %v", err)
